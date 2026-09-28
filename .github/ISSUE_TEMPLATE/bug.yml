@@ -1,0 +1,55 @@
+name: Bug report
+description: Something the kernel or the tooling does wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A kernel bug is reproducible or it is a guess. The fields below are the
+        ones that let somebody else reproduce it — the boot line and the serial
+        log answer most questions by themselves.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected and what you got instead. Exact messages, not paraphrases.
+    validations: {required: true}
+  - type: input
+    id: cmdline
+    attributes:
+      label: Boot line
+      description: The whole `-append` / user-data line, knobs included.
+      placeholder: console=ttyS0 talaria.mode=cell talaria.smp=4 ...
+    validations: {required: true}
+  - type: input
+    id: where
+    attributes:
+      label: Where it runs
+      description: QEMU on which host CPU, or the EC2 instance type; how many cores and how much memory.
+      placeholder: QEMU microvm, -cpu host (i7-3820), smp=2, 512M — or c6i.large
+    validations: {required: true}
+  - type: textarea
+    id: serial
+    attributes:
+      label: Serial log
+      description: |
+        The kernel's output — the whole boot if it is short, otherwise the part
+        around the failure plus the `stat:` block. On EC2 the console often does
+        not carry COM1: use `talaria.trace=<LBA>` and
+        `infra/aws/read-disk-trace.sh` (the instance must be deployed with
+        `--keep-disk`).
+      render: text
+    validations: {required: true}
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Output of `git describe --always --dirty`.
+    validations: {required: true}
+  - type: checkboxes
+    id: gate
+    attributes:
+      label: The local gate
+      options:
+        - label: "`kernel/test.sh` is green on this tree (or the failure IS a gate: say which)"
+        - label: "`cd kernel-unit && cargo test` is green"

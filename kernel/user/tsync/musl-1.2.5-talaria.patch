@@ -1,0 +1,107 @@
+diff -ruN musl-1.2.5/src/internal/pthread_impl.h musl-tal/src/internal/pthread_impl.h
+--- musl-1.2.5/src/internal/pthread_impl.h	2024-03-01 05:07:33.000000000 +0300
++++ musl-tal/src/internal/pthread_impl.h	2026-08-23 18:03:21.380760458 +0300
+@@ -172,9 +172,14 @@
+ 	__syscall(SYS_futex, addr, FUTEX_WAKE|priv, cnt) != -ENOSYS ||
+ 	__syscall(SYS_futex, addr, FUTEX_WAKE, cnt);
+ }
++hidden int __tal_uwait_ok(void);
++hidden void __tal_uwait1(volatile int *, int);
+ static inline void __futexwait(volatile void *addr, int val, int priv)
+ {
+ 	if (priv) priv = FUTEX_PRIVATE;
++	while (*(volatile int *)addr == val && __tal_uwait_ok())
++		__tal_uwait1((volatile int *)addr, val);
++	if (*(volatile int *)addr != val) return;
+ 	__syscall(SYS_futex, addr, FUTEX_WAIT|priv, val, 0) != -ENOSYS ||
+ 	__syscall(SYS_futex, addr, FUTEX_WAIT, val, 0);
+ }
+diff -ruN musl-1.2.5/src/thread/talaria_uwait.c musl-tal/src/thread/talaria_uwait.c
+--- musl-1.2.5/src/thread/talaria_uwait.c	1970-01-01 03:00:00.000000000 +0300
++++ musl-tal/src/thread/talaria_uwait.c	2026-08-23 18:03:21.218759322 +0300
+@@ -0,0 +1,41 @@
++/* Talaria PLAN-SYNC (the tier 1): a user-mode monitor-wait for musl's futex paths.
++ * With WAITPKG (umonitor/umwait, Intel) or MONITORX (monitorx/mwaitx, AMD) the waiting
++ * for a change of the word goes in ring 3 without a syscall: the sleeper arms the monitor
++ * on the word, the waker wakes it by the write itself (its FUTEX_WAKE becomes an insurance).
++ * Without the extensions it is 0, and the futex remains (Talaria's kernel sleeps with an mwait on the word). */
++#include <stdint.h>
++
++static volatile int __tal_tier = -1;
++
++static void __tal_detect(void)
++{
++	unsigned a, b, c, d;
++	__asm__ volatile ("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(7), "c"(0));
++	if (c & (1u<<5)) { __tal_tier = 1; return; }
++	__asm__ volatile ("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000001u), "c"(0));
++	__tal_tier = (c & (1u<<29)) ? 2 : 0;
++}
++
++int __tal_uwait_ok(void)
++{
++	if (__tal_tier < 0) __tal_detect();
++	return __tal_tier;
++}
++
++/* One quantum of sleep (~150 us) until a write into the word/an interrupt. The arm/check
++ * race is closed by the order: the monitor -> a recheck -> the sleep. */
++void __tal_uwait1(volatile int *addr, int val)
++{
++	if (__tal_tier == 1) {
++		unsigned lo, hi;
++		__asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
++		uint64_t dl = ((uint64_t)hi<<32 | lo) + 500000;
++		__asm__ volatile ("umonitor %0" :: "r"(addr));
++		if (*addr != val) return;
++		__asm__ volatile ("umwait %0" :: "r"(0u), "a"((unsigned)dl), "d"((unsigned)(dl>>32)) : "cc");
++	} else {
++		__asm__ volatile ("monitorx" :: "a"(addr), "c"(0), "d"(0));
++		if (*addr != val) return;
++		__asm__ volatile ("mwaitx" :: "a"(0xF0u), "c"(0x2u), "b"(500000u));
++	}
++}
+diff -ruN musl-1.2.5/src/thread/__timedwait.c musl-tal/src/thread/__timedwait.c
+--- musl-1.2.5/src/thread/__timedwait.c	2024-03-01 05:07:33.000000000 +0300
++++ musl-tal/src/thread/__timedwait.c	2026-08-23 18:03:41.987905004 +0300
+@@ -26,6 +26,9 @@
+ 	return __syscall_cp(SYS_futex, addr, op & ~FUTEX_PRIVATE, val, to);
+ }
+ 
++hidden int __tal_uwait_ok(void);
++hidden void __tal_uwait1(volatile int *, int);
++
+ static volatile int dummy = 0;
+ weak_alias(dummy, __eintr_valid_flag);
+ 
+@@ -49,6 +52,10 @@
+ 		top = &to;
+ 	}
+ 
++	if (!top && __tal_uwait_ok()) {
++		while (*addr==val) __tal_uwait1(addr, val);
++		return 0;
++	}
+ 	r = -__futex4_cp(addr, FUTEX_WAIT|priv, val, top);
+ 	if (r != EINTR && r != ETIMEDOUT && r != ECANCELED) r = 0;
+ 	/* Mitigate bug in old kernels wrongly reporting EINTR for non-
+diff -ruN musl-1.2.5/src/thread/__wait.c musl-tal/src/thread/__wait.c
+--- musl-1.2.5/src/thread/__wait.c	2024-03-01 05:07:33.000000000 +0300
++++ musl-tal/src/thread/__wait.c	2026-08-23 18:03:21.340760177 +0300
+@@ -1,5 +1,8 @@
+ #include "pthread_impl.h"
+ 
++hidden int __tal_uwait_ok(void);
++hidden void __tal_uwait1(volatile int *, int);
++
+ void __wait(volatile int *addr, volatile int *waiters, int val, int priv)
+ {
+ 	int spins=100;
+@@ -10,6 +13,7 @@
+ 	}
+ 	if (waiters) a_inc(waiters);
+ 	while (*addr==val) {
++		if (__tal_uwait_ok()) { __tal_uwait1(addr, val); continue; }
+ 		__syscall(SYS_futex, addr, FUTEX_WAIT|priv, val, 0) != -ENOSYS
+ 		|| __syscall(SYS_futex, addr, FUTEX_WAIT, val, 0);
+ 	}

@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""talaria-file — upload and download files to a Talaria node over TCP.
+
+The client half of the `filed` service (kernel/src/filed.rs). It does what rsync
+exists for: it DOES NOT SEND what the node already has.
+
+  * before an upload it asks STAT: if size and CRC32 match, the file is not
+    sent at all ("identical" is printed);
+  * otherwise it asks SUMS — per-block CRC32; local blocks are compared with the
+    remote ones, ONLY the differing ones go over the network (PATCH), and the tail is cut
+    (TRUNC).
+
+There is no rolling window (as in real rsync): for binaries and configs that are
+rewritten whole, block-by-block comparison is enough, and an insertion with a
+shift is still caught as "everything differs from here on" — worse, but correct.
+
+Examples:
+    talaria-file 10.0.0.2 ls /
+    talaria-file 10.0.0.2 push ./cell /cell
+    talaria-file 10.0.0.2 pull /var/trace.log ./trace.log
+    talaria-file 10.0.0.2 sync ./dist /app
+    talaria-file 10.0.0.2:7373 rm /old.bin
+"""
+import argparse
+import os
+import socket
+import sys
+import zlib
+
+DEFAULT_PORT = 7373
+DEFAULT_BLOCK = 65536
+
+
+class Filed:
+    def __init__(self, host, port, token, timeout=20.0):
+        self.s = socket.create_connection((host, port), timeout=timeout)
+        self.s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.buf = b""
+        self.cmd("HELLO")           # banner: let a "wrong port" error surface early
+        r = self.cmd("AUTH " + token)
+        if not r.startswith("OK"):
+            raise SystemExit("filed: authentication rejected (%s)" % r)
+
+    # ── transport ──────────────────────────────────────────────────────────
+    def _line(self):
+        while b"\n" not in self.buf:
+            d = self.s.recv(65536)
+            if not d:
+                raise SystemExit("filed: connection closed by the node")
+            self.buf += d
+        i = self.buf.index(b"\n")
+        line, self.buf = self.buf[:i], self.buf[i + 1:]
+        return line.decode("utf-8", "replace").rstrip("\r")
+
+    def _exact(self, n):
+        while len(self.buf) < n:
+            d = self.s.recv(min(1 << 20, n - len(self.buf)))
+            if not d:
+                raise SystemExit("filed: transfer cut off (got %d of %d)" % (len(self.buf), n))
+            self.buf += d
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def send(self, data):
+        self.s.sendall(data)
+
+    def cmd(self, line):
+        self.send((line + "\n").encode())
+        return self._line()
+
+    def close(self):
+        try:
+            self.cmd("QUIT")
+        except Exception:
+            pass
+        self.s.close()
+
+    # ── operations ─────────────────────────────────────────────────────────
+    def ls(self, path):
+        r = self.cmd("LIST " + path)
+        if not r.startswith("OK"):
+            raise SystemExit("filed: " + r)
+        n = int(r.split()[1])
+        out = []
+        for _ in range(n):
+            t, size, mtime, name = self._line().split(" ", 3)
+            out.append((t, int(size), int(mtime), name))
+        return out
+
+    def stat(self, path):
+        r = self.cmd("STAT " + path)
+        if not r.startswith("OK"):
+            return None
+        _, size, mtime, crc = r.split()
+        return int(size), int(mtime), int(crc)
+
+    def sums(self, path, block):
+        r = self.cmd("SUMS %s %d" % (path, block))
+        if not r.startswith("OK"):
+            return None
+        _, nb, bs = r.split()
+        nb, bs = int(nb), int(bs)
+        out = []
+        for _ in range(nb):
+            idx, crc = self._line().split()
+            out.append(int(crc))
+        return bs, out
+
+    def get(self, path):
+        r = self.cmd("GET " + path)
+        if not r.startswith("OK"):
+            raise SystemExit("filed: " + r)
+        _, size, crc = r.split()
+        data = self._exact(int(size))
+        if (zlib.crc32(data) & 0xFFFFFFFF) != int(crc):
+            raise SystemExit("filed: CRC mismatch — the file was corrupted in transit")
+        return data
+
+    def put(self, path, data):
+        r = self.cmd("PUT %s %d" % (path, len(data)))
+        if r != "GO":
+            raise SystemExit("filed: " + r)
+        self.send(data)
+        r = self._line()
+        if not r.startswith("OK"):
+            raise SystemExit("filed: " + r)
+        got = int(r.split()[1])
+        if got != (zlib.crc32(data) & 0xFFFFFFFF):
+            raise SystemExit("filed: the node computed a different CRC — the data did not match")
+
+    def patch(self, path, off, data):
+        r = self.cmd("PATCH %s %d %d" % (path, off, len(data)))
+        if r != "GO":
+            raise SystemExit("filed: " + r)
+        self.send(data)
+        r = self._line()
+        if not r.startswith("OK"):
+            raise SystemExit("filed: " + r)
+
+    def simple(self, line):
+        r = self.cmd(line)
+        if not r.startswith("OK"):
+            raise SystemExit("filed: " + r)
+        return r
+
+
+# ── commands ───────────────────────────────────────────────────────────────
+def do_push(c, local, remote, block, quiet=False):
+    with open(local, "rb") as f:
+        data = f.read()
+    local_crc = zlib.crc32(data) & 0xFFFFFFFF
+    st = c.stat(remote)
+    if st and st[0] == len(data) and st[2] == local_crc:
+        if not quiet:
+            print("%s -> %s: identical, not sent (%d B)" % (local, remote, len(data)))
+        return 0
+    if not st:
+        c.put(remote, data)
+        if not quiet:
+            print("%s -> %s: uploaded whole (%d B)" % (local, remote, len(data)))
+        return len(data)
+    # delta: compare block by block and send only the differences
+    su = c.sums(remote, block)
+    if not su:
+        c.put(remote, data)
+        return len(data)
+    bs, rcrcs = su
+    sent = 0
+    nblocks = (len(data) + bs - 1) // bs
+    for i in range(nblocks):
+        chunk = data[i * bs:(i + 1) * bs]
+        mine = zlib.crc32(chunk) & 0xFFFFFFFF
+        if i < len(rcrcs) and rcrcs[i] == mine:
+            continue
+        c.patch(remote, i * bs, chunk)
+        sent += len(chunk)
+    c.simple("TRUNC %s %d" % (remote, len(data)))
+    st2 = c.stat(remote)
+    if not st2 or st2[2] != local_crc:
+        # the delta did not converge (the file changed under us) — honestly re-upload it whole
+        c.put(remote, data)
+        sent = len(data)
+    if not quiet:
+        pct = 100 * sent // max(len(data), 1)
+        print("%s -> %s: sent %d of %d B (%d%%), block %d" % (local, remote, sent, len(data), pct, bs))
+    return sent
+
+
+def do_pull(c, remote, local):
+    data = c.get(remote)
+    if local == "-":
+        sys.stdout.buffer.write(data)
+    else:
+        with open(local, "wb") as f:
+            f.write(data)
+        print("%s -> %s: received %d B" % (remote, local, len(data)))
+
+
+def do_sync(c, localdir, remotedir, block):
+    total = 0
+    files = 0
+    for root, dirs, names in os.walk(localdir):
+        rel = os.path.relpath(root, localdir)
+        rdir = remotedir if rel == "." else remotedir.rstrip("/") + "/" + rel.replace(os.sep, "/")
+        c.simple("MKDIR " + rdir)
+        for n in sorted(names):
+            lp = os.path.join(root, n)
+            rp = rdir.rstrip("/") + "/" + n
+            total += do_push(c, lp, rp, block)
+            files += 1
+    c.simple("SYNC")
+    print("sync: %d files, %d B sent over the network" % (files, total))
+
+
+def main():
+    ap = argparse.ArgumentParser(description="upload/download files to a Talaria node (the filed service)")
+    ap.add_argument("host", help="node address, host:port allowed (default port %d)" % DEFAULT_PORT)
+    ap.add_argument("cmd", choices=["ls", "push", "pull", "rm", "mkdir", "mv", "stat", "sync"])
+    ap.add_argument("args", nargs="*")
+    # There is NO DEFAULT token — just as on the node side. This used to be
+    # "talaria-secret", i.e. a client from an open-source repository knew the
+    # password of every node where nobody had changed it.
+    ap.add_argument("--token", default=os.environ.get("TALARIA_TOKEN"),
+                    help="filed token (or the TALARIA_TOKEN environment variable); "
+                         "the same as talaria.filedtoken= at node boot")
+    ap.add_argument("--block", type=int, default=DEFAULT_BLOCK, help="block size for block-by-block comparison")
+    a = ap.parse_args()
+
+    if not a.token:
+        sys.exit("a token is needed: --token <secret> or TALARIA_TOKEN=<secret> "
+                 "(the same as given to the node in talaria.filedtoken=)")
+
+    host, _, ps = a.host.partition(":")
+    port = int(ps) if ps else DEFAULT_PORT
+    c = Filed(host, port, a.token)
+    try:
+        if a.cmd == "ls":
+            path = a.args[0] if a.args else "/"
+            for t, size, mtime, name in c.ls(path):
+                print("%s %10d  %s%s" % ("d" if t == "d" else "-", size, name, "/" if t == "d" else ""))
+        elif a.cmd == "stat":
+            st = c.stat(a.args[0])
+            print("no such file" if not st else "size %d, mtime %d, crc32 %08x" % (st[0], st[1], st[2]))
+        elif a.cmd == "push":
+            do_push(c, a.args[0], a.args[1], a.block)
+        elif a.cmd == "pull":
+            do_pull(c, a.args[0], a.args[1] if len(a.args) > 1 else os.path.basename(a.args[0]))
+        elif a.cmd == "rm":
+            c.simple("DEL " + a.args[0]); print("removed " + a.args[0])
+        elif a.cmd == "mkdir":
+            c.simple("MKDIR " + a.args[0]); print("created " + a.args[0])
+        elif a.cmd == "mv":
+            c.simple("MOVE %s %s" % (a.args[0], a.args[1])); print("%s -> %s" % (a.args[0], a.args[1]))
+        elif a.cmd == "sync":
+            do_sync(c, a.args[0], a.args[1], a.block)
+    finally:
+        c.close()
+
+
+if __name__ == "__main__":
+    main()

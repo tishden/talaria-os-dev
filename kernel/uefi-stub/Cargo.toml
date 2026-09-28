@@ -1,0 +1,21 @@
+[package]
+name = "talaria-uefi-stub"
+version = "0.1.0"
+edition = "2021"
+
+# The Talaria UEFI loader: a PE application without dependencies that
+# carries the kernel ELF inside (include_bytes) and, after ExitBootServices,
+# hands control to the kernel's existing PVH entry. Build: build.sh (target
+# x86_64-unknown-uefi, the same pinned nightly).
+
+[[bin]]
+name = "talaria-uefi-stub"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

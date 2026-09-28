@@ -1,0 +1,63 @@
+---
+# m5zn stand: core isolation + CAT benchmark (isolcpus tail plateau, LLC partitioning).
+- hosts: stand
+  become: true
+  gather_facts: false
+  vars:
+    isol: "8,9,10"
+  tasks:
+    - name: Wait for SSH (metal boots slowly)
+      wait_for_connection: { timeout: 900, sleep: 15 }
+    - name: Gather facts
+      setup:
+    - name: Packages
+      dnf: { name: [kmod, util-linux-core], state: present }
+    - name: Current cmdline
+      command: cat /proc/cmdline
+      register: cmdline
+      changed_when: false
+    - name: Isolate cores (grubby) + no mitigations
+      command: >
+        grubby --update-kernel=ALL --args="isolcpus={{ isol }} nohz_full={{ isol }}
+        rcu_nocbs={{ isol }} mitigations=off"
+      when: "'isolcpus' not in cmdline.stdout"
+    - name: Reboot into isolated kernel
+      reboot: { reboot_timeout: 1500 }
+      when: "'isolcpus' not in cmdline.stdout"
+    - name: Verify isolation
+      command: cat /sys/devices/system/cpu/isolated
+      register: iso
+      changed_when: false
+    - name: Isolated cpus
+      debug: { msg: "isolated: {{ iso.stdout }}" }
+    - name: CPU / L3 / CAT probe
+      shell: |
+        lscpu | grep -E 'Model name|^CPU\(s\)|L3'
+        grep -o 'cat_l3\|cdp_l3\|mba' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+      register: probe
+      changed_when: false
+    - name: Probe result
+      debug: { msg: "{{ probe.stdout_lines }}" }
+    - name: Ensure workdir
+      file: { path: /opt/talaria, state: directory, mode: "0755" }
+    - name: Upload synth binary
+      copy:
+        src: "{{ playbook_dir }}/../../bench/synth/target/x86_64-unknown-linux-musl/release/talaria-synth"
+        dest: /opt/talaria/synth
+        mode: "0755"
+    - name: Upload cat_bench
+      copy:
+        src: "{{ playbook_dir }}/../../bench/cat_bench.sh"
+        dest: /opt/talaria/cat_bench.sh
+        mode: "0755"
+    - name: Run CAT/isolation bench
+      shell: SYNTH=/opt/talaria/synth LAT=8 HOG=9 NONISO=0 /opt/talaria/cat_bench.sh > /opt/talaria/cat_results.txt 2>&1
+      changed_when: true
+    - name: Results
+      command: cat /opt/talaria/cat_results.txt
+      register: res
+      changed_when: false
+    - name: Print results
+      debug: { msg: "{{ res.stdout_lines }}" }
+    - name: Fetch results
+      fetch: { src: /opt/talaria/cat_results.txt, dest: "{{ playbook_dir }}/../../build/cat_results.txt", flat: true }

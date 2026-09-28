@@ -1,0 +1,5 @@
+# MariaDB 10.11 on Talaria: a thread per connection, InnoDB on ext2.
+binary=/opt/mariadb/bin/mariadbd
+args=mariadbd --defaults-file=/etc/my.cnf
+env=HOME=/
+env=PATH=/opt/mariadb/bin

@@ -1,0 +1,311 @@
+---
+# Preparing the Linux side of the stand: the tools, the low-latency tuning,
+# the layout of the workload and the generator.
+#
+# The comparison discipline: Linux is tuned AS MUCH AS POSSIBLE for low
+# latency — otherwise the comparison would be against an untuned system, and any win of
+# Talaria's would be explained by the operator's laziness. Everything done is listed explicitly and
+# goes into the report: every knob must be explainable.
+#
+#   ansible-playbook -i inventory.ini stand.yml
+- hosts: linux_stand
+  become: true
+  gather_facts: true
+
+  vars:
+    # The data-plane cores: isolation is set by a kernel parameter, so it needs
+    # a reboot (see the "grub" task). The first two cores are left to the system.
+    dp_cores: "2-{{ ansible_processor_vcpus - 1 }}"
+    housekeeping_cores: "0-1"
+    # The workload's root on the Linux side (see the "the workload tree into its own root" task).
+    wl_root: /opt/tlbench/root
+
+  tasks:
+    - name: Measurement and build tools
+      ansible.builtin.dnf:
+        name:
+          - perf                # hardware and syscall counters
+          - sysstat             # pidstat/mpstat for watching the stand
+          - tuned               # the latency-performance profile
+          - numactl
+          - ethtool
+          - bcc-tools
+          - git
+          - gcc
+        state: present
+      failed_when: false        # some packages may be missing on AL2023
+
+    - name: The tuned latency-performance profile
+      ansible.builtin.command: tuned-adm profile latency-performance
+      register: tuned_out
+      changed_when: "'already' not in tuned_out.stdout | default('')"
+      failed_when: false
+
+    # ── Kernel parameters: core isolation, tickless operation, mitigations off.
+    # The mitigations are disabled DELIBERATELY and this goes into the report: it is expensive for
+    # security, but it is the best Linux can show on latency, and the comparison
+    # must be against the best.
+    # `isolcpus` goes ONLY TO THE GENERATOR. It removes cores from the scheduler's
+    # balancing, and a multithreaded server on them LIVES ON ONE CORE: for
+    # mariadbd all 15 threads sat on vCPU 3 (`ps -L -o psr`), vCPU 2 was 100 %
+    # idle, core 3 spent 70 % sys on switches; at 14 thousand req/s p99.9 was 34 ms,
+    # at 39 thousand it was 600 req/s and "OVERLOAD" (batch 4, mysql). A comparison with
+    # Talaria on four cores would be unfair IN OUR favour. The tlgen generator has
+    # one thread, for it the isolation is an instrument. The server keeps nohz_full and
+    # rcu_nocbs (the tick goes away, the balancing does not) and the unit's CPUAffinity.
+    - name: Kernel parameters for low latency
+      ansible.builtin.command: >-
+        grubby --update-kernel=ALL --args="{{ 'isolcpus=' ~ dp_cores if role == 'loadgen' else '' }}
+        nohz_full={{ dp_cores }} rcu_nocbs={{ dp_cores }} rcu_nocb_poll
+        intel_idle.max_cstate=0 processor.max_cstate=1 idle=poll
+        intel_pstate=disable nosoftlockup mce=ignore_ce audit=0
+        mitigations=off tsc=reliable clocksource=tsc nmi_watchdog=0
+        transparent_hugepage=never skew_tick=1"
+      register: grubby
+      changed_when: true
+      notify: reboot
+
+    - name: The server — WITHOUT isolcpus in the cmdline (otherwise the workload sits on one core)
+      ansible.builtin.shell: "! grubby --info=ALL | grep -q isolcpus"
+      changed_when: false
+      when: role == "server"
+
+    - name: Network and scheduler sysctls
+      ansible.posix.sysctl:
+        name: "{{ item.k }}"
+        value: "{{ item.v }}"
+        sysctl_set: true
+        state: present
+        reload: true
+      loop:
+        - { k: net.core.busy_poll,             v: "50" }
+        - { k: net.core.busy_read,             v: "50" }
+        - { k: net.core.somaxconn,             v: "16384" }
+        - { k: net.core.netdev_max_backlog,    v: "16384" }
+        - { k: net.ipv4.tcp_syncookies,        v: "0" }
+        - { k: net.ipv4.tcp_fastopen,          v: "3" }
+        - { k: net.ipv4.tcp_timestamps,        v: "1" }
+        - { k: net.ipv4.tcp_rmem,              v: "4096 262144 16777216" }
+        - { k: net.ipv4.tcp_wmem,              v: "4096 262144 16777216" }
+        - { k: kernel.sched_rt_runtime_us,     v: "-1" }
+        - { k: kernel.numa_balancing,          v: "0" }
+        - { k: vm.swappiness,                  v: "0" }
+        - { k: kernel.perf_event_paranoid,     v: "-1" }
+        - { k: kernel.nmi_watchdog,            v: "0" }
+      failed_when: false
+
+    - name: The NIC's interrupts go to the housekeeping cores
+      ansible.builtin.shell: |
+        set -e
+        systemctl stop irqbalance 2>/dev/null || true
+        systemctl disable irqbalance 2>/dev/null || true
+        for irq in $(grep -l . /proc/irq/*/smp_affinity_list 2>/dev/null); do
+          echo {{ housekeeping_cores }} > "$irq" 2>/dev/null || true
+        done
+      changed_when: true
+
+    - name: ENA queues and coalescing (latency matters more than packets per interrupt)
+      ansible.builtin.shell: |
+        set -e
+        IF=$(ip -o -4 route show default | awk '{print $5}' | head -1)
+        ethtool -C "$IF" adaptive-rx off rx-usecs 0 tx-usecs 0 2>/dev/null || true
+        ethtool -G "$IF" rx 1024 tx 1024 2>/dev/null || true
+        ethtool -K "$IF" gro off lro off 2>/dev/null || true
+        echo "interface $IF configured"
+      register: ena
+      changed_when: true
+
+    - name: The stand's directory
+      ansible.builtin.file:
+        path: /opt/tlbench
+        state: directory
+        mode: "0755"
+
+    - name: The load generator and the workload tree
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dst }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: "files/tlgen",     dst: "/opt/tlbench/tlgen",     mode: "0755" }
+        - { src: "files/statd.sh",  dst: "/opt/tlbench/statd.sh",  mode: "0755" }
+
+    # The tree goes INTO A ROOT rather than into /opt: on Talaria the workload lives at
+    # absolute paths of the image (/nginx, /pgdata, /data), and if on Linux the same
+    # files ended up under another prefix, the sides would diverge in configs and
+    # arguments. The stand's instance is disposable, cluttering its root is no loss.
+    # THE WORKLOAD TREE GOES INTO A SEPARATE ROOT, NOT INTO THE HOST'S ROOT.
+    #
+    # It used to be unpacked straight into `/`, "so that the paths match the Talaria
+    # image". The paths did match — and so did the host's fate. The tree is built for an
+    # IMAGE, where it is the whole root, and it carries Alpine/musl system files
+    # inside. On a real Linux host that killed it
+    # TWICE, and both times not where it was looked for:
+    #
+    #  1. `etc/passwd`, `etc/group`, `etc/nsswitch.conf` replaced the host's ones.
+    #     `ec2-user` disappeared, `wheel` disappeared, and `nsswitch.conf` was left
+    #     without a `passwd:` line at all — the host stopped resolving ANY
+    #     user. It looked like two unrelated breakages: ansible
+    #     said "Missing sudo password", ssh said `kex_exchange_identification:
+    #     Connection closed`, and the console showed a healthy machine.
+    #  2. `usr/lib/libssl.so.1.1` and `libcrypto.so.1.1` from Alpine shadowed the
+    #     system ones, and the host's python died with
+    #     `ImportError: libc.musl-x86_64.so.1`. That is, ansible broke too,
+    #     since it needs that python on the target machine.
+    #
+    # Hence: the tree lives in its own root, and the workload is started in it with
+    # `chroot`. This is NOT a compromise but exactly the semantics of the Talaria
+    # image: there the tree is the process's root too. The paths inside are the same as
+    # in the spec (`/usr/bin/mongod --dbpath /data/db`), the binary and the libraries are the same,
+    # and systems are still being compared, not builds.
+    - name: The workload's root (separate, NOT the host's root)
+      ansible.builtin.file: { path: "{{ wl_root }}", state: directory, mode: "0755" }
+      when: role == "server"
+
+    - name: The workload tree into its own root
+      ansible.builtin.unarchive:
+        src: "files/tree-{{ workload }}.tar.gz"
+        dest: "{{ wl_root }}"
+        remote_src: false
+      when: workload is defined and role == "server"
+
+    # THE ROOT comes AFTER unpacking, not only before: unarchive carries the write
+    # mode of `./` from the archive onto it, and a tree from `mktemp -d` made the root 0700.
+    # An unprivileged server (mariadbd uid 27, postgres uid 26) could not
+    # enter its own root: `chroot: cannot change root directory`.
+    - name: The mount points inside the workload's root and the root itself are traversable
+      ansible.builtin.file: { path: "{{ wl_root }}/{{ item }}", state: directory, mode: "0755" }
+      loop: ["", proc, sys, dev, tmp]
+      when: role == "server"
+
+    # A POST-CONDITION, NOT A HOPE. It costs pennies and catches a whole class: any
+    # future tree that touches the host's user database or libraries
+    # will fail THE PLAYBOOK here and now — instead of becoming, two tasks later,
+    # "ssh somehow closes the connection" on an already ruined machine.
+    - name: The host is intact — users resolve and python is alive
+      ansible.builtin.shell: getent passwd ec2-user >/dev/null && /usr/bin/python3 -c "import ssl"
+      changed_when: false
+
+    - name: The owner of the workload's working directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "{{ server_uid | default(0) }}"
+        group: "{{ server_gid | default(0) }}"
+        recurse: true
+        state: directory
+      loop: "{{ (server_chown | default('')).split(',') | map('regex_replace', '^', wl_root) | select('!=', wl_root) | list }}"
+      when: role == "server"
+      failed_when: false
+
+    # ── The roles: the server brings the workload up and serves counters, the generator is
+    # the tlgen job receiver. Both under systemd, so that a run does not depend on
+    # the operator's live ssh session.
+    - name: The workload's unit (the server)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/tlbench-server.service
+        content: |
+          [Unit]
+          Description=The bench/suite stand workload ({{ workload }})
+          [Service]
+          Type=simple
+          WorkingDirectory=/
+          # ExecStartPre runs WITHOUT a shell, so `||` only works inside sh -c.
+          ExecStartPre=-/bin/sh -c 'mkdir -p {{ wl_root }}/proc {{ wl_root }}/sys {{ wl_root }}/dev'
+          ExecStartPre=-/bin/sh -c 'mountpoint -q {{ wl_root }}/proc || mount --bind /proc {{ wl_root }}/proc'
+          # --rbind, not --bind: a flat bind of /dev does not take SUBMOUNTS, and
+          # /dev/shm inside the root was an empty 0755 devtmpfs directory — postgres
+          # died with `could not open shared memory segment: Permission denied`
+          # (the post-condition below caught exactly that on the first postgresql bring-up).
+          ExecStartPre=-/bin/sh -c 'mountpoint -q {{ wl_root }}/sys  || mount --rbind /sys  {{ wl_root }}/sys'
+          ExecStartPre=-/bin/sh -c 'mountpoint -q {{ wl_root }}/dev  || mount --rbind /dev  {{ wl_root }}/dev'
+          # The root change is done as root, the user change INSIDE the chroot
+          # (`--userspec`). With `User=` the unit first became the workload's uid
+          # (27, 26), which does NOT exist on the host (`status=217/USER`), and even if it did,
+          # chroot(2) is forbidden to the unprivileged.
+          ExecStart=/usr/sbin/chroot --userspec={{ server_uid | default(0) }}:{{ server_gid | default(0) }} {{ wl_root }} {{ server_exec }}
+          Restart=no
+          LimitNOFILE=65536
+          CPUAffinity={{ dp_cores }}
+          [Install]
+          WantedBy=multi-user.target
+        mode: "0644"
+      when: role == "server" and server_exec is defined
+
+    - name: The job receiver's unit (the generator)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/tlbench-loadgen.service
+        content: |
+          [Unit]
+          Description=The tlgen job receiver
+          [Service]
+          Type=simple
+          ExecStart=/opt/tlbench/tlgen --serve 9100
+          Restart=always
+          LimitNOFILE=65536
+          CPUAffinity={{ dp_cores }}
+          [Install]
+          WantedBy=multi-user.target
+        mode: "0644"
+      when: role == "loadgen"
+
+    - name: Start the role
+      ansible.builtin.systemd:
+        name: "tlbench-{{ role }}"
+        state: restarted
+        enabled: true
+        daemon_reload: true
+      when: (role == "loadgen") or (role == "server" and server_exec is defined)
+
+    # A POST-CONDITION: the workload's server IS ALIVE AND LISTENING. Without it a dead server
+    # reached the run as "ceiling 0 req/s" (three times in a row on mysql on the
+    # Linux stand), and the reason could only be read from journalctl on the node. The port comes
+    # from the workload's meta.env; a LISTEN on any address is checked.
+    - name: The workload's server is alive and listening on port {{ server_port | default('?') }}
+      block:
+        - name: Waiting for LISTEN
+          ansible.builtin.shell: >
+            systemctl is-active --quiet tlbench-server &&
+            ss -Hltn | awk '{print $4}' | grep -q ':{{ server_port }}$'
+          register: srv_up
+          until: srv_up.rc == 0
+          retries: 24
+          delay: 5
+          changed_when: false
+      rescue:
+        - name: The log of the crashed server
+          ansible.builtin.shell: systemctl status tlbench-server --no-pager -l | tail -25
+          register: srv_log
+          failed_when: false
+        - ansible.builtin.fail:
+            msg: "tlbench-server is not listening on :{{ server_port }}:\n{{ srv_log.stdout }}"
+      when: role == "server" and server_exec is defined and (server_port | default('')) != ''
+
+    - name: The counter server (the server node)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/tlbench-statd.service
+        content: |
+          [Unit]
+          Description=Snapshots of the stand's counters
+          After=tlbench-server.service
+          [Service]
+          Type=simple
+          ExecStart=/bin/sh -c 'p=$(systemctl show -p MainPID --value tlbench-server); exec /opt/tlbench/statd.sh "$p" 9999'
+          Restart=always
+          CPUAffinity={{ housekeeping_cores }}
+          [Install]
+          WantedBy=multi-user.target
+        mode: "0644"
+      when: role == "server"
+
+    - name: Start the counter server
+      ansible.builtin.systemd:
+        name: tlbench-statd
+        state: restarted
+        enabled: true
+        daemon_reload: true
+      when: role == "server"
+
+  handlers:
+    - name: reboot
+      ansible.builtin.reboot:
+        reboot_timeout: 600

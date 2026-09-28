@@ -1,0 +1,68 @@
+# ── Build ─────────────────────────────────────────────────────────────────
+# Rust (all crates: kernel / ixgbe / control-plane / …)
+target/
+kernel/target-hi/
+kernel/target-*/
+build/
+__pycache__/
+
+# ── Disk images ───────────────────────────────────────────────────────────
+# ALL *.img are generated artifacts, not sources: they are built by test.sh
+# (ext2/TFS volumes for the gates), tools/mk-*.sh (BIOS/tboot/AMI) and
+# services/*/mkdisk.sh (databases, JVM, ClickHouse). There used to be thirty
+# lines here naming them one by one — the list lagged behind the set, and yet
+# another volume slipped into the repository as a binary of tens of megabytes.
+*.img
+
+# ── Locally built binaries ────────────────────────────────────────────────
+bench/udp_ping
+bench/udp_echo
+bench/tcp_ping
+
+# Guest Linux for comparative measurements (built by bench/linux-guest/)
+bench/linux-guest/vmlinuz
+bench/linux-guest/init
+bench/linux-guest/initramfs.gz
+bench/task-harness/linux-guest/init
+bench/task-harness/linux-guest/initramfs.gz
+
+# ── Run logs and state ────────────────────────────────────────────────────
+*.log
+infra/aws/logs/
+bench/ena-latency/logs/
+services/postgresql/build/
+services/mariadb/build/
+services/mongodb/build/
+services/jvm/build/
+services/clickhouse/build/
+
+# ── Secrets and terraform state ───────────────────────────────────────────
+bench/ena-latency/terraform/.terraform/
+bench/ena-latency/terraform/terraform.tfstate*
+bench/ena-latency/terraform/talaria-ena.pem
+infra/aws/.terraform.tfstate.lock.info
+
+# The kernel with frame pointers (kernel/build-prof.sh) and its high-base
+# variant for ClickHouse — derived artifacts
+kernel/target-prof/
+kernel/target-hi-prof/
+
+# ── Local tool settings ───────────────────────────────────────────────────
+.claude/settings.local.json
+
+# ── The bench/suite benchmark set ─────────────────────────────────────────
+services/nginx/build/
+bench/suite/tlgen/tlgen
+bench/suite/tlgen/tlgen.host
+bench/suite/tlgen/tlgen.asan
+bench/suite/results/
+bench/suite/infra/terraform/.terraform/
+bench/suite/infra/terraform/terraform.tfstate*
+bench/suite/infra/terraform/*.pem
+# Build products dropped here for ansible to copy (tlgen, tree-*.tar.gz);
+# statd.sh is source and lives in the same directory.
+bench/suite/infra/ansible/files/*
+!bench/suite/infra/ansible/files/statd.sh
+bench/suite/infra/ansible/inventory.ini
+infra/ansible/inventory.ini
+bench/suite/lib/build/

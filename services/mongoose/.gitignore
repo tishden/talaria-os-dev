@@ -1,0 +1,5 @@
+mongoose_srv
+*.o
+disk-mongoose.img
+mongoose.c
+mongoose.h

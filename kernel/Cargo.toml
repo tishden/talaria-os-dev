@@ -1,0 +1,108 @@
+[package]
+name = "talaria"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[features]
+# `selftest`: embed the ring-3 test binaries from `user/` that the built-in
+# regression (`talaria.test=<name>`) and the demo modes run. They are built by
+# `make -C user all` (docker toolchains). Without the feature the kernel builds
+# with plain `cargo build`; production modes (`talaria.mode=cell|proc|...`)
+# load workloads from disk and do not need it.
+default = ["selftest"]
+selftest = []
+
+[dependencies]
+smoltcp = { version = "0.14.0", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-udp", "socket-tcp", "socket-dhcpv4"] }
+virtio-drivers = { path = "vendor/virtio-drivers", default-features = false } # vendored: +transmit/receive_begin_no_notify + one notify per batch
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"
+
+# Clippy is a CI gate (`cargo clippy -Zjson-target-spec --release -- -D warnings`).
+# The lints below are allowed crate-wide: they fire on existing code as a matter
+# of style (index loops over fixed-size per-CPU/per-task tables, hand-written
+# range and rounding arithmetic, several statements per line). Each one was
+# reviewed for real defects before being allowed (docs/RELEASE-OSS.md 1.4);
+# removing them one lint at a time is RELEASE-OSS 7.1. New lints still fail CI.
+# `talaria_host`: set by kernel-unit/build.rs when a kernel module is compiled
+# for the host unit tests; kernel glue in such modules is `cfg(not(talaria_host))`.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(talaria_host)'] }
+
+[lints.clippy]
+# THE POLICY, NOT A LIST. Every entry here is a lint we keep OFF on purpose, with
+# the reason next to it and the number of places it fires on at the time of
+# writing; the twenty-one lints that used to be in this table are gone because the
+# code was fixed instead (RELEASE-OSS 7.1). Rules of the table:
+#   * an entry earns its place by a reason a reader can check, not by "too noisy";
+#   * a lint that points at BEHAVIOUR (not at style) is not allowed here at all —
+#     it is fixed, and that is how the pseudo-fd race and four detached doc
+#     comments were found;
+#   * `kernel-unit/Cargo.toml` carries a copy of this table (CI diffs them): the
+#     same sources are compiled twice and must be judged by the same rules.
+
+# 146 places. A kernel indexes PARALLEL fixed-size arrays by the same number
+# (`CTAG[s]`/`CDIRTY[s]`/`COWN[s]`, `RSP[i]`/`KSTACK[i]`/`PROC[i]`), and an
+# iterator rewrite either needs `zip` of three or hides which array is which. The
+# index IS the domain here (a cache slot, a task, a core).
+needless_range_loop = "allow"
+# 74 places. The nesting carries the comments: the outer `if` says what class of
+# case this is, the inner one why exactly this branch. Merging into `&&` throws
+# the explanation away, and this code is read more often than it is written.
+collapsible_if = "allow"
+# 28 places. `checked_*` is right where the bound is unknown; here it is checked a
+# line above (a slot's number against `ncache()`, a length against the block
+# size), and the manual form keeps that check visible next to the arithmetic.
+manual_checked_ops = "allow"
+# 24 + 1 places. Both are about the layout of doc lists in comments that are
+# closer to plain text than to rustdoc; rewrapping them would only move the text.
+doc_lazy_continuation = "allow"
+doc_overindented_list_items = "allow"
+# 13 places: the kernel's own loaders and the card's admin queue take a
+# NUL-terminated name as `*const u8`; a `c""` literal is a `&CStr`, so every site
+# would gain an `.as_ptr()` cast and nothing else — there is no `CStr` API here to
+# hand it to.
+manual_c_str_literals = "allow"
+# 4 places, all of them ELF/stack loaders: the arguments are the SysV initial
+# stack (entry, phdr, phent, phnum, argv, envp, the write offset, AT_BASE...).
+# A struct here would be built once and read once.
+too_many_arguments = "allow"
+# 5 places, and every one documents a hardware layout: `COM1 + 0` is the data
+# register at offset 0 of the port block, `1024 * 1` is a KB in bytes. Dropping
+# the identity leaves a number whose meaning is only in a comment.
+identity_op = "allow"
+# 4 places: `&*addr_of!(STATIC)` / `&mut *addr_of_mut!(STATIC)` — the way to touch
+# a `static mut` without ever forming a reference to it (edition 2024 forbids
+# that reference outright). The deref IS the point.
+deref_addrof = "allow"
+# 8 places: a sequence of independent `if`s, not alternatives — the lint reads
+# `if a { } if b { }` as a missing `else`, while both may fire (a signal AND a
+# deadline, a flag AND a mask).
+possible_missing_else = "allow"
+# 3 places: `const A: AtomicU64 = AtomicU64::new(0)` exists to build an array of
+# atomics (`[const { A }; N]`), which is the only way to do it in a `static`.
+declare_interior_mutable_const = "allow"
+# 1 + 1 places: a large enum variant and a large `const` array are deliberate —
+# the kernel has no allocator on these paths, so the storage is inline by
+# necessity.
+large_enum_variant = "allow"
+large_const_arrays = "allow"
+# 3 + 2 places: the loop that would become `Iterator::find` or `while let` walks a
+# fixed-size table of cores or interfaces and returns the INDEX, which the
+# iterator form has to rebuild.
+manual_find = "allow"
+while_let_loop = "allow"
+# 1 place: a cast to `*mut u8` that the lint calls redundant, kept to say out loud
+# that a field of a `static mut` is being addressed as bytes for an atomic view.
+unnecessary_cast = "allow"
+# 1 place: the loop copies between two slices of a STATIC table under a lock, and
+# `copy_from_slice` would need two borrows of it at once.
+manual_memcpy = "allow"

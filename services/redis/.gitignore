@@ -1,0 +1,5 @@
+redis-server
+disk-redis.img
+redis.tar.gz
+src/
+*.o

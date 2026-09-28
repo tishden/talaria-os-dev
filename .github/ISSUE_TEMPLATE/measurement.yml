@@ -1,0 +1,35 @@
+name: Performance report
+description: A number that looks wrong, or a workload that is slower than it should be
+labels: [performance]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project judges performance by measurements that can be repeated, so
+        a report needs the stand as much as the number. `docs/GLOSSARY.md`
+        explains "stand", "rise" and "band"; `docs/PERFORMANCE-OPTIMIZATION-GUIDE.md`
+        says how to measure so the answer means something.
+  - type: textarea
+    id: numbers
+    attributes:
+      label: The numbers
+      description: What you measured, with the percentile and the unit, and what you compare it against (Linux on the same stand, or an earlier commit).
+    validations: {required: true}
+  - type: textarea
+    id: stand
+    attributes:
+      label: The stand
+      description: Instance type or host CPU, cores given to the workload, the boot knobs, the generator and its rate, how many repeats.
+    validations: {required: true}
+  - type: input
+    id: floor
+    attributes:
+      label: Noise floor
+      description: The spread of a REPEATED identical run on this stand. A difference below it is not a result.
+    validations: {required: true}
+  - type: textarea
+    id: stat
+    attributes:
+      label: The `stat:` block
+      description: The kernel's own counters from the same run (`talaria.stat=<ms>`), if the workload got that far.
+      render: text

@@ -1,0 +1,4 @@
+#talaria-prof v1 samples=2 total=2 tsc_hz=3600000000 slice_ns=8000000
+#format: SAMPLE <rip> <ring> <tid> <cpu> <thread-name>
+SAMPLE 0x401200 3 2 1 worker
+SAMPLE 0xffffffff81001234 0 0 0 -

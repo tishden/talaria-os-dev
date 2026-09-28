@@ -1,0 +1,5 @@
+qjs
+qjs_bin
+*.o
+disk-quickjs.img
+src/

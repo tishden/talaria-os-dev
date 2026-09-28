@@ -1,0 +1,10 @@
+talaria: an unrelated log line the tool must skip
+#talaria-prof v2 samples=6 total=9 tsc_hz=3600000000 slice_ns=500000 hz=200 depth=8
+#format: SAMPLE <ring> <tid> <cpu> <thread-name> <address> [<return-address> ...]
+SAMPLE 3 2 1 worker 0x401200 0x401300 0x401400
+SAMPLE 3 2 1 worker 0x401200 0x401300 0x401400
+SAMPLE 3 3 2 worker 0x401200 0x401900
+SAMPLE 3 3 2 worker 0x402000
+SAMPLE 0 0 0 - 0xffffffff81001234 0xffffffff81005678
+SAMPLE 0 0 0 - 0xffffffff81001234 0xffffffff81005678
+#talaria-prof end

@@ -1,0 +1,16 @@
+# The PostgreSQL 16 postmaster on Talaria: the process model (fork/signals/shm/ext2).
+binary=/opt/pg/bin/postgres
+args=postgres -D /pgdata
+env=PGDATA=/pgdata
+env=HOME=/
+env=PATH=/opt/pg/bin
+
+# ── Measured settings (see the header of kernel/src/cellman.rs) ─────────────
+# netyield: how often a thread waiting for the network gives the core to its neighbours.
+# The number was chosen BY MEASUREMENT ON EXACTLY THIS WORKLOAD (a sweep of
+# 0/2/5/10/20/100 µs): at zero p50 was 1148 µs, at 2-10 µs it is 66-77 µs with a ceiling of
+# 18-20 thousand req/s instead of 8.9 thousand, and at 100 µs it gets worse again. The
+# reason is exactly PostgreSQL's process model: there are many backends, each spinning in
+# epoll_wait, and without yielding the core they hold the machine from one another. So it
+# is declared here — next to the workload it was measured on, not in the stand's command line.
+netyield=5

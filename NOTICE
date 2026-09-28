@@ -1,0 +1,36 @@
+Talaria OS
+Copyright (c) 2026 Denis Tishkov
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+Provided "AS IS", without warranties or conditions of any kind, and without
+any support obligations (commercial support available by separate agreement).
+
+The Talaria OS code and the platform as a whole were developed with the
+assistance of an AI agent (Claude Code / Claude Fable 5, Anthropic), under
+the direction and review of the copyright holder.
+
+--------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------
+
+* virtio-drivers (vendored at kernel/vendor/virtio-drivers)
+  Copyright (c) 2019-2020 rCore Developers — MIT License
+  (see kernel/vendor/virtio-drivers/LICENSE)
+
+* musl libc — kernel/user/tsync/musl-1.2.5-talaria.patch applies to musl 1.2.5
+  Copyright (c) 2005-2020 Rich Felker, et al. — MIT License
+
+* Rust crates used by the kernel, the control plane and bench/ixgbe, with
+  their licenses (the full set is in the Cargo.lock files):
+    smoltcp, managed                                  — 0BSD
+    bitflags, cfg-if, enumn, hash32, heapless, libc, log, proc-macro2,
+    quote, safe-mmio, stable_deref_trait, syn, thiserror  — MIT OR Apache-2.0
+    byteorder                                         — Unlicense OR MIT
+    zerocopy                                          — BSD-2-Clause OR Apache-2.0 OR MIT
+    unicode-ident                                     — (MIT OR Apache-2.0) AND Unicode-3.0
+
+* Open-source applications under services/ (PostgreSQL, MariaDB, MongoDB,
+  Redis, nginx, mongoose, Lua, SQLite, busybox, QuickJS-ng, SObjectizer,
+  OpenJDK, ClickHouse) are NOT distributed with this repository: build
+  scripts download or expect their sources, which remain under their
+  respective upstream licenses.

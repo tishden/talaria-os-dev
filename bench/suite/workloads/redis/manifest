@@ -1,0 +1,4 @@
+# Redis 7.2 on Talaria: one process, an event loop on epoll.
+binary=/redis-server
+args=redis-server /redis.conf
+env=HOME=/

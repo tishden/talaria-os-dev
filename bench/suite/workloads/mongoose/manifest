@@ -1,0 +1,4 @@
+# mongoose 7.23 on Talaria: one process, its own event loop on top of epoll.
+binary=/mongoose_srv
+args=mongoose_srv
+env=HOME=/

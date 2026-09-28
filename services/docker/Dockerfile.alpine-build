@@ -1,0 +1,4 @@
+# The build image for static musl builds for Talaria (PostgreSQL, MariaDB): Alpine + toolchain.
+FROM alpine:3.20
+RUN apk add --no-cache build-base cmake linux-headers bison flex perl ncurses-dev ncurses-static \
+    zlib-dev zlib-static libaio-dev wget tar file

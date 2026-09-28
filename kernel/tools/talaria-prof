@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""talaria-prof — parse a Talaria profile: symbols, folding, flamegraph.
+
+The kernel does not resolve symbols and will not: a workload's symbol table
+lives on the host next to its binary, and pulling it into the kernel means
+pulling in an ELF parser, DWARF and megabytes of data for a line printed once
+an hour. The kernel hands out ADDRESSES (`perf record` in the operator
+console), the host turns them into names.
+
+Input is the output of `perf record`, as is, together with the surrounding log
+lines:
+
+    #talaria-prof v2 samples=1024 total=4096 tsc_hz=3600000000 slice_ns=500000 hz=200 depth=8
+    #format: SAMPLE <ring> <tid> <cpu> <thread-name> <address> [<return-address> ...]
+    SAMPLE 3 2 1 worker 0x401a3c 0x401b00 0x4021f0
+    ...
+    #talaria-prof end
+
+Modes:
+
+  * `report`  — a "function: how many samples, what percentage" table, kernel
+                (ring 0) and workload (ring 3) separately, broken down by
+                thread and core, with a list of the MOST FREQUENT STACKS;
+  * `folded`  — folded stacks in stackcollapse format (`root;...;leaf N`),
+                which flamegraph.pl consumes directly;
+  * `raw`     — addresses and counts, when there are no symbols.
+
+Symbols come from `addr2line`/`nm` on the binaries you name:
+
+    talaria-prof report  --kernel kernel/target/x86_64-talaria/release/talaria \\
+                         --user kernel/user/mycell  < serial.log
+    talaria-prof folded  --user ./cell < serial.log | flamegraph.pl > prof.svg
+
+ON HONESTY. The stack is taken along the chain of FRAME POINTERS, so it exists
+exactly for code built with `-fno-omit-frame-pointer` (the Talaria kernel is).
+For a foreign binary without them unwinding stops at the first frame and the
+report shows depth 1 — an honest refusal, not an invented tree. Depth is capped
+at eight frames: deep recursion cannot be seen this way.
+"""
+import argparse
+import collections
+import re
+import shutil
+import subprocess
+import sys
+
+# v2: SAMPLE <ring> <tid> <cpu> <name> <address> [<return-address> ...]
+SAMPLE2 = re.compile(r"^SAMPLE\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+((?:0x[0-9a-fA-F]+\s*)+)$")
+# v1 (no stack): SAMPLE <rip> <ring> <tid> <cpu> <name>. Read for the sake of
+# old logs: the format changed, but logs of past runs are still around.
+SAMPLE1 = re.compile(r"^SAMPLE\s+(0x[0-9a-fA-F]+)\s+(\d+)\s+(\d+)\s+(\d+)\s*(.*)$")
+HEADER = re.compile(r"^#talaria-prof v(\d+) samples=(\d+) total=(\d+)")
+
+
+class Sample:
+    """One sample: a STACK of addresses (leaf first), thread, core, ring."""
+    __slots__ = ("stack", "ring", "tid", "cpu", "comm")
+
+    def __init__(self, stack, ring, tid, cpu, comm):
+        self.stack, self.ring, self.tid, self.cpu, self.comm = stack, ring, tid, cpu, comm
+
+    @property
+    def rip(self):
+        return self.stack[0]
+
+
+def read_samples(fh):
+    """Pull samples out of a log. Anything that is not a sample is skipped
+    silently: the input is usually the whole serial log, not a neat excerpt."""
+    out, have, total = [], None, None
+    for line in fh:
+        line = line.strip()
+        m = HEADER.match(line)
+        if m:
+            have, total = int(m.group(2)), int(m.group(3))
+            continue
+        m = SAMPLE2.match(line)
+        if m:
+            stack = [int(x, 16) for x in m.group(5).split()]
+            out.append(Sample(stack, int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                              m.group(4).strip() or "-"))
+            continue
+        m = SAMPLE1.match(line)
+        if m:
+            out.append(Sample([int(m.group(1), 16)], int(m.group(2)),
+                              int(m.group(3)), int(m.group(4)), m.group(5).strip() or "-"))
+    if have is not None and total is not None and total > have:
+        print(f"# WARNING: the ring wrapped — {total - have} samples lost, "
+              f"the profile covers only the last {have}", file=sys.stderr)
+    return out
+
+
+def demangle(name):
+    """Rust v0 (`_RNvNtCs<hash>_7talaria5sched17exit_current_code`) into readable form.
+
+    `addr2line -C` handles C++ and the LEGACY Rust mangling (`_ZN…`), but not
+    v0 — and the kernel is built with exactly that. A mangled name in a profile
+    report is as useless as a bare address, so we parse it ourselves: in v0 the
+    path is written as a sequence of `<length><name>`, and that is enough. A
+    full demangler (generic parameters, lifetimes) is not needed here — the
+    path to the function is.
+    """
+    if not name.startswith("_R"):
+        return name
+    # Strip the crate disambiguator `Cs<base62>_`: it looks like "length+name"
+    # itself (`Cs8U7SmRscSBN_` -> "8" and eight characters) and would otherwise
+    # end up in the path.
+    body = re.sub(r"Cs[0-9A-Za-z]*_", "", name)
+    parts, i, n = [], 2, len(body)
+    name = body
+    while i < n:
+        if not name[i].isdigit():
+            i += 1
+            continue
+        j = i
+        while j < n and name[j].isdigit():
+            j += 1
+        ln = int(name[i:j])
+        if ln == 0 or j + ln > n:
+            i = j
+            continue
+        seg = name[j:j + ln]
+        # the tail of the crate hash (`Cs8U7SmRscSBN_`) does not fit the length rule
+        if seg.replace("_", "").isalnum():
+            parts.append(seg)
+        i = j + ln
+    return "::".join(parts) if parts else name
+
+
+class Symbolizer:
+    """Address -> function name. One addr2line call for the whole batch of
+    addresses: a process per address turns parsing a thousand samples into a
+    minute."""
+
+    def __init__(self, kernel=None, user=None):
+        self.bins = {0: kernel, 3: user}
+        self.byfile = {}
+        self.tool = shutil.which("addr2line") or shutil.which("llvm-addr2line")
+
+    def resolve(self, samples):
+        if not self.tool:
+            print("# addr2line not found — function names not resolved", file=sys.stderr)
+            return
+        # Every address is looked up in BOTH binaries. Not for tidiness: a ring 0
+        # stack flows into ring 3 — the kernel frame chain ends with the frame
+        # of the very user function that made the syscall. That is the most
+        # valuable part of such a stack, and it must be resolved with the
+        # WORKLOAD binary even though the sample's ring is zero. The sample's
+        # own ring simply goes first.
+        addrs = sorted({a for s in samples for a in s.stack})
+        if not addrs:
+            return
+        for ring, path in self.bins.items():
+            if not path:
+                continue
+            try:
+                res = subprocess.run([self.tool, "-f", "-C", "-e", path] + [hex(a) for a in addrs],
+                                     capture_output=True, text=True, check=True)
+            except (OSError, subprocess.CalledProcessError) as e:
+                print(f"# addr2line on {path} failed: {e}", file=sys.stderr)
+                continue
+            lines = res.stdout.splitlines()
+            # addr2line -f prints TWO lines per address: name and file:line
+            for i, a in enumerate(addrs):
+                name = demangle(lines[2 * i].strip()) if 2 * i < len(lines) else "??"
+                loc = lines[2 * i + 1].strip() if 2 * i + 1 < len(lines) else ""
+                if loc.endswith(":?") or loc.endswith(":0"):
+                    loc = ""   # no DWARF — a "file:?" string only gets in the way
+                if name in ("??", ""):
+                    continue
+                self.byfile.setdefault(ring, {})[a] = (name, loc)
+
+    def _lookup(self, ring, addr):
+        own = self.byfile.get(ring, {}).get(addr)
+        if own:
+            return own
+        for r, tbl in self.byfile.items():
+            if r != ring and addr in tbl:
+                # The tag is mandatory: otherwise a workload frame in a kernel
+                # stack would look like kernel code, and the reader would look
+                # for it in the wrong binary.
+                n, l = tbl[addr]
+                return (n + (" [ring3]" if r == 3 else " [ring0]"), l)
+        return None
+
+    def addr_name(self, ring, addr):
+        n = self._lookup(ring, addr)
+        return n[0] if n else f"{addr:#x}"
+
+    def name(self, s):
+        return self.addr_name(s.ring, s.rip)
+
+    def stack_names(self, s):
+        """The stack as names, LEAF FIRST (as the kernel produced it)."""
+        return [self.addr_name(s.ring, a) for a in s.stack]
+
+    def loc(self, s):
+        n = self._lookup(s.ring, s.rip)
+        return n[1] if n and n[1] else ""
+
+
+def report(samples, sym):
+    for ring, title in ((3, "WORKLOAD (ring 3)"), (0, "KERNEL (ring 0)")):
+        part = [s for s in samples if s.ring == ring]
+        if not part:
+            continue
+        print(f"\n== {title}: {len(part)} samples of {len(samples)} "
+              f"({100 * len(part) // len(samples)}%) ==")
+        by_fn = collections.Counter(sym.name(s) for s in part)
+        locs = {sym.name(s): sym.loc(s) for s in part}
+        print(f"{'samples':>8} {'share':>6}  function")
+        for fn, n in by_fn.most_common(25):
+            loc = locs.get(fn) or ""
+            print(f"{n:>8} {100 * n / len(part):>5.1f}%  {fn}{'   ' + loc if loc else ''}")
+        # By thread and core: "time is eaten" and "time is eaten by ONE thread on
+        # ONE core" are different diagnoses, indistinguishable by function list.
+        by_thr = collections.Counter(f"{s.tid}/{s.comm}" for s in part)
+        by_cpu = collections.Counter(s.cpu for s in part)
+        print("  by thread: " + ", ".join(f"{k}={v}" for k, v in by_thr.most_common(8)))
+        print("  by core: " + ", ".join(f"cpu{k}={v}" for k, v in by_cpu.most_common(8)))
+        # STACKS. The function list answers "where the time goes", the stack "who
+        # led there"; a hot memcpy cannot be fixed without the second question.
+        deep = [s for s in part if len(s.stack) > 1]
+        depth = sum(len(s.stack) for s in part) / len(part)
+        print(f"  average depth {depth:.1f}, with a stack {len(deep)} of {len(part)}")
+        if not deep:
+            print("  no stacks: the code is built without frame pointers "
+                  "(-fno-omit-frame-pointer) — only the leaf is visible")
+            continue
+        stacks = collections.Counter(" <- ".join(sym.stack_names(s)) for s in deep)
+        print(f"{'samples':>8} {'share':>6}  stack (leaf <- callers)")
+        for st, n in stacks.most_common(10):
+            print(f"{n:>8} {100 * n / len(deep):>5.1f}%  {st}")
+
+
+def folded(samples, sym):
+    """stackcollapse-compatible output: `root;...;leaf count`.
+
+    The kernel hands out the stack LEAF FIRST (that is how the unwinder takes
+    it), and flamegraph expects the reverse order — it is reversed here, not in
+    the kernel: in the kernel "leaf first" is natural and cheap."""
+    cnt = collections.Counter()
+    for s in samples:
+        ring = "kernel" if s.ring == 0 else "workload"
+        frames = ";".join(reversed(sym.stack_names(s)))
+        cnt[f"{ring};{s.comm}({s.tid});{frames}"] += 1
+    for k, v in sorted(cnt.items()):
+        print(f"{k} {v}")
+
+
+def raw(samples, _sym):
+    cnt = collections.Counter((s.ring, tuple(s.stack)) for s in samples)
+    print(f"{'samples':>8}  ring  stack (leaf <- callers)")
+    for (ring, stack), n in cnt.most_common():
+        print(f"{n:>8}  {ring:>4}  " + " <- ".join(f"{a:#x}" for a in stack))
+
+
+def main():
+    ap = argparse.ArgumentParser(description="parse a Talaria profile (`perf record` in the operator console)")
+    # Both positional arguments are collected INTO ONE LIST: argparse cannot
+    # reliably split two optional positionals with an option between them, and
+    # `report --kernel X file` was rejected as an "extra argument".
+    ap.add_argument("args", nargs="*", metavar="[report|folded|raw] [file]",
+                    help="mode (default report) and the log file (default stdin)")
+    ap.add_argument("--kernel", help="kernel ELF for ring 0 symbols")
+    ap.add_argument("--user", help="workload ELF for ring 3 symbols")
+    # `parse_known_args`, not `parse_args`: argparse takes positionals only as
+    # ONE contiguous group and declares everything after `--kernel X` extra.
+    # The remainder is parsed here.
+    a, rest = ap.parse_known_args()
+    for v in rest:
+        if v.startswith("-"):
+            print(f"talaria-prof: unknown option '{v}'", file=sys.stderr)
+            return 2
+        a.args.append(v)
+    mode, path = "report", None
+    for v in a.args:
+        if v in ("report", "folded", "raw"):
+            mode = v
+        elif path is None:
+            path = v
+        else:
+            print(f"talaria-prof: extra argument '{v}'", file=sys.stderr)
+            return 2
+
+    fh = open(path, encoding="utf-8", errors="replace") if path else sys.stdin
+    samples = read_samples(fh)
+    if not samples:
+        print("no samples found: expected `SAMPLE <ring> <tid> <cpu> <name> <address> ...` lines\n"
+              "to get them: `perf on` in the operator console, wait, `perf record`", file=sys.stderr)
+        return 1
+    sym = Symbolizer(a.kernel, a.user)
+    if mode != "raw":
+        sym.resolve(samples)
+    {"report": report, "folded": folded, "raw": raw}[mode](samples, sym)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

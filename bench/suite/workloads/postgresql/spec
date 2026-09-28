@@ -1,0 +1,14 @@
+ip=@GUEST_IP@/24
+gw=@HOST_IP@
+tune=lowlat
+exec=/opt/pg/bin/postgres
+arg=postgres
+arg=-D
+arg=/pgdata
+env=PGDATA=/pgdata
+env=HOME=/
+env=PATH=/opt/pg/bin
+chown=/pgdata:26:26
+chown=/tmp:26:26
+uid=26
+gid=26

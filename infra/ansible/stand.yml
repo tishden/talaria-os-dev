@@ -1,0 +1,122 @@
+---
+# Talaria bench stand: AL2023 on x86 metal.
+# 1) packages + docker; 2) isolate cores + mitigations=off (grubby, reboot);
+# 3) upload PoC tree; 4) build tools in container; 5) run the bench matrix.
+#
+# m5zn.metal: 48 lcpu, HT pairs (n, n+24). Isolated: 8,9,10 + siblings 32,33,34.
+- hosts: stand
+  become: true
+  gather_facts: false
+  vars:
+    workdir: /opt/talaria
+  tasks:
+    - name: Wait for SSH (metal boots slowly)
+      wait_for_connection:
+        timeout: 900
+        sleep: 15
+
+    - name: Gather facts
+      setup:
+
+    - name: Install packages
+      dnf:
+        name: [docker, cpio, xz, zstd, kmod, tar]
+        state: present
+
+    - name: Enable docker
+      systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Load vhost_net
+      command: modprobe vhost_net
+      changed_when: false
+
+    - name: Compute HT siblings of bench cores 8,9,10
+      shell: |
+        for c in 8 9 10; do
+          cut -d',' -f2 /sys/devices/system/cpu/cpu$c/topology/thread_siblings_list
+        done | paste -sd,
+      register: siblings
+      changed_when: false
+
+    - name: Set isolation set
+      set_fact:
+        isol: "8,9,10,{{ siblings.stdout }}"
+        vhost_cpu: "{{ siblings.stdout.split(',')[0] }}"
+
+    - name: Show plan
+      debug:
+        msg: "isol={{ isol }} vcpu=8 vhost={{ vhost_cpu }} cli=10 srv=9"
+
+    - name: Check current kernel cmdline
+      command: cat /proc/cmdline
+      register: cmdline
+      changed_when: false
+
+    - name: Apply isolation + mitigations=off via grubby
+      command: >
+        grubby --update-kernel=ALL --args="isolcpus={{ isol }} nohz_full={{ isol }}
+        rcu_nocbs={{ isol }} mitigations=off"
+      when: "'isolcpus' not in cmdline.stdout"
+
+    - name: Reboot into isolated kernel (metal reboot is slow)
+      reboot:
+        reboot_timeout: 1500
+      when: "'isolcpus' not in cmdline.stdout"
+
+    - name: Verify isolation
+      command: cat /sys/devices/system/cpu/isolated
+      register: isolated
+      changed_when: false
+
+    - name: Show isolated cpus
+      debug:
+        msg: "isolated: {{ isolated.stdout }}"
+
+    - name: Upload PoC tree
+      unarchive:
+        src: "{{ playbook_dir }}/../../build/talaria.tar.gz"
+        dest: /opt
+        # tarball root is talaria/
+
+    - name: Build QEMU container image
+      command: docker build -t talaria-qemu2 -f {{ workdir }}/Dockerfile.stand {{ workdir }}
+      register: dbuild
+      changed_when: true
+
+    - name: Build bench tools and guest init (static, inside container)
+      command: >
+        docker run --rm -v {{ workdir }}:/w talaria-qemu2 sh -c
+        "gcc -O2 -o /w/bench/udp_ping /w/bench/udp_ping.c &&
+         gcc -O2 -o /w/bench/udp_echo /w/bench/udp_echo.c &&
+         gcc -O2 -static -o /w/bench/linux-guest/init /w/bench/linux-guest/init.c"
+      changed_when: true
+
+    - name: Build Linux guest kernel+initramfs from stand kernel
+      command: sh {{ workdir }}/bench/linux-guest/mk_guest.sh
+      changed_when: true
+
+    - name: Run bench matrix
+      shell: >
+        docker run --rm --privileged --pid=host -v {{ workdir }}:/w
+        -e VCPU_CPU=8 -e VHOST_CPU={{ vhost_cpu }} -e CLI_CPU=10 -e SRV_CPU=9
+        -e MISC_CPUS=4,5,6,7 -e N=50000 -e WARM=5000
+        talaria-qemu2 sh /w/bench/bench2.sh > {{ workdir }}/bench-stand.txt 2>&1
+      changed_when: true
+
+    - name: Show results
+      command: cat {{ workdir }}/bench-stand.txt
+      register: bench
+      changed_when: false
+
+    - name: Print results
+      debug:
+        msg: "{{ bench.stdout_lines }}"
+
+    - name: Fetch results
+      fetch:
+        src: "{{ workdir }}/bench-stand.txt"
+        dest: "{{ playbook_dir }}/../../build/bench-stand.txt"
+        flat: true

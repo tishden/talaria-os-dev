@@ -1,0 +1,25 @@
+[build]
+target = "x86_64-talaria.json"
+
+[unstable]
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+
+[target.x86_64-talaria]
+# THERE ARE NO FRAME POINTERS HERE, AND THAT IS A MEASURED DECISION. With them a
+# ring 0 profile unwinds into a stack (`obs::unwind`), without them kernel samples
+# have depth 1. The cost was measured, not assumed: `talaria.test=mbench` gives a
+# 114-119 ns syscall without them and 123-124 ns with them — about 4 % on the
+# kernel's most frequent path, with ALU and memory unchanged. For an OS that exists
+# for latency, paying 4 % all the time for diagnostics needed once in a while is
+# the wrong trade. A kernel WITH stacks is built separately: `kernel/build-prof.sh`
+# (see its header and docs/PERFORMANCE-OPTIMIZATION-GUIDE.md §4.2). The WORKLOAD
+# stack does not depend on this at all — it is read from the workload's own frames.
+rustflags = ["-C", "link-arg=-Tlinker.ld", "-C", "relocation-model=static"]
+
+# V1.11: a node may have several interfaces and several routes. smoltcp's
+# defaults are 2 addresses and 2 routes PER INTERFACE, which is not enough even
+# for "own network + gateway + a route to the management subnet".
+[env]
+SMOLTCP_IFACE_MAX_ADDR_COUNT = "4"
+SMOLTCP_IFACE_MAX_ROUTE_COUNT = "8"

@@ -1,0 +1,15 @@
+[package]
+name = "talaria-ixgbe"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+bigring = []
+
+[dependencies]
+libc = "0.2"
+smoltcp = { version = "0.14", default-features = false, features = ["medium-ethernet","proto-ipv4","socket-udp"] }
+
+[profile.release]
+opt-level = 3
+debug = true

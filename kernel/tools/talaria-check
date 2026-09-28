@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""talaria-check — check a binary's compatibility with the Talaria OS ABI.
+
+Runs the binary on the kernel in QEMU (talaria.mode=cell + talaria.strace) and reports
+which syscalls were called, which are NOT supported (-> ENOSYS), and whether it crashed.
+
+Usage:
+  talaria-check BINARY [--args="..."] [--env K=V ...] [--secs 15] [--net]
+                [--kernel PATH] [--keep-log]
+
+Requirements: a built kernel (kernel/BUILD.md), the talaria-qemu2 docker image, /dev/kvm.
+The binary is static musl (or a dynamic ELF on a disk with ld-musl — then build the
+disk yourself with talaria-pack and start run.sh; the checker packs a single binary).
+Verdicts:
+  COMPATIBLE        — the run reached its end/exit without unsupported syscalls or crashes
+  HAS GAPS          — unsupported syscalls were hit (listed); the binary may work
+                      if the paths using them are not critical
+  INCOMPATIBLE/CRASH — the binary crashed (see the crash dump in the log)
+"""
+import argparse, os, re, subprocess, sys, tempfile
+
+SYSNAMES = {
+    0:"read",1:"write",2:"open",3:"close",4:"stat",5:"fstat",6:"lstat",7:"poll",8:"lseek",
+    9:"mmap",10:"mprotect",11:"munmap",12:"brk",13:"rt_sigaction",14:"rt_sigprocmask",
+    15:"rt_sigreturn",16:"ioctl",17:"pread64",18:"pwrite64",19:"readv",20:"writev",
+    21:"access",22:"pipe",23:"select",24:"sched_yield",25:"mremap",26:"msync",28:"madvise",
+    29:"shmget",30:"shmat",31:"shmctl",32:"dup",33:"dup2",35:"nanosleep",39:"getpid",
+    41:"socket",42:"connect",43:"accept",44:"sendto",45:"recvfrom",46:"sendmsg",47:"recvmsg",
+    48:"shutdown",49:"bind",50:"listen",51:"getsockname",52:"getpeername",53:"socketpair",
+    54:"setsockopt",55:"getsockopt",56:"clone",57:"fork",58:"vfork",59:"execve",60:"exit",
+    61:"wait4",62:"kill",63:"uname",72:"fcntl",73:"flock",74:"fsync",75:"fdatasync",
+    77:"ftruncate",78:"getdents",79:"getcwd",80:"chdir",81:"fchdir",82:"rename",83:"mkdir",
+    84:"rmdir",85:"creat",86:"link",87:"unlink",89:"readlink",90:"chmod",91:"fchmod",
+    92:"chown",93:"fchown",95:"umask",96:"gettimeofday",97:"getrlimit",99:"sysinfo",
+    102:"getuid",104:"getgid",107:"geteuid",108:"getegid",110:"getppid",112:"setsid",
+    131:"sigaltstack",137:"statfs",138:"fstatfs",157:"prctl",158:"arch_prctl",186:"gettid",
+    200:"tkill",201:"time",202:"futex",203:"sched_setaffinity",204:"sched_getaffinity",
+    213:"epoll_create",217:"getdents64",218:"set_tid_address",221:"fadvise64",
+    228:"clock_gettime",229:"clock_getres",230:"clock_nanosleep",231:"exit_group",
+    232:"epoll_wait",233:"epoll_ctl",234:"tgkill",257:"openat",262:"newfstatat",
+    265:"linkat",266:"symlinkat",267:"readlinkat",269:"faccessat",270:"pselect6",
+    271:"ppoll",273:"set_robust_list",281:"epoll_pwait",282:"signalfd",283:"timerfd_create",
+    284:"eventfd",285:"fallocate",286:"timerfd_settime",287:"timerfd_gettime",
+    288:"accept4",289:"signalfd4",290:"eventfd2",291:"epoll_create1",292:"dup3",
+    293:"pipe2",295:"preadv",296:"pwritev",299:"recvmmsg",302:"prlimit64",307:"sendmmsg",
+    309:"getcpu",
+    318:"getrandom",324:"membarrier",332:"statx",334:"rseq",435:"clone3",439:"faccessat2",
+}
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument('binary')
+    ap.add_argument('--args', default='')
+    ap.add_argument('--env', action='append', default=[])
+    ap.add_argument('--secs', type=int, default=15)
+    ap.add_argument('--net', action='store_true', help='bring up virtio-net (tap0 in the container)')
+    ap.add_argument('--kernel', default=None)
+    ap.add_argument('--keep-log', action='store_true')
+    ap.add_argument('-h', '--help', action='store_true')
+    a, extra = ap.parse_known_args()
+    if a.help:
+        print(__doc__); sys.exit(0)
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo = os.path.abspath(os.path.join(here, '..', '..'))
+    kernel = os.path.abspath(a.kernel) if a.kernel else \
+        os.path.join(repo, 'kernel/target/x86_64-talaria/release/talaria')
+    if not os.path.isfile(kernel):
+        sys.exit("talaria-check: no kernel %s (see kernel/BUILD.md)" % kernel)
+    if not os.path.isfile(a.binary):
+        sys.exit("talaria-check: no binary %s" % a.binary)
+
+    td = tempfile.mkdtemp(prefix='talcheck-')
+    disk = os.path.join(td, 'disk.img')
+    cmd = [sys.executable, os.path.join(here, 'talaria-pack'), '-o', disk,
+           '--app', a.binary, '--restart', '0']
+    if a.args: cmd.append('--args=' + a.args)
+    for e in a.env: cmd += ['--env', e]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+
+    log = os.path.join(td, 'serial.log')
+    net = ('ip tuntap add tap0 mode tap 2>/dev/null; ip addr add 10.0.0.1/24 dev tap0 2>/dev/null; '
+           'ip link set tap0 up 2>/dev/null; ') if a.net else ''
+    netdev = ('-netdev tap,id=n0,ifname=tap0,script=no,downscript=no,vhost=on '
+              '-device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56 ') if a.net else ''
+    inner = (net +
+             'timeout %d qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu host -smp 1 -m 512 '
+             '-kernel /k -append "console=ttyS0 talaria.mode=cell talaria.strace=100000" '
+             '-display none -serial file:/t/serial.log -no-reboot %s'
+             '-drive id=d0,file=/t/disk.img,format=raw,if=none -device virtio-blk-device,drive=d0 '
+             '>/dev/null 2>&1; true' % (a.secs, netdev))
+    dcmd = ['docker', 'run', '--rm', '-i', '--device', '/dev/kvm',
+            '-v', kernel + ':/k:ro', '-v', td + ':/t']
+    if a.net:
+        dcmd += ['--device', '/dev/net/tun', '--device', '/dev/vhost-net', '--cap-add', 'NET_ADMIN']
+    subprocess.run(dcmd + ['talaria-qemu2', 'sh', '-c', inner], check=True)
+
+    text = open(log, 'rb').read().decode('utf-8', 'replace')
+    used = {}
+    for m in re.finditer(r'\[strace [^\]]*\] (\d+)\(', text):
+        nr = int(m.group(1)); used[nr] = used.get(nr, 0) + 1
+    unknown = {}
+    for m in re.finditer(r'\[syscall\] unknown number (\d+)', text):
+        nr = int(m.group(1)); unknown[nr] = True
+    crashed = ('THE WORKLOAD CRASHED' in text) or ('the kernel halted' in text)
+    clean_exit = re.search(r'exit_group\(code=\d+\)', text) or 'the workload finished normally' in text \
+        or 'no restart is needed' in text
+    nm = lambda n: SYSNAMES.get(n, '?')
+
+    print("talaria-check: %s (%d s run, %d distinct syscalls)" %
+          (os.path.basename(a.binary), a.secs, len(used)))
+    if used:
+        top = sorted(used.items(), key=lambda kv: -kv[1])[:12]
+        print("  top syscalls: " + ", ".join("%s(%d)x%d" % (nm(n), n, c) for n, c in top))
+    if unknown:
+        print("  UNSUPPORTED (-> ENOSYS): " + ", ".join(
+            "%s(%d)" % (nm(n), n) for n in sorted(unknown)))
+    if crashed:
+        print("VERDICT: INCOMPATIBLE/CRASH — the binary crashed, see the log" +
+              (" (%s)" % log if a.keep_log else ""))
+        rc = 2
+    elif unknown:
+        print("VERDICT: HAS GAPS — unsupported syscalls were hit (the binary may "
+              "work if these paths are not critical); extending the ABI: DEVELOPMENT-GUIDE §10.1")
+        rc = 1
+    else:
+        print("VERDICT: COMPATIBLE — no unsupported syscalls were hit" +
+              ("" if clean_exit else " (the run was cut off by the timeout — long paths not checked)"))
+        rc = 0
+    if a.keep_log:
+        print("log: " + log)
+    else:
+        import shutil; shutil.rmtree(td, ignore_errors=True)
+    sys.exit(rc)
+
+
+if __name__ == '__main__':
+    main()

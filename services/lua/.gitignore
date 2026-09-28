@@ -1,0 +1,5 @@
+lua
+*.o
+disk-lua.img
+lua.tar.gz
+lua-5.4.7/

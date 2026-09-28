@@ -1,0 +1,5 @@
+# nginx 1.24 on Talaria: one process, one worker thread (master_process off).
+binary=/nginx/nginx
+args=nginx -p /nginx/ -c nginx.conf
+env=HOME=/
+env=PATH=/nginx

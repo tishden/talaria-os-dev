@@ -1,0 +1,706 @@
+<title>Talaria OS</title>
+<style>
+  :root {
+    --paper: #F6F7F6;
+    --card: #FFFFFF;
+    --ink: #1A1F1D;
+    --muted: #5A6560;
+    --line: #D9DEDB;
+    --accent: #0B7A5F;
+    --accent-soft: #E3F0EB;
+    --hot: #B4500F;
+    --code-bg: #EDF0EE;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #121614;
+      --card: #191E1B;
+      --ink: #E3EAE6;
+      --muted: #91A099;
+      --line: #2A322E;
+      --accent: #45C79F;
+      --accent-soft: #1B2A25;
+      --hot: #E08A50;
+      --code-bg: #1E2521;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #121614;
+    --card: #191E1B;
+    --ink: #E3EAE6;
+    --muted: #91A099;
+    --line: #2A322E;
+    --accent: #45C79F;
+    --accent-soft: #1B2A25;
+    --hot: #E08A50;
+    --code-bg: #1E2521;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+    font-size: 17px;
+    line-height: 1.62;
+  }
+  .wrap { max-width: 74rem; margin: 0 auto; padding: 0 1.25rem 6rem; }
+  .prose { max-width: 46rem; }
+  h1, h2, h3, h4 {
+    font-family: "Helvetica Neue", "Segoe UI", -apple-system, Arial, sans-serif;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    line-height: 1.2;
+  }
+  h1 { font-size: 2.7rem; font-weight: 700; margin: 0.4rem 0 0.6rem; }
+  h2 { font-size: 1.55rem; font-weight: 650; margin: 3.2rem 0 0.9rem; padding-top: 1.6rem; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.13rem; font-weight: 650; margin: 2rem 0 0.5rem; }
+  h2 .num, h3 .num {
+    font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    color: var(--accent); font-weight: 500; margin-right: 0.55em; font-size: 0.85em;
+  }
+  p { margin: 0.75rem 0; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+  a:hover { border-bottom-color: var(--accent); }
+  a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+  code, .mono {
+    font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 0.86em;
+  }
+  code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px; }
+  .eyebrow {
+    font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--accent); margin: 0;
+  }
+  .docmeta {
+    display: flex; flex-wrap: wrap; gap: 0.4rem 2rem; margin: 1.1rem 0 0;
+    padding: 0.9rem 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace; font-size: 0.78rem;
+  }
+  .docmeta span b { color: var(--muted); font-weight: 400; margin-right: 0.5em; }
+  header.cover { padding-top: 4rem; }
+  .lede { font-size: 1.16rem; color: var(--muted); max-width: 44rem; }
+  nav.toc { margin: 2.2rem 0 0; columns: 2; column-gap: 3rem; max-width: 46rem; }
+  nav.toc ol { margin: 0; padding-left: 1.4rem; font-size: 0.95rem; }
+  nav.toc li { margin: 0.25rem 0; break-inside: avoid; }
+  nav.toc a { border-bottom: none; color: var(--ink); }
+  nav.toc a:hover { color: var(--accent); }
+  nav.toc .n { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.8em; color: var(--accent); margin-right: 0.4em; }
+  @media (max-width: 640px) { nav.toc { columns: 1; } }
+
+  .tablewrap { overflow-x: auto; margin: 1.2rem 0; max-width: 74rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; line-height: 1.45; }
+  th {
+    font-family: "Helvetica Neue", "Segoe UI", Arial, sans-serif; font-size: 0.78rem;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+    text-align: left; font-weight: 600; padding: 0.5rem 0.9rem 0.4rem 0; border-bottom: 2px solid var(--ink);
+  }
+  td { padding: 0.55rem 0.9rem 0.55rem 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.num, .tabnum { font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace; font-size: 0.82rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td .src { font-size: 0.8em; white-space: nowrap; }
+  .hotnum { color: var(--hot); font-weight: 600; }
+  .goodnum { color: var(--accent); font-weight: 600; }
+
+  .callout {
+    background: var(--accent-soft); border-left: 3px solid var(--accent);
+    padding: 0.85rem 1.1rem; margin: 1.4rem 0; border-radius: 0 6px 6px 0; max-width: 46rem;
+  }
+  .callout p { margin: 0.3rem 0; }
+  ul, ol { padding-left: 1.5rem; }
+  li { margin: 0.35rem 0; }
+  li::marker { color: var(--muted); }
+  .prose ul li::marker { color: var(--accent); }
+
+  figure { margin: 2rem 0; max-width: 74rem; }
+  figure .figscroll { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1.2rem; }
+  figure svg { display: block; min-width: 640px; max-width: 100%; height: auto; margin: 0 auto; }
+  figcaption { font-size: 0.85rem; color: var(--muted); margin-top: 0.6rem; max-width: 46rem; }
+  figcaption b { color: var(--ink); }
+
+  details { margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; font-family: "Helvetica Neue", "Segoe UI", Arial, sans-serif; font-size: 0.95rem; }
+  .srcgroup { font-size: 0.88rem; }
+  .srcgroup ul { margin: 0.4rem 0; }
+  .kbd-note { color: var(--muted); font-size: 0.9rem; }
+  @media (prefers-reduced-motion: no-preference) {
+    html { scroll-behavior: smooth; }
+  }
+</style>
+
+<div class="wrap">
+<header class="cover">
+  <p class="eyebrow">Design doc · a special-purpose OS for latency-critical workloads</p>
+  <h1>Talaria OS</h1>
+  <p class="lede">An operating system in which the application owns the hardware and the OS becomes the control plane. For trading, embedded systems and dedicated servers behind an external security perimeter. Talaria are the winged sandals of the messenger god: a layer that makes whoever puts it on fast.</p>
+  <div class="docmeta">
+    <span><b>doc</b>TAL-RFC-001</span>
+    <span><b>status</b>draft v0.1</span>
+    <span><b>date</b>2026-08-19</span>
+    <span><b>platforms</b>x86-64 · ARM64</span>
+    <span><b>profiles</b>trading · embedded · server</span>
+  </div>
+
+  <nav class="toc" aria-label="Contents">
+    <ol>
+      <li><span class="n">1</span><a href="#summary">Summary</a></li>
+      <li><span class="n">2</span><a href="#goals">Goals, non-goals, the threat model</a></li>
+      <li><span class="n">3</span><a href="#pain">The ailments of general-purpose operating systems</a></li>
+      <li><span class="n">4</span><a href="#practice">The requirements from practice</a></li>
+      <li><span class="n">5</span><a href="#prior">Prior art: what we take</a></li>
+      <li><span class="n">6</span><a href="#design">Talaria's architecture</a></li>
+      <li><span class="n">7</span><a href="#profiles">The three build profiles</a></li>
+      <li><span class="n">8</span><a href="#metrics">The target metrics</a></li>
+      <li><span class="n">9</span><a href="#risks">The risks and the open questions</a></li>
+      <li><span class="n">10</span><a href="#roadmap">The roadmap</a></li>
+      <li><span class="n">11</span><a href="#sources">The sources</a></li>
+    </ol>
+  </nav>
+</header>
+
+<section id="summary" class="prose">
+  <h2><span class="num">1</span>Summary</h2>
+  <p>The whole practice of low-latency tuning of Linux — <code>isolcpus</code>, <code>nohz_full</code>, <code>rcu_nocbs</code>, <code>mitigations=off</code>, THP off, NUMA balancing off, busy-poll, kernel bypass, SCHED_FIFO — is a consistent <em>switching off</em> of the mechanisms of a general-purpose OS. For twenty years the HFT industry has been turning Linux into a unikernel by hand: the kernel is used as a bootloader and a control plane, while the data plane is assembled anew in user space on top of a dozen fragile boot parameters, sysctls and patches. Talaria turns that practice into a first-class system: what in Linux is achieved by tuning "against" the design is here the default model.</p>
+  <p>The core of the idea is four decisions, each of them proven either in research operating systems or in production:</p>
+  <ul>
+    <li><b>Partitioning instead of time sharing.</b> The machine is statically divided into a control plane (1–2 cores, where the whole "operating system" lives) and data cells — groups of cores owned exclusively by the application. On a cell's cores no OS code executes at all: no ticks, no IRQs, no kworkers. The pattern is proven by the HPC multi-kernels (McKernel/mOS), by Jailhouse and by the whole practice of core isolation in HFT.</li>
+    <li><b>A library kernel inside a cell.</b> The application is linked with the OS runtime statically: the "syscalls" of the hot path are ordinary function calls (2–5 ns instead of 100–600 ns), there is a single address space and a run-to-completion reactor on every core (the Seastar/IX model). The rare cold syscalls are proxied to the control plane (the McKernel model).</li>
+    <li><b>I/O without a kernel as the only path.</b> The native I/O ABI is queues in shared memory (the io_uring/Demikernel model): the NIC and NVMe queues are mapped straight into the application, the network stack is a library, TLS is a part of the transmit pipeline rather than a separate layer.</li>
+    <li><b>Compatibility through musl rather than through emulation.</b> A POSIX subset (~200 Linux syscalls cover the server ecosystem) is implemented as a libc target: existing C/C++/Rust code is rebuilt without changes. Binary compatibility with Linux is a separate late mode, not a foundation.</li>
+  </ul>
+  <p>The implementation language is Rust in the framekernel model (Asterinas): <code>unsafe</code> is isolated in a narrow framework, the rest of the system is safe code. The delivery channel of v1 is a KVM guest (virtio + VFIO passthrough of real NICs), which reduces the driver problem to one set of drivers and gives seconds to deploy and CI on ordinary machines; bare metal is the second phase.</p>
+  <p>The target niche by latency: a software wire-to-wire of 0.5–1.5 us and tail jitter an order of magnitude better than a tuned Linux. Below ~500 ns only an FPGA competes (the STAC-T0 record is 13.9 ns) — that is deliberately not our territory; ours is determinism, the p99.99 tails and the cost of ownership of the software path.</p>
+</section>
+
+<section id="goals" class="prose">
+  <h2><span class="num">2</span>Goals, non-goals, the threat model</h2>
+  <h3><span class="num">2.1</span>The goals</h3>
+  <ul>
+    <li>The jitter on a cell's cores: p99.99 &lt; 1 us, the maximum &lt; 5 us without manual tuning — "out of the box" better than a perfectly tuned Linux (p99.9 ≈ 4.9 us, max ≈ 18 us in the reference measurements).</li>
+    <li>The datapath's overhead: a "syscall" call = a function call; sending/receiving a packet through the native API — hundreds of cycles, zero copies, zero mode switches.</li>
+    <li>The footprint: a cell's image &lt; 10 MB, a guest's boot &lt; 100 ms, the full reproducibility of the build and of the configuration (the machine's passport as an artefact).</li>
+    <li>Compatibility: a server application in C/C++/Rust is rebuilt against musl "as is"; the toolchain, the debugger and the profiler are the standard ones (LLVM, ELF/DWARF, gdb, the PMU).</li>
+    <li>Observability as a first-class feature: the jitter counters, the tracing, the flight recorder and the crash dump do not degrade the hot path.</li>
+    <li>Two target ISAs in CI from day one: x86-64 and ARM64 (servers and embedded).</li>
+  </ul>
+  <h3><span class="num">2.2</span>The non-goals</h3>
+  <ul>
+    <li>A general-purpose multi-user OS, a desktop, the running of untrusted code, multi-tenancy.</li>
+    <li>Full POSIX and full binary compatibility with Linux (the chase after 100% of the ABI is endless; the experience of OSv).</li>
+    <li>A front end to an untrusted environment: the termination of external traffic, a DMZ, sandboxes. The external security perimeter is given by the problem's statement.</li>
+    <li>Records of minimal latency against an FPGA: the sub-100-ns path stays with the hardware, Talaria serves the software part and the management.</li>
+    <li>A full-blown general-purpose disk file system of our own: on the hot path there is an append log/blobstore, everything else is on the control plane.</li>
+  </ul>
+  <h3><span class="num">2.3</span>The threat model</h3>
+  <p>A single trust domain: all the code on the machine is trusted, the environment is a colocation or one's own segment behind a firewall/bastion. Hence the architectural consequences that give "free" performance: the mitigations of speculative attacks are not needed (a return of 5–25% of the performance depending on the CPU's generation), seccomp/LSM/audit are absent as a class, ASLR is not needed (the determinism of the layout is a feature: reproducible profiles and cache behaviour). The MMU protection between the cells and the control plane is kept — but as a protection from <em>bugs</em> and as a debugging tool rather than from attacks; in a cell's release profile it is configurable. For development there exists a debug profile with full protection and sanitisers.</p>
+</section>
+
+<section id="pain">
+  <h2 class="prose-h"><span class="num">3</span>The ailments of general-purpose operating systems</h2>
+  <div class="prose">
+  <p>A summary of the taxes a general-purpose OS levies on a latency-critical application. All the numbers come from public measurements (the references are in <a href="#sources">§11</a>); this is at the same time the project's justification and a checklist of what must not be in Talaria.</p>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>The tax</th><th>The mechanism</th><th>The price</th><th>How it is treated in Linux</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>A syscall</b></td>
+        <td>A mode switch, KPTI (a change of the CR3), verw flushes, swapgs</td>
+        <td class="num"><span class="hotnum">76–773 ns</span>; the mitigations x2–6; KPTI 0.1–7%+ of the CPU at an active syscall rate</td>
+        <td><code>mitigations=off</code>, the vDSO, batching, io_uring</td>
+      </tr>
+      <tr>
+        <td><b>Context switch</b></td>
+        <td>The direct price + the pollution of the L1/L2/TLB/BPU</td>
+        <td class="num"><span class="hotnum">1.2–2.2 us</span> direct; the indirect ones are tens of us at a large working set</td>
+        <td>pinning, SCHED_FIFO, giving up threads on the hot path</td>
+      </tr>
+      <tr>
+        <td><b>The user/kernel copies</b></td>
+        <td>read/recv/send through an sk_buff</td>
+        <td class="num">the memory bandwidth + the eviction of the cache; MSG_ZEROCOPY pays off only from <span class="hotnum">&gt;10 KB</span></td>
+        <td>kernel bypass; for small messages there is no cure</td>
+      </tr>
+      <tr>
+        <td><b>The network stack</b></td>
+        <td>IRQ → softirq/NAPI → sk_buff → TCP → wakeup → scheduler → copy</td>
+        <td class="num"><span class="hotnum">2–10 thousand cycles/packet</span>, a transit of 20–50 us vs 1–5 us with a bypass; the delivery of an IRQ 5–15 us</td>
+        <td>Onload/DPDK/AF_XDP — giving up the stack entirely</td>
+      </tr>
+      <tr>
+        <td><b>The tick and the kernel's housekeeping</b></td>
+        <td>A 1 kHz tick, the RCU callbacks, the kworkers, the balancer</td>
+        <td class="num">periodic thefts of the core; <code>nohz_full</code> leaves ~1 tick/s</td>
+        <td>isolcpus + nohz_full + rcu_nocbs + the cpumasks of the work queues</td>
+      </tr>
+      <tr>
+        <td><b>Memory in motion</b></td>
+        <td>THP/khugepaged, compaction, NUMA balancing, writeback, KSM</td>
+        <td class="num">stalls of <span class="hotnum">100 us – 1 ms</span> + TLB shootdowns (1–5 us per IPI, they hit foreign cores synchronously)</td>
+        <td>THP off, mlockall, swapoff, numa_balancing=0, hugetlbfs</td>
+      </tr>
+      <tr>
+        <td><b>Power saving</b></td>
+        <td>C-states, P-state transitions</td>
+        <td class="num">an exit from a C-state <span class="hotnum">10–200 us</span>; an unstable frequency 10–50 us</td>
+        <td><code>idle=poll</code>, max_cstate=1, performance governor</td>
+      </tr>
+      <tr>
+        <td><b>SMI</b></td>
+        <td>The System Management Mode, invisible to the kernel</td>
+        <td class="num">spikes of <span class="hotnum">50–300 us</span>, they pierce even PREEMPT_RT</td>
+        <td>only the choice of the hardware/BIOS</td>
+      </tr>
+      <tr>
+        <td><b>The security tax</b></td>
+        <td>The Spectre/Meltdown mitigations, seccomp, LSM/SELinux, audit, ASLR</td>
+        <td class="num">the mitigations <span class="hotnum">5–25%</span> (Downfall up to 34–39%); seccomp ~250 cycles/call; SELinux up to 12–19% on FS workloads</td>
+        <td>everything is switched off on HFT production hosts</td>
+      </tr>
+      <tr>
+        <td><b>The scheduler</b></td>
+        <td>CFS/EEVDF — fairness, not the worst case; the migrations, the wakeup delays</td>
+        <td class="num">a p99 wakeup of up to milliseconds in CFS; EEVDF is better, but without guarantees</td>
+        <td>SCHED_FIFO + isolation + a busy spin — going round the scheduler</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="prose">
+  <p>The summary on jitter: a stock kernel under load — a max of ~700 us (cyclictest); PREEMPT_RT — ~280 us; a perfectly tuned and isolated Linux — p99.9 ≈ 4.9 us, max ≈ 18 us. Between the stock one and the tuned one there are <b>2–4 orders of magnitude</b>, and all the tuning comes down to switching the OS off on the working cores. Windows drops out at once: the ISR/DPC model admits millisecond uncontrolled delays from foreign drivers, there is no full core isolation, the kernel is closed.</p>
+  </div>
+
+  <figure>
+    <div class="figscroll">
+    <svg viewBox="0 0 880 300" role="img" aria-label="A comparison of a packet's path: in Linux a packet goes through seven stages through the kernel in 2–10 thousand cycles, in Talaria it is a DMA into the application's buffer and polling, of the order of 100–200 cycles">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="arrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="#2FA37F"/>
+        </marker>
+      </defs>
+      <g fill="none" stroke="currentColor" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12">
+        <text x="20" y="30" fill="currentColor" stroke="none" font-size="13" font-weight="bold">Linux: a packet's RX path</text>
+        <text x="640" y="30" fill="currentColor" stroke="none" opacity="0.65">≈ 2 000–10 000 cycles, 5–50 us</text>
+
+        <rect x="20" y="50" width="80" height="44" rx="4"/>
+        <text x="60" y="76" text-anchor="middle" fill="currentColor" stroke="none">NIC</text>
+
+        <rect x="140" y="50" width="80" height="44" rx="4"/>
+        <text x="180" y="70" text-anchor="middle" fill="currentColor" stroke="none">hardIRQ</text>
+        <text x="180" y="86" text-anchor="middle" fill="currentColor" stroke="none" opacity="0.6" font-size="10">5–15 us</text>
+
+        <rect x="260" y="50" width="90" height="44" rx="4"/>
+        <text x="305" y="70" text-anchor="middle" fill="currentColor" stroke="none">softirq</text>
+        <text x="305" y="86" text-anchor="middle" fill="currentColor" stroke="none" opacity="0.6" font-size="10">NAPI/ksoftirqd</text>
+
+        <rect x="390" y="50" width="90" height="44" rx="4"/>
+        <text x="435" y="70" text-anchor="middle" fill="currentColor" stroke="none">sk_buff</text>
+        <text x="435" y="86" text-anchor="middle" fill="currentColor" stroke="none" opacity="0.6" font-size="10">TCP/UDP</text>
+
+        <rect x="520" y="50" width="90" height="44" rx="4"/>
+        <text x="565" y="70" text-anchor="middle" fill="currentColor" stroke="none">wakeup</text>
+        <text x="565" y="86" text-anchor="middle" fill="currentColor" stroke="none" opacity="0.6" font-size="10">IPI + sched</text>
+
+        <rect x="650" y="50" width="90" height="44" rx="4"/>
+        <text x="695" y="70" text-anchor="middle" fill="currentColor" stroke="none">copy</text>
+        <text x="695" y="86" text-anchor="middle" fill="currentColor" stroke="none" opacity="0.6" font-size="10">kernel→user</text>
+
+        <rect x="780" y="50" width="80" height="44" rx="4"/>
+        <text x="820" y="76" text-anchor="middle" fill="currentColor" stroke="none">app</text>
+
+        <line x1="100" y1="72" x2="132" y2="72" marker-end="url(#arr)"/>
+        <line x1="220" y1="72" x2="252" y2="72" marker-end="url(#arr)"/>
+        <line x1="350" y1="72" x2="382" y2="72" marker-end="url(#arr)"/>
+        <line x1="480" y1="72" x2="512" y2="72" marker-end="url(#arr)"/>
+        <line x1="610" y1="72" x2="642" y2="72" marker-end="url(#arr)"/>
+        <line x1="740" y1="72" x2="772" y2="72" marker-end="url(#arr)"/>
+
+        <text x="20" y="185" fill="#2FA37F" stroke="none" font-size="13" font-weight="bold">Talaria: a packet's RX path</text>
+        <text x="640" y="185" fill="#2FA37F" stroke="none" opacity="0.9">≈ 100–200 cycles</text>
+
+        <g stroke="#2FA37F">
+          <rect x="20" y="205" width="80" height="44" rx="4"/>
+          <text x="60" y="231" text-anchor="middle" fill="#2FA37F" stroke="none">NIC</text>
+
+          <rect x="300" y="205" width="180" height="44" rx="4"/>
+          <text x="390" y="225" text-anchor="middle" fill="#2FA37F" stroke="none">the application's buffer</text>
+          <text x="390" y="241" text-anchor="middle" fill="#2FA37F" stroke="none" opacity="0.7" font-size="10">the RX ring in the address space</text>
+
+          <rect x="780" y="205" width="80" height="44" rx="4"/>
+          <text x="820" y="231" text-anchor="middle" fill="#2FA37F" stroke="none">app</text>
+
+          <line x1="100" y1="227" x2="292" y2="227" marker-end="url(#arrA)"/>
+          <text x="196" y="219" text-anchor="middle" fill="#2FA37F" stroke="none" font-size="11">DMA, zero-copy</text>
+          <line x1="480" y1="227" x2="772" y2="227" marker-end="url(#arrA)"/>
+          <text x="626" y="219" text-anchor="middle" fill="#2FA37F" stroke="none" font-size="11">poll (UMWAIT / WFE)</text>
+        </g>
+      </g>
+    </svg>
+    </div>
+    <figcaption><b>Fig. 1.</b> A packet's path to the application. In Linux between the NIC and the application there are seven stages, two execution contexts and a copy; in Talaria the NIC writes by DMA straight into the application's ring, which polls it on its own core. This is not an optimisation of the Linux path but its absence — the DPDK/ef_vi model, which has become the only native path.</figcaption>
+  </figure>
+</section>
+
+<section id="practice">
+  <h2><span class="num">4</span>The requirements from practice</h2>
+  <div class="prose">
+  <p>The design was checked not on abstract scenarios but on a real problem of low-latency transport and on the industry's public data.</p>
+
+  <h3><span class="num">4.1</span>The problem of low-latency transport (an HFT fund's challenge, DPDK/AF_XDP/FPGA)</h3>
+  <p>A multi-backend transport of market data: shm rings without syscalls, kernel UDP vs AF_XDP vs DPDK vs lwIP-over-DPDK, FEC+NACK, an FPGA port of the protocol (an Alveo U50). The conclusions that matter for an OS: the system's limit is measured in <b>packets per second, not in bytes</b>; DPDK against kernel UDP at 500k msg/s — p50 12.4 vs 15.5 us, but p99.99 <b>47.8 vs 105.5 us</b> (a bypass wins the tails above all); the software part of the budget is 0.57 us out of ~12 (95% is the network and the environment); measurements without a PTP clock lie (chrony was wrong by 53.9 us while claiming 3.8); kernel patches were needed (write-combining for vfio-pci, the PHC in the ENA driver) — the very things the OS should have given itself.</p>
+
+  <h3><span class="num">4.2</span>The industry</h3>
+  <p>A software kernel bypass: Onload sockets ~1.5 us, TCPDirect 828 ns, a Solarflare X4 590 ns half-RTT, an ExaNIC raw 696 ns wire-to-wire. FPGAs: a full tick-to-trade of 100–500 ns, the STAC-T0 record is 13.9 ns. Nobody (by the public data) writes a custom OS — everyone uses a "gutted" Linux. That is exactly the market niche: to turn the standard practice into a system.</p>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>The signal from practice</th><th>The requirement on Talaria</th></tr></thead>
+    <tbody>
+      <tr><td>The isolation is assembled out of ~10 boot parameters + sysctls + ansible and is checked by the application's self-diagnostics</td><td>The isolation is a declarative contract of the OS: a cell's manifest describes the cores/memory/devices, the system guarantees and confirms it (§6.2)</td></tr>
+      <tr><td>TLS is the dominant item of the transmit latency (28 out of 76 us)</td><td>TLS/crypto is a part of the I/O pipeline: the encryption is in the transmit loop, AES-NI/SIMD, the binding to a NIC queue, a kTLS-like offload where there is one (§6.4)</td></tr>
+      <tr><td>The zero-alloc/zero-syscall discipline is held by code review and by conventions</td><td>The native ABI makes a violation impossible: on the hot path there simply are no syscalls and no OS allocator (§6.2, §6.4)</td></tr>
+      <tr><td>The exchanges' UDP multicast requires A/B arbitration, a snapshot recovery, a replay — everyone writes it themselves</td><td>A library of market-data primitives over the L1 stack: an mcast join, an A/B arbitration by seq, a gap detect, FEC/NACK (§6.4)</td></tr>
+      <tr><td>The clocks: the TSC is calibrated by hand, the PTP is obtained by patching drivers, chrony lies</td><td>The TSC/generic timer + the PHC + PTP is a first-class subsystem with the publication of the coefficients in a shared page (§6.5)</td></tr>
+      <tr><td>The jitter is caught after the fact by the percentiles of one's own traces</td><td>Always-on counters of the perturbations (page faults = 0, migrations = 0, stolen cycles) + a flight recorder + a checkpoint trace (§6.10)</td></tr>
+      <tr><td>The stand's passport (the kernel, the cmdline, the flags) is attached to every measurement by hand</td><td>The system's configuration is a single reproducible artefact that enters the telemetry's reports (§6.10)</td></tr>
+      <tr><td>The small syscalls (clock_gettime ~25 ns, sendmsg ~1 us) are cached and gone round</td><td>The time is a read of the TSC + the coefficients; the transmit is a write into a ring + a doorbell (§6.4, §6.5)</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="prior">
+  <h2><span class="num">5</span>Prior art: what we take and what we have learnt</h2>
+  <div class="prose">
+  <p>Talaria contains almost no new ideas — and that is deliberate. Every element is taken from a system where it is proven; the novelty is in the composition and in the product's shaping.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>The system</th><th>The proven idea</th><th>What we take into Talaria</th></tr></thead>
+    <tbody>
+      <tr><td><b>IX</b> (OSDI'14)</td><td>Run-to-completion + adaptive batching: latency and throughput at once; memcached x3.6 against Linux</td><td>The execution model of a cell's data plane</td></tr>
+      <tr><td><b>Arrakis</b> (OSDI'14)</td><td>"The OS is a control plane": SR-IOV/hardware virtualisation instead of a software middleman</td><td>The separation of the planes, direct device queues into the application</td></tr>
+      <tr><td><b>McKernel/IHK, mOS</b> (HPC)</td><td>A light kernel on isolated cores + the proxying of rare syscalls into Linux; it worked on x86 and on ARM (Fugaku)</td><td>The syscall offload onto the control plane</td></tr>
+      <tr><td><b>Shenango/Caladan</b> (NSDI'19/OSDI'20)</td><td>The overload signal is a queue's age; a redistribution of the cores in 5 us; the fight against LLC/HT interference</td><td>The telemetry of the queues; the mechanism of donating cores for the server profile (the MIT code is available)</td></tr>
+      <tr><td><b>Shinjuku</b> (NSDI'19)</td><td>Pre-emption every 5 us through an IPI cures the heavy tails at mixed request durations</td><td>An optional us-preemption mode of the shards</td></tr>
+      <tr><td><b>Demikernel</b> (SOSP'21)</td><td>A single queue API over DPDK/RDMA/SPDK, an overhead of &lt;100 ns, Rust</td><td>The design of the native I/O ABI</td></tr>
+      <tr><td><b>Seastar</b> (ScyllaDB, prod)</td><td>Shard-per-core shared-nothing in years of production: millions of ops/s, predictable tails</td><td>The structure of the application's runtime; a reference for the I/O scheduler</td></tr>
+      <tr><td><b>io_uring</b></td><td>Rings in shared memory, registered buffers, multishot, SQPOLL — the right ABI model; but 60% of the kCTF submissions are a lesson in security design</td><td>The model of the native ABI (in a single trust domain its weakness is not inherited)</td></tr>
+      <tr><td><b>DPDK / SPDK</b></td><td>The PMD, the mempool, ~25 cycles/packet; a polled NVMe at 13.9M IOPS/core, a blobstore instead of a POSIX FS</td><td>The driver model of the data plane; the storage model; ARM tier-1</td></tr>
+      <tr><td><b>Unikraft</b></td><td>The whole kernel is a construction set of replaceable libraries; ~160 syscalls run Redis/NGINX/Python; 1.7–2.7x against a Linux guest</td><td>The modularity of the build; the data on a sufficient subset of the API</td></tr>
+      <tr><td><b>OSv, Nanos</b></td><td>Linux ABI compatibility works as an adoption strategy, but the full ABI is an endless chase</td><td>The musl target as the foundation, binary compat is a late optional mode</td></tr>
+      <tr><td><b>seL4</b></td><td>Capabilities + an IPC of 400–700 cycles + a formal verification without a loss of performance</td><td>The isolation model of the control plane; a candidate for the hypervisor foundation of the embedded profile</td></tr>
+      <tr><td><b>Jailhouse</b></td><td>The static partitioning of the hardware into "cells" with practically no overhead, x86-64 + ARM</td><td>The semantics of a cell; the terminology</td></tr>
+      <tr><td><b>Zephyr</b></td><td>Kconfig + a devicetree as the language of the hardware's and the build's configuration</td><td>The manifests of the cells and of the boards; the embedded profile</td></tr>
+      <tr><td><b>Asterinas, Hermit, Theseus</b></td><td>A Rust kernel is viable; the framekernel: unsafe only in a narrow framework, the services are safe</td><td>The language and the architecture of the kernel's code</td></tr>
+      <tr><td><b>The critique of unikernels</b> (Cantrill)</td><td>The main cause of the failure is undebuggability in production, a "total lack of operational empathy"</td><td>Observability is a first-class requirement (§6.10), not an afterword</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="design">
+  <h2><span class="num">6</span>Talaria's architecture</h2>
+
+  <div class="prose">
+  <h3><span class="num">6.1</span>The frame: the control plane and the data cells</h3>
+  <p>At the boot the machine is statically divided by a manifest into a <b>control plane</b> (1–2 cores) and one or several <b>data cells</b>. The control plane is exactly the "operating system": the loading and the supervision of the cells, the drivers of the slow devices (virtio-blk, the console, the management network), the network management access (SSH/API), the telemetry and its export, the PTP daemon, the proxying of the cold syscalls, the gdb stub. A cell is a group of cores, ranges of memory and device queues owned exclusively by one application. On a cell's cores only the application and the runtime linked with it execute: interrupts are not routed there (except the explicitly requested ones), there are no ticks, there are no background OS threads, TLB shootdowns from foreign activity are impossible — there is no shared mutable memory map with the other cells.</p>
+  </div>
+
+  <figure>
+    <div class="figscroll">
+    <svg viewBox="0 0 920 520" role="img" aria-label="Talaria's architecture: the control plane on cores 0–1 serves the data cells on cores 2–7; the NIC queues are mapped straight into the cells; between the cells there are SPSC rings in shared memory; the cold syscalls are proxied onto the control plane">
+      <defs>
+        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="ar2g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="#2FA37F"/>
+        </marker>
+      </defs>
+      <g fill="none" stroke="currentColor" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12">
+        <!-- Control plane -->
+        <rect x="20" y="40" width="230" height="300" rx="6"/>
+        <text x="36" y="66" fill="currentColor" stroke="none" font-weight="bold" font-size="13">Control plane</text>
+        <text x="36" y="84" fill="currentColor" stroke="none" opacity="0.6" font-size="11">cores 0–1 · "the whole OS is here"</text>
+        <g opacity="0.9">
+          <rect x="36" y="100" width="198" height="30" rx="3"/><text x="46" y="119" fill="currentColor" stroke="none" font-size="11">the cells' supervisor · capabilities</text>
+          <rect x="36" y="138" width="198" height="30" rx="3"/><text x="46" y="157" fill="currentColor" stroke="none" font-size="11">syscall proxy (the cold calls)</text>
+          <rect x="36" y="176" width="198" height="30" rx="3"/><text x="46" y="195" fill="currentColor" stroke="none" font-size="11">telemetry · flight recorder · OTel</text>
+          <rect x="36" y="214" width="198" height="30" rx="3"/><text x="46" y="233" fill="currentColor" stroke="none" font-size="11">the PTP daemon · the clock's discipline</text>
+          <rect x="36" y="252" width="198" height="30" rx="3"/><text x="46" y="271" fill="currentColor" stroke="none" font-size="11">mgmt: SSH/API · gdb stub · the logs</text>
+          <rect x="36" y="290" width="198" height="30" rx="3"/><text x="46" y="309" fill="currentColor" stroke="none" font-size="11">virtio-blk/console · files · configs</text>
+        </g>
+
+        <!-- Cells -->
+        <g stroke="#2FA37F">
+          <rect x="330" y="40" width="270" height="180" rx="6"/>
+          <text x="346" y="66" fill="#2FA37F" stroke="none" font-weight="bold" font-size="13">Cell A · the feed + the strategy</text>
+          <text x="346" y="84" fill="#2FA37F" stroke="none" opacity="0.75" font-size="11">cores 2–5 · run-to-completion shards</text>
+          <rect x="346" y="100" width="238" height="30" rx="3"/><text x="356" y="119" fill="#2FA37F" stroke="none" font-size="11">the application + the libOS (one address space)</text>
+          <rect x="346" y="138" width="238" height="30" rx="3"/><text x="356" y="157" fill="#2FA37F" stroke="none" font-size="11">the L1 stack: UDP mcast · A/B arbitration</text>
+          <rect x="346" y="176" width="238" height="30" rx="3"/><text x="356" y="195" fill="#2FA37F" stroke="none" font-size="11">the NIC's RX/TX rings (mmap)</text>
+        </g>
+        <g stroke="#2FA37F">
+          <rect x="640" y="40" width="260" height="180" rx="6"/>
+          <text x="656" y="66" fill="#2FA37F" stroke="none" font-weight="bold" font-size="13">Cell B · order gateway</text>
+          <text x="656" y="84" fill="#2FA37F" stroke="none" opacity="0.75" font-size="11">core 6 · one shard</text>
+          <rect x="656" y="100" width="228" height="30" rx="3"/><text x="666" y="119" fill="#2FA37F" stroke="none" font-size="11">TCP lite + TLS in the TX pipeline</text>
+          <rect x="656" y="138" width="228" height="30" rx="3"/><text x="666" y="157" fill="#2FA37F" stroke="none" font-size="11">the risk checks · the orders' FSM</text>
+          <rect x="656" y="176" width="228" height="30" rx="3"/><text x="666" y="195" fill="#2FA37F" stroke="none" font-size="11">the NIC's TX ring · the doorbell</text>
+        </g>
+        <rect x="330" y="250" width="570" height="90" rx="6" stroke-dasharray="6 4"/>
+        <text x="346" y="276" fill="currentColor" stroke="none" font-weight="bold" font-size="13">Cell C · persist / batch</text>
+        <text x="346" y="294" fill="currentColor" stroke="none" opacity="0.6" font-size="11">core 7 · the recording of market data, the snapshots, an append log on a polled NVMe</text>
+
+        <!-- inter-cell -->
+        <line x1="600" y1="130" x2="632" y2="130" marker-end="url(#ar2g)" stroke="#2FA37F"/>
+        <text x="616" y="118" text-anchor="middle" fill="#2FA37F" stroke="none" font-size="10">SPSC shm</text>
+        <line x1="465" y1="220" x2="465" y2="242" marker-end="url(#ar2)"/>
+        <text x="475" y="236" fill="currentColor" stroke="none" font-size="10">the events (a ring, fire-and-forget)</text>
+
+        <!-- control <-> cells -->
+        <line x1="250" y1="150" x2="322" y2="150" stroke-dasharray="4 4" marker-end="url(#ar2)"/>
+        <line x1="322" y1="185" x2="250" y2="185" stroke-dasharray="4 4" marker-end="url(#ar2)"/>
+        <text x="286" y="140" text-anchor="middle" fill="currentColor" stroke="none" font-size="10">the cold syscalls</text>
+        <text x="286" y="201" text-anchor="middle" fill="currentColor" stroke="none" font-size="10">the counters, the traces</text>
+
+        <!-- hardware -->
+        <rect x="20" y="390" width="880" height="70" rx="6"/>
+        <text x="36" y="414" fill="currentColor" stroke="none" font-weight="bold" font-size="13">The hardware / the hypervisor (KVM in v1, bare metal in v2)</text>
+        <rect x="330" y="424" width="160" height="26" rx="3"/><text x="410" y="441" text-anchor="middle" fill="currentColor" stroke="none" font-size="11">the NIC (VFIO, the queues)</text>
+        <rect x="520" y="424" width="130" height="26" rx="3"/><text x="585" y="441" text-anchor="middle" fill="currentColor" stroke="none" font-size="11">NVMe (polled)</text>
+        <rect x="680" y="424" width="130" height="26" rx="3"/><text x="745" y="441" text-anchor="middle" fill="currentColor" stroke="none" font-size="11">PHC / TSC</text>
+        <rect x="36" y="424" width="150" height="26" rx="3"/><text x="111" y="441" text-anchor="middle" fill="currentColor" stroke="none" font-size="11">virtio · mgmt-NIC</text>
+
+        <!-- hw arrows -->
+        <line x1="410" y1="424" x2="440" y2="212" stroke="#2FA37F" marker-end="url(#ar2g)"/>
+        <text x="398" y="380" fill="#2FA37F" stroke="none" font-size="10">RX DMA → Cell A</text>
+        <line x1="770" y1="212" x2="470" y2="424" stroke="#2FA37F" marker-end="url(#ar2g)"/>
+        <text x="660" y="380" fill="#2FA37F" stroke="none" font-size="10">TX doorbell ← Cell B</text>
+        <line x1="585" y1="424" x2="585" y2="346" marker-end="url(#ar2)"/>
+        <line x1="111" y1="424" x2="111" y2="346" marker-end="url(#ar2)"/>
+      </g>
+    </svg>
+    </div>
+    <figcaption><b>Fig. 2.</b> Talaria's frame on the example of a trading workload. The control plane owns the whole "slow world"; the cells own the cores and the device queues directly. The dashed lines are the rare interactions outside the hot path.</figcaption>
+  </figure>
+
+  <div class="prose">
+  <h3><span class="num">6.2</span>A cell: the manifest, the runtime, the execution</h3>
+  <p>A cell is described by a declarative manifest (the configuration language is a descendant of Zephyr's Kconfig/devicetree): the cores, the volume and the layout of the memory (including the NUMA nodes and the page size), the devices and their queues, the channels to the other cells, the LLC/memory-bandwidth limits (Intel RDT / ARM MPAM), the polling policy. At the start the system <em>guarantees</em> the contract — rather than "checks and warns", as the self-diagnostics of a typical HFT application on Linux is forced to do: if a resource cannot be given out exclusively, the cell does not start.</p>
+  <p>Inside a cell there is the kernel-as-library model: a single address space, the runtime is linked statically, there is no user/kernel boundary. The execution is shard-per-core (Seastar): one reactor per core, run-to-completion with adaptive batching (IX), the shards communicate through explicit SPSC/MPSC rings, without shared locks. For workloads with mixed request durations (the server profile) a us-preemption is switched on: a dedicated dispatcher sends a timer IPI with a step of ~5 us (Shinjuku) — that is a manifest option, in the trading profile it is off. There are no blocking primitives on the hot path; the waiting is <code>UMWAIT/TPAUSE</code> on x86, <code>WFE</code> + an event stream on ARM: the latency of polling without burning the neighbours' turbo budget.</p>
+  <p>The cold operations (opening a configuration file, DNS, the exec of a helper process) are implemented by proxying onto the control plane through a ring of requests (the McKernel model): for the application that is an ordinary musl call which under the hood puts a request into a queue and yields the shard. The discipline "there are no syscalls on the hot path" stops being a convention — the hot calls are cheap by construction, the cold ones are explicitly asynchronous.</p>
+
+  <h3><span class="num">6.3</span>The memory: static by default</h3>
+  <ul>
+    <li>All a cell's memory is given out at the start: hugepages of 2M/1G, prefaulted, pinned. There is no overcommit, no swap, no page cache on the data plane, no background compaction/migration/deduplication — <em>by construction</em> rather than by a setting. A page fault in a cell after the start is a bug, and the telemetry counts it as an error (the counter is bound to be zero).</li>
+    <li>NUMA is explicit: the manifest binds the ranges to the nodes; the allocators are per-shard, without global locks; the inter-shard handovers go by reference within a cell.</li>
+    <li>The partitioning of the LLC and of the memory bandwidth (Intel CAT/MBA, ARM MPAM) is a part of the manifest, a first-class API rather than <code>resctrl</code> magic.</li>
+    <li>The MMU is used minimally: an identity mapping of hugepages inside a cell (a minimum of TLB misses, no page walks on the hot path), the protection of the boundaries between the cells and the control plane. TLB shootdowns do not exist in the steady state — the memory maps do not change.</li>
+  </ul>
+
+  <h3><span class="num">6.4</span>I/O: queues as the only primitive</h3>
+  <p>The native ABI is asynchronous queues in shared memory: submission/completion rings, buffers registered in advance, multishot operations. This is the io_uring model cleansed of its birth trauma: in a single trust domain there is no malicious neighbour, and "the kernel parses an SQE out of shared memory" stops being an attack surface. The application-level API is Demikernel's queue pairs (<code>push/pop/wait_any</code>), the same for the network, the storage and the inter-cell channels.</p>
+  <p><b>The network is three layers, all of them in a cell:</b></p>
+  <ul>
+    <li><b>L0 raw:</b> the NIC's queues mapped into the application (the ef_vi/DPDK model; in v1 — through a VFIO passthrough in a guest). Flow steering by the 5-tuple straight into a shard's queue. For the extreme cases there is a CTPIO-like transmit and a preloaded TX where the NIC can do it.</li>
+    <li><b>L1 lite stack:</b> statically linked UDP/TCP (the base is smoltcp with SACK added, or a port of F-Stack for a full TCP), zero-copy, run-to-completion, without global state. On top of it there is a library of market-data primitives: a multicast join, an A/B arbitration by the sequence numbers, the detection of gaps, a snapshot recovery, FEC/NACK (the protocol and the code from §4.2 are reused directly). <b>TLS is here too</b>: the encryption is in the transmit pipeline (AES-NI/AVX, session resumption, readiness for a NIC offload) — a direct answer to the tens of microseconds of the TLS tax on the path "OpenSSL + a socket".</li>
+    <li><b>L2 compatibility:</b> BSD sockets/epoll over L1 for code rebuilt without changes (the Onload model). The layer's price is measurable and documented (~2x against L1, as with Onload against TCPDirect).</li>
+  </ul>
+  <p><b>The storage:</b> a polled NVMe driver in a cell (the SPDK model), on top of it an append log/blobstore with ZNS on the horizon; there is no POSIX FS on the hot path. A full-blown file system (the configs, the logs, the artefacts) lives on the control plane; a cell writes there through the channels, the way HFT applications write logs through a cold thread. The hybrid polling of the NVMe (a sleep up to half the expected latency) is a manifest policy.</p>
+
+  <h3><span class="num">6.5</span>The time</h3>
+  <p>The primary clock is the invariant TSC (x86) / the generic timer (ARM): a read is single nanoseconds, without a syscall. The control plane calibrates and disciplines the clock (PTP/PHC on the NIC's hardware timestamps), publishing the coefficients in a shared page (the vDSO model) — the cells get the nanosecond UTC time by reading two cache lines. The API of the RX/TX hardware timestamps is a part of L0/L1. There is a built-in latency tracer: the application puts named checkpoints, the system glues them together with the NIC's timestamps and computes the percentiles and the σ outside the hot path. The guarantee of the TSC's migration safety is trivial: the threads do not migrate.</p>
+
+  <h3><span class="num">6.6</span>The scheduling</h3>
+  <p>On the data plane there is no classical scheduler: the core belongs to the shard, full stop. There is cooperative multitasking inside a shard (futures/a reactor) and an optional us-preemption (§6.2). The overload signal is the age of the queues' heads (Shenango): it is exported as a metric and, in the server profile, controls the donation of idling cores to batch cells (the Caladan mechanism, the MIT code as a reference). On the control plane there is an ordinary pre-emptive scheduler with priorities for the cold tasks; its quality is not critical.</p>
+
+  <h3><span class="num">6.7</span>Security</h3>
+  <p>It corresponds to the threat model of §2.3: the mitigations of speculative attacks are absent (there is no KPTI, no retpoline, no verw flushes — the syscall path and the switches get several times cheaper), there is no seccomp/LSM/audit/ASLR. The isolation is capabilities on the control plane (the seL4 model: a cell gets unforgeable rights to its own resources at the start and cannot reach foreign ones), MMU boundaries between the cells, an IOMMU for the DMA devices (a protection from an erroneous DMA, not from attacks; it can be switched off in the extreme trading profile with a measured price of the IOTLB). Secure/measured boot is an option for compliance. The debug build profile returns the full protection and the sanitisers — the development is done with the belts on, production flies without them.</p>
+
+  <h3><span class="num">6.8</span>Compatibility and the ecosystem</h3>
+  <ul>
+    <li><b>libc:</b> musl as the canonical target; static linking. musl's "syscalls" are the runtime's functions: ~200–224 calls of the Linux ABI cover the server ecosystem (Tsai et al.; Unikraft runs Redis/NGINX/Python with ~160). Three classes of implementation: the hot ones natively in a cell; the cold ones proxied to the control plane; the unsupported ones an explicit <code>ENOSYS</code> with a trace (the list is known at the linking stage).</li>
+    <li><b>The languages:</b> C/C++ (a musl target, LLVM), Rust (a first-class target <code>*-talaria</code>), Go — later (the runtime requires futexes/signals — feasible, but not for v1).</li>
+    <li><b>Binary compatibility with Linux</b> (running unmodified static ELFs) is a mode of the v3 phase: it is useful for adoption but is not a foundation (the lessons of OSv: the chase after the full ABI is endless; a runtime translation is ~10x dearer than linking).</li>
+    <li><b>The formats and the debugging:</b> ELF, DWARF, a gdb remote stub through the control plane (a cell is debugged not from its own cores), a perf-like access to the PMU, symbolised crash dumps.</li>
+    <li><b>The export of the observability:</b> OpenTelemetry/Prometheus from the control plane; the trace formats are open (perfetto-compatible).</li>
+    <li><b>The boot:</b> x86-64 — UEFI + the Linux boot protocol/PVH (bootability by any VMM and by GRUB "for free"); ARM64 — SystemReady (servers: UEFI+ACPI+PSCI) and a devicetree (embedded).</li>
+  </ul>
+
+  <h3><span class="num">6.9</span>The drivers and the platforms</h3>
+  <p>The driver chasm is the main killer of new operating systems; the strategy is to minimise it structurally:</p>
+  <ul>
+    <li><b>v1 — a KVM guest</b> (Cloud Hypervisor / Firecracker / QEMU): virtio-net/blk/console/vsock (modern-only, a packed ring) + a <b>VFIO passthrough</b> of the latency-critical NICs. The PMDs of the physical NICs (mlx5, ice, the ef_vi class) live in a cell as libraries — by the DPDK model, where the driver is in user space anyway; the references and part of the code are reused. The Rust crate <code>virtio-drivers</code> closes virtio at little cost. The hypervisor here is not a virtualisation layer in the usual sense but a tool for booting and for compatibility with foreign hardware; a guest's jitter tax is measured and published.</li>
+    <li><b>v2 — bare-metal x86-64:</b> UEFI, ACPI, NVMe, with the same PMD model; the choice of the reference hardware with control over the SMI (that is a procurement requirement, not a software one).</li>
+    <li><b>v3 — ARM64:</b> SystemReady servers (the Graviton class, Ampere), embedded boards through a devicetree + PSCI; the DPDK ecosystem on ARM is tier-1, the PMDs are portable.</li>
+    <li><b>The clouds</b> (on demand): the ENA/gVNIC/MANA drivers — the big three are not virtio; the NVMe driver is reused everywhere.</li>
+  </ul>
+
+  <h3><span class="num">6.10</span>Observability: the anti-lesson of the unikernels</h3>
+  <p>The unikernels died not from a lack of speed but from undebuggability in production. So:</p>
+  <ul>
+    <li><b>Always-on counters of the perturbations</b> at zero price on the hot path (increments in per-shard cache lines): page faults (bound to be 0), pre-emptions/IPIs (bound to be 0 in the trading profile), the depth and the age of the queues, the PMU (LLC/TLB misses, the IPC). A violation of an invariant is an alert, not a line in a log.</li>
+    <li><b>A flight recorder:</b> a ring trace of the runtime's events and of the application's checkpoints in shared memory, read from the control plane without stopping the cell; after a failure it survives and enters the crash dump.</li>
+    <li><b>A crash dump</b> of a cell (the memory + the registers + the flight recorder) onto the control plane; the DWARF symbolisation is offline.</li>
+    <li><b>A gdb stub</b> and a "ps/top/netstat equivalent" — the control plane's CLI, showing the shards, the queues, the counters, the channels.</li>
+    <li><b>The machine's passport:</b> the full configuration (the manifests, the versions, the topology, the microcode, the CPU's flags) is one reproducible artefact, automatically attached to the telemetry and to the benchmarks (the practice from §4.2 raised into a system).</li>
+  </ul>
+
+  <h3><span class="num">6.11</span>The implementation and the reuse</h3>
+  <ul>
+    <li><b>The language:</b> Rust, the framekernel architecture (Asterinas): <code>unsafe</code> is only in an isolated framework (the pages, the MMIO, the interrupts), the whole of the logic is safe. C code is admitted in the borrowed PMDs/stacks behind an FFI boundary. The justification of the choice against C++ is in §6.12.</li>
+    <li><b>What we reuse (all the licences are permissive):</b> musl (MIT); smoltcp (0BSD) as the base of L1; the F-Stack/FreeBSD stack (BSD) as an option for a full TCP; the ideas and the code of Shenango/Caladan (MIT) for the donation of cores; virtio-drivers (MIT); DPDK/SPDK (BSD) as a reference for the PMDs and for the polled NVMe; the rust-osdev crates (bootloader, x86_64, aarch64); the LLVM/rustc toolchain; FEC/NACK/the arbitration — from the code base of §4.2.</li>
+    <li><b>What we do not write:</b> a compiler of our own, a general-purpose disk FS of our own, a TLS primitive of our own (we use ring/aws-lc behind a narrow interface), drivers for the whole zoo of hardware.</li>
+  </ul>
+
+  <h3><span class="num">6.12</span>Why Rust and not a modern C++</h3>
+  <p>The choice of the kernel's language here is a part of the architecture rather than a matter of taste. Talaria is a single address space, a library kernel, a minimum of MMU, without a user/kernel boundary: we have deliberately traded the hardware protection for performance. In such a system a dangling pointer or a data race is not a segfault with a core dump but a quiet corruption of the state in ring 0. Linux can afford C, because the MMU insures at least user space; a unikernel-like system cannot. The compiler is bound to compensate for the protection — statically and for free at runtime. Theseus and Asterinas are built directly on that thesis: isolation by means of the type system instead of isolation by means of the MMU. The C++ sanitisers are not an equivalent here: they work in a debug build, while UB in release keeps silent.</p>
+  <p>The second argument is concurrency in the type system. Shard-per-core, SPSC rings, seqlocks, pages shared between the cells and the control plane — the whole inter-shard contract ("what may be passed between cores") is encoded in Rust by <code>Send</code>/<code>Sync</code>, and a data race becomes a compilation error. In C++ that class of contracts is held by conventions and by review (a typical symptom: TSan does not understand a custom SPSC Disruptor, and the project lives with a suppression file). The third is auditability: in the framekernel model all the <code>unsafe</code> is concentrated in a framework of a few thousand lines, which can be read line by line; in C++ the "unsafe surface" is the whole code base.</p>
+  <p>The honest counter-arguments for C++: template metaprogramming is more powerful (NTTPs, variadics, <code>constexpr</code>-everything — const generics in Rust are still limited); the team's expertise is C++, and the speed of development in C++ in the first year would have been higher; the borrow checker in lock-free and self-referential structures is a real pain, and part of such code will be <code>unsafe</code> anyway. The mitigating circumstances: the kernel is new code in any case, the applications stay in C++ and are linked through musl/the C ABI — the kernel's language is not imposed on the application; for the osdev niche Rust's ecosystem is richer today (the <code>no_std</code> crates bootloader/x86_64/aarch64/virtio-drivers/smoltcp are ready-made proven bricks); and "modern C++" in a kernel is cut down anyway — the exceptions and the RTTI are switched off (latency-oriented C++ is built with <code>-fno-exceptions</code> as it is), strict aliasing is a minefield for code that casts network buffers, while Safe-C++/profiles are a horizon of years away.</p>
+  <p><b>The decision:</b> the kernel and the framework are Rust; the PMDs, the codecs and the borrowed stacks are C/C++ behind an FFI boundary without restrictions; the applications are in any language against musl, and C++ stays first-class. If Talaria were a monolith with an MMU boundary, the team factor would have outweighed in favour of C++; in a system without hardware protection C++ does not have the needed tool, however many templates we might write.</p>
+  </div>
+</section>
+
+<section id="profiles" class="prose">
+  <h2><span class="num">7</span>Three profiles out of one code base</h2>
+  <p>A profile is a preset of the manifest and of the composition of the libraries, not a fork:</p>
+  <ul>
+    <li><b>trading:</b> the maximum of determinism — poll-only, preemption off, the IOMMU optionally off, the L0/L1 network, the TLS pipeline, the market-data primitives, PTP. One or two hosts, a colocation.</li>
+    <li><b>server</b> (behind an external perimeter): mixed workloads — a us-preemption, the donation of cores to batch cells, L2 sockets for rebuilt applications, a polled NVMe + a blobstore, an OTel export.</li>
+    <li><b>embedded:</b> a small footprint — one image per board, a devicetree, static-everything, an option without an MMU; the L1 stack in an lwIP-class configuration; a candidate for seL4 as a certifiable foundation of mixed criticality.</li>
+  </ul>
+</section>
+
+<section id="metrics">
+  <h2><span class="num">8</span>The target metrics</h2>
+  <div class="prose"><p>The commitments of v1 (a KVM guest, a VFIO NIC), checkable by CI benchmarks on the reference hardware; the comparison is against an honestly tuned competitor, not against a stock one.</p></div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>The metric</th><th>Talaria (the target)</th><th>The baseline</th></tr></thead>
+    <tbody>
+      <tr><td>A "syscall" of the hot path</td><td class="num goodnum">2–5 ns (a function call)</td><td class="num">Linux: 76–773 ns</td></tr>
+      <tr><td>The jitter on a cell's core, p99.99 / max</td><td class="num goodnum">&lt; 1 us / &lt; 5 us out of the box</td><td class="num">tuned Linux: ~4.9 / ~18 us; PREEMPT_RT max: hundreds of us</td></tr>
+      <tr><td>UDP wire-to-wire (software, 64–512 B)</td><td class="num goodnum">0.6–1.5 us</td><td class="num">the Onload class: 0.8–1.6 us; the kernel: 10–50 us</td></tr>
+      <tr><td>TCP+TLS sending of an order (the build→the wire)</td><td class="num goodnum">&lt; 5 us</td><td class="num">OpenSSL + a socket on a tuned Linux: tens of us</td></tr>
+      <tr><td>The RX throughput per core</td><td class="num goodnum">≥ 0.8 x DPDK on the same NIC</td><td class="num">DPDK: ~25 cycles/packet</td></tr>
+      <tr><td>An NVMe 4K randread, IOPS/core</td><td class="num goodnum">≥ 0.7 x SPDK</td><td class="num">SPDK: ~10M+; the kernel+io_uring: ~2x the cores for the same</td></tr>
+      <tr><td>Page faults / pre-emptions in a cell (the steady state)</td><td class="num goodnum">0 (an invariant with an alert)</td><td class="num">Linux: non-deterministic</td></tr>
+      <tr><td>The boot of a cell (a guest)</td><td class="num goodnum">&lt; 100 ms</td><td class="num">a Linux guest: seconds</td></tr>
+      <tr><td>A cell's image</td><td class="num goodnum">&lt; 10 MB</td><td class="num">a Linux distribution: hundreds of MB–GB</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3><span class="num">8.1</span>Measured in the PoC (two tracks)</h3>
+  <div class="prose">
+    <p>The PoC is implemented in two tracks. <b>Track A</b> is host cells on VFIO
+    (Linux as the control plane): it confirms the hot path on a real 10G.
+    <b>Track B</b> is a self-hosting bootable kernel (the boot, SMP, page tables of its own,
+    the Linux syscall ABI, musl in ring 3, a scheduler): it confirms that the model is
+    a full-blown OS rather than a library. The full journal is <code>docs/POC-RESULTS.md</code>,
+    the measurement report is <code>docs/BENCH-B.md</code>.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>What was measured</th><th>The result</th><th>The track / the conditions</th></tr></thead>
+    <tbody>
+      <tr><td>rx→tx (a reflect, in place)</td><td class="num goodnum">14 ns / 52 ns avg</td><td>A · an 82599 on VFIO, a real 10G, 92–94% &lt;100 ns, 0 VMEXITs</td></tr>
+      <tr><td>tick-to-trade (the feed→the strategy→the risk→the crypto→the wire)</td><td class="num goodnum">620 ns</td><td>A · the full trading pipeline</td></tr>
+      <tr><td>The price of a "syscall" ring3→ring0→ring3</td><td class="num goodnum">28 ns (101 cycles)</td><td>B · a clean one (without a VMEXIT); Linux ~50–150 ns</td></tr>
+      <tr><td>A reflect compute (the parsing+the swap of a UDP)</td><td class="num goodnum">60 ns</td><td>B · in-kernel, one core</td></tr>
+      <tr><td>An AES-128-GCM seal (96 B)</td><td class="num goodnum">111 ns</td><td>B · AES-NI+PCLMULQDQ on a bare core</td></tr>
+      <tr><td>A zero-syscall dataplane in ring 3</td><td class="num goodnum">0 syscalls/packet</td><td>B · a BSP application + an AP cell, SPSC rings</td></tr>
+      <tr><td>Unmodified network software</td><td class="num goodnum">a musl server, epoll, from the disk</td><td>B · socket/epoll → smoltcp; the ELF is loaded from a virtio-blk</td></tr>
+      <tr><td>Multithreading (POSIX)</td><td class="num goodnum">pthreads: clone+futex+mutex+join</td><td>B · the pre-emption of ring-3 threads by the timer; counter=200k without losses</td></tr>
+      <tr><td>The C++ runtime</td><td class="num goodnum">the STL + exceptions + threads + iostream</td><td>B · static C++ in ring 3: vector/map/sort, throw/catch, std::thread, std::chrono, std::cout</td></tr>
+      <tr><td>HTTP keep-alive (the throughput)</td><td class="num goodnum">42k req/sec</td><td>B · a persistent connection, 20000/20000; the QEMU RTT floor</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="prose">
+    <p><b>A direct A/B (one UDP echo workload, one QEMU path):</b> the socket path
+    (recvfrom+sendto → smoltcp) against the zero-syscall one (the polling of the rings in ring 3) —
+    the socket costs <b>+2.0 us in the p50 and +3.8 us in the p99</b> above the common floor. The
+    p99 tail of the socket path is noticeably worse: the gap is structural exactly in the tails rather than in
+    the average (see <code>docs/BENCH-B.md §6</code>).</p>
+    <p><b>A caveat about the virtualisation:</b> on Track B in QEMU the per-packet latency is
+    squeezed by the VMEXIT on the virtio notify (~4 us) — an artefact of the nested network; on
+    real hardware through VFIO (Track A) there is no such VMEXIT (rx→tx = 30–40 ns).
+    The pure computational numbers (28/60/111 ns) were taken from inside the guest through
+    <code>rdtsc</code> and do not depend on the virtualisation. <b>Confirmed on a real
+    82599</b> (VFIO, <code>bench/ixgbe/hw-bench.sh</code>): a cell's rx→tx = <b>14 ns
+    min / 52 ns avg, 92–94% &lt;100 ns, without a single VMEXIT</b> — those ~4 us in QEMU
+    were entirely the virtio kick. The caveat is closed (<code>docs/BENCH-B.md §9</code>).</p>
+  </div>
+</section>
+
+<section id="risks" class="prose">
+  <h2><span class="num">9</span>The risks and the open questions</h2>
+  <ul>
+    <li><b>"Linux will catch up".</b> io_uring, AF_XDP, EEVDF and PREEMPT_RT-in-mainline narrow the gap. The answer: the gap in the <em>tails and in the determinism</em> is structural (a shared kernel, the mitigations, the background housekeeping are ineradicable), while the operational price of tuning Linux is constant. The metrics of §8 are compared exactly against a tuned Linux; if the gap disappears, the project is not needed, and that is checkable on v0.</li>
+    <li><b>An FPGA from below.</b> The sub-500-ns path goes into the hardware. The answer: Talaria is positioned as a host system around an FPGA (the host plane, the doorbell models, the telemetry — §4.2 shows that the PCIe host path is exactly the bottleneck, and one has to own it), not as a competitor.</li>
+    <li><b>The driver chasm.</b> It is mitigated by the v1 strategy (virtio + VFIO + the PMD model), but the bare-metal zoo stays a limitation: we support a short list of reference hardware, and that is a product decision.</li>
+    <li><b>The ecosystem and the trust.</b> A new OS without operators, documentation and success stories. The answer: first-class observability (§6.10), musl compatibility (a low cost of entry), and the first beacon workload is a real trading platform (§4.1) as a reference port.</li>
+    <li><b>Rust in a kernel is already harder to hire for than C.</b> Acceptable: the team is small by design, while a safe kernel radically lowers the cost of the bugs that are fatal in a single-address-space system.</li>
+    <li><b>The open questions:</b> the manifest's format (a DSL of our own vs a superset of the devicetree); the full TCP — an improved smoltcp or a port of the FreeBSD stack; is a us-preemption needed in v1 or only in the server phase; the model of a hot update of the cells (a restart with a handover of the state vs a Theseus-like live replacement); the project's licence.</li>
+  </ul>
+</section>
+
+<section id="roadmap" class="prose">
+  <h2><span class="num">10</span>The roadmap</h2>
+  <ol>
+    <li><b>v0 — the PoC (one quarter):</b> a Cloud Hypervisor guest, one cell + a mini control plane, virtio-net, a reactor, a TSC clock, the counters. The benchmark: a UDP echo against a tuned Linux/io_uring and against DPDK on the same host. <em>The gate: the gap in the tails is confirmed — otherwise the project stops.</em></li>
+    <li><b>v1 — the trading kernel:</b> a VFIO NIC + a PMD (mlx5 or an ef_vi-class one), the L1 stack + mcast/the A/B arbitration + the TLS pipeline, PTP, a flight recorder, a gdb stub, a musl target. The beacon: a port of the feed handler and of the order gateway of a real platform (§4.1); a comparison of the tick-to-trade with its current production.</li>
+    <li><b>v2 — bare-metal x86 + the storage:</b> a UEFI boot on the reference hardware, a polled NVMe + an append store, the donation of cores, the server profile.</li>
+    <li><b>v3 — ARM64 + embedded + compatibility:</b> a SystemReady server and one embedded board, a devicetree, a profile without an MMU; the mode of running static Linux ELFs.</li>
+  </ol>
+</section>
+
+<section id="sources">
+  <h2><span class="num">11</span>The sources</h2>
+  <div class="srcgroup">
+    <details open>
+      <summary>The price of the OS's mechanisms</summary>
+      <ul>
+        <li><a href="https://gms.tf/on-the-costs-of-syscalls.html">On the costs of syscalls</a> · <a href="https://www.brendangregg.com/blog/2018-02-09/kpti-kaiser-meltdown-performance.html">Gregg: KPTI performance</a> · <a href="https://blog.tsunanet.net/2010/11/how-long-does-it-take-to-make-context.html">Context switch costs</a> · <a href="https://docs.kernel.org/networking/msg_zerocopy.html">MSG_ZEROCOPY</a> · <a href="https://www.usenix.org/system/files/conference/atc17/atc17-amit.pdf">TLB shootdowns (ATC'17)</a></li>
+        <li><a href="https://www.phoronix.com/review/3-years-specmelt/9">Phoronix: 3 years of mitigations</a> · <a href="https://arxiv.org/pdf/2202.13716">seccomp overhead (SFIP)</a> · <a href="https://arxiv.org/pdf/2101.11611">SELinux overhead</a></li>
+        <li><a href="https://rigtorp.se/low-latency-guide/">Rigtorp: Low latency guide</a> · <a href="https://github.com/aws-samples/trading-latency-benchmark/blob/main/assets/blog/tick_to_trade_latency_part_2_os_tuning_reference.md">AWS tick-to-trade tuning reference</a> · <a href="https://access.redhat.com/sites/default/files/attachments/201501-perf-brief-low-latency-tuning-rhel7-v1.1.pdf">Red Hat low-latency brief</a> · <a href="https://docs.redhat.com/en/documentation/red_hat_enterprise_linux_for_real_time/9/html/optimizing_rhel_9_for_real_time_for_low_latency_operation/index">RHEL for Real Time</a></li>
+      </ul>
+    </details>
+    <details>
+      <summary>Research and special-purpose operating systems</summary>
+      <ul>
+        <li><a href="https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-belay.pdf">IX (OSDI'14)</a> · <a href="https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-peter_simon.pdf">Arrakis (OSDI'14)</a> · <a href="https://www.usenix.org/conference/nsdi19/presentation/kaffes">Shinjuku (NSDI'19)</a> · <a href="https://www.usenix.org/system/files/nsdi19-ousterhout.pdf">Shenango (NSDI'19)</a> · <a href="https://www.usenix.org/system/files/osdi20-fried.pdf">Caladan (OSDI'20)</a> · <a href="https://irenezhang.net/papers/demikernel-sosp21.pdf">Demikernel (SOSP'21)</a></li>
+        <li><a href="https://arxiv.org/abs/2104.12721">Unikraft (ASPLOS'21)</a> · <a href="https://github.com/cloudius-systems/osv">OSv</a> · <a href="https://bcantrill.dtrace.org/2016/01/22/unikernels-are-unfit-for-production/">Cantrill: unikernels unfit for production</a> · <a href="https://seastar.io/shared-nothing/">Seastar shared-nothing</a></li>
+        <li><a href="https://sel4.systems/performance.html">seL4 performance</a> · <a href="https://github.com/siemens/jailhouse">Jailhouse</a> · <a href="https://ihkmckernel.readthedocs.io/en/latest/quick.html">IHK/McKernel</a> · <a href="https://github.com/asterinas/asterinas">Asterinas framekernel</a> · <a href="https://hermit-os.org/">Hermit OS</a> · <a href="https://www.usenix.org/conference/osdi20/presentation/boos">Theseus (OSDI'20)</a></li>
+      </ul>
+    </details>
+    <details>
+      <summary>Kernel bypass and I/O</summary>
+      <ul>
+        <li><a href="http://fast.dpdk.org/doc/perf/DPDK_22_11_NVIDIA_Mellanox_NIC_performance_report.pdf">DPDK perf report (mlx)</a> · <a href="https://spdk.io/news/2023/02/01/nvme-120m-iops/">SPDK 120M IOPS</a> · <a href="https://atlarge-research.com/pdfs/2022-systor-apis.pdf">io_uring vs SPDK (SYSTOR'22)</a> · <a href="https://lwn.net/Articles/961189/">io_uring NAPI busy poll</a> · <a href="https://lpc.events/event/2/contributions/99/">AF_XDP (LPC)</a></li>
+        <li><a href="https://technologyevangelist.co/2019/04/18/828ns-a-low-latency-legacy/">TCPDirect 828ns</a> · <a href="https://www.amd.com/en/products/ethernet-adapters/solarflare-x4.html">Solarflare X4</a> · <a href="https://github.com/cisco/exanic-software">ExaNIC</a> · <a href="https://docs.stacresearch.com/system/files/central/STAC-T0%20backgrounder.pdf">STAC-T0</a> · <a href="https://docs.stacresearch.com/news/AMD240422">The STAC-T0 record of 13.9 ns</a></li>
+        <li><a href="https://github.com/smoltcp-rs/smoltcp">smoltcp</a> · <a href="https://github.com/F-Stack/f-stack">F-Stack</a> · <a href="https://tcp-acceleration-service.github.io/">TAS</a> · <a href="https://docs.oasis-open.org/virtio/virtio/">virtio spec</a> · <a href="https://github.com/rcore-os/virtio-drivers">virtio-drivers (Rust)</a> · <a href="https://www.redhat.com/en/blog/achieving-network-wirespeed-open-standard-manner-introducing-vdpa">vDPA</a> · <a href="https://lwn.net/Articles/790920/">UMWAIT/TPAUSE</a></li>
+      </ul>
+    </details>
+    <details>
+      <summary>Compatibility, standards, delivery</summary>
+      <ul>
+        <li><a href="https://dl.acm.org/doi/10.1145/2901318.2901341">Tsai et al.: Linux API usage (EuroSys'16)</a> · <a href="https://unikraft.org/docs/concepts/compatibility">Unikraft compatibility</a> · <a href="https://musl.libc.org/">musl</a></li>
+        <li><a href="https://linuxptp.nwtime.org/documentation/ptp4l/">linuxptp</a> · <a href="https://engineering.fb.com/2022/11/21/production-engineering/precision-time-protocol-at-meta/">PTP at Meta</a> · <a href="https://www.arm.com/architecture/system-architectures/systemready-compliance-program">Arm SystemReady</a> · <a href="https://docs.kernel.org/arch/arm64/arm-acpi.html">ACPI on ARM64</a></li>
+        <li><a href="https://github.com/firecracker-microvm/firecracker">Firecracker</a> · <a href="https://github.com/cloud-hypervisor/cloud-hypervisor">Cloud Hypervisor</a> · <a href="https://man.netbsd.org/rumpkernel.7">rump kernels</a> · <a href="https://github.com/lkl">LKL</a></li>
+      </ul>
+    </details>
+  </div>
+  <p class="kbd-note">The full notes of the four research directions are available in the session's working materials.</p>
+</section>
+</div>

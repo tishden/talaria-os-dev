@@ -1,0 +1,13 @@
+ip=@GUEST_IP@/24
+gw=@HOST_IP@
+tune=lowlat
+exec=/opt/mariadb/bin/mariadbd
+arg=mariadbd
+arg=--defaults-file=/etc/my.cnf
+env=HOME=/
+env=PATH=/opt/mariadb/bin
+chown=/data:27:27
+chown=/tmp:27:27
+chown=/run:27:27
+uid=27
+gid=27

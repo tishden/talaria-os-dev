@@ -1,0 +1,866 @@
+//! Talaria OS — an x86-64 kernel (Rust, `no_std`) that runs unmodified
+//! Linux applications in such a way that the application owns the CPU cores while the OS stays
+//! a control plane.
+//!
+//! This file is BRINGING THE MACHINE UP and nothing more: from the loader's entry point to
+//! choosing a mode. In order: the console -> the cmdline -> the IDT -> physical memory ->
+//! the page tables -> the early trace on disk -> the TSC -> ACPI/PCIe -> the devices.
+//! After that control goes down one of three paths:
+//!
+//! * `selftest::run` — the built-in regression (`talaria.test=<name>`, ~90 modes);
+//! * `runmode::run` — production modes by name (`talaria.mode=<name>`);
+//! * the datapath at the tail of `rust_main` — a workload by manifest, the network, the cell.
+//!
+//! There are four loaders, and all of them reduce to one `hvm_start_info`: PVH (QEMU),
+//! the UEFI stub (EC2), multiboot2 through GRUB (BIOS) and our own `tboot` (BIOS without GRUB,
+//! the path on `*.metal`). See `boot.rs` and `docs/BARE-METAL.md`.
+
+#![no_std]
+#![no_main]
+// THE ONE LINT OF EDITION 2024 WE TURN OFF, AND WHY.
+//
+// `unsafe_op_in_unsafe_fn` asks every unsafe operation inside an `unsafe fn` to sit
+// in its own `unsafe {}` block. In an application that is valuable: it separates
+// the few dangerous lines from the safe body around them. Here it would mark 1461
+// operations inside ~120 functions whose WHOLE body is dangerous by nature — a page
+// walk, an MSR write, a store into a process's memory — and the block would say
+// nothing that the function's own `# Safety` section does not already say.
+//
+// What replaces it: the boundary with the workload (`uaccess.rs`, `user.rs`,
+// `paging.rs`, `syscall.rs`) carries a `# Safety` section per module with NAMED
+// invariants and a `// SAFETY:` line at every site, checked to be complete
+// (the release plan, 7.2). The rest of the modules get the same treatment as they are
+// touched; when a module is done, the allow can be lifted for it alone
+// (`#![warn(unsafe_op_in_unsafe_fn)]` at the top of its file).
+#![allow(unsafe_op_in_unsafe_fn)]
+
+/// A ring-3 test binary from `kernel/user/`, embedded into the kernel image.
+/// With the `selftest` feature off it is an empty slice, and the ELF loaders
+/// (`user::load_elf*`) stop the machine with an explicit message instead of
+/// running it. Must stay above the `mod` list: `macro_rules!` is textual.
+#[cfg(feature = "selftest")]
+macro_rules! user_elf {
+    ($p:literal) => { include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/user/", $p)) };
+}
+#[cfg(not(feature = "selftest"))]
+macro_rules! user_elf {
+    ($p:literal) => { &[] };
+}
+
+mod boot;
+#[macro_use]
+mod serial;
+mod vga;
+mod hal;
+mod cmdline;
+mod crypto;
+mod idt;
+mod l1;
+mod paging;
+mod sched;
+mod rqpick;    // the choice of the next thread on a core: the rotation and the policy reqfirst
+mod affinity;
+mod placement;
+mod syscall;
+mod user;
+mod mem;
+mod acpi;
+mod smp;
+mod sync;
+mod waitpred; // the predicates of a wait on a word: the sleeper's side and the waker's, wrap-safe
+mod percpu;
+mod fastpath;
+mod fastring;  // the zero-syscall rings: the layout, the index arithmetic, the ARP the cell answers itself
+mod fs;
+mod tfs;
+mod ext2;
+mod ext2hash;
+mod ext2dir;  // the records of a directory inside one block: the search, the insertion, the removal
+mod ext2dx;   // the htree index: the array of a node, the division of a full leaf
+mod ext2bmap; // the block/inode bitmaps: the wrap-around scan, the taking of a run
+mod ext2sb;   // the superblock: the volume's geometry and the refusal to take a volume that does not add up
+mod elfhdr;   // the ELF64 headers: a decoding that does not index past the end of the file
+mod elfnote;  // the notes of a core dump: the registers and the name, byte for byte as a debugger expects
+mod jbd2;     // the JBD2 log's format: the header of a block and the tags of a descriptor
+mod proc;
+mod gdb;
+mod supervise;
+mod console;
+mod coredump;
+mod shell;    // the operator shell: paths, ls/cat/less/rm/cp — in the kernel, without ring 3
+mod edit;     // a full-screen console editor (a subset of vi)
+mod filed;    // uploading/downloading files over TCP (an rsync-alike)
+mod imds;
+mod ioapic;
+mod netprof;
+mod netsys;
+mod netcfg;   // addresses, routes, DHCP: the network configuration as a model rather than three variables
+mod routes;
+mod tsc;
+mod clock;
+mod vdso;
+mod uaccess;
+mod fr;
+mod metrics;
+mod telemetry;
+mod watchdog;
+mod ctlplane;
+mod obs;
+mod pmu;
+mod cellman;
+mod cat;
+mod netdev;   // the network device model: the NetDev trait + the driver table
+mod virtnet;  // a driver: virtio-net (MMIO)
+mod nicloop;  // a driver: the loopback NIC (the device model's gate)
+mod ena;
+mod nvme;
+mod pci;
+mod trace;
+mod suite;
+mod runmode;   // the production modes `talaria.mode=`
+mod selftest;  // the built-in regression `talaria.test=`
+
+use core::sync::atomic::Ordering;
+
+pub const QS: usize = 256; // virtqueue size (= the queue size of microvm's virtio-net, a power of 2)
+// (the frame buffers of the legacy raw reactor went away with it: the frames are owned by
+// `l1::NicQ`, identically for every NIC — see netdev.rs)
+
+/// Enable AVX/AVX2: CR4.OSXSAVE + XCR0 (x87|SSE|AVX) through xsetbv. For user software
+/// built with -march=native (VEX instructions otherwise give a #UD).
+fn enable_avx() {
+    unsafe {
+        let c = core::arch::x86_64::__cpuid(1);
+        if c.ecx & (1 << 26) == 0 || c.ecx & (1 << 28) == 0 { return; } // XSAVE, AVX
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+        cr4 |= 1 << 18; // OSXSAVE
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
+        core::arch::asm!("xsetbv", in("ecx") 0u32, in("eax") 0x7u32, in("edx") 0u32, options(nomem, nostack));
+        // Since AVX is on, a context switch MUST save the whole YMM
+        // (fxsave knows only the low 128 bits; see sched::FPU_AREA).
+        crate::sched::XSAVE_MASK.store(0x7, core::sync::atomic::Ordering::SeqCst);
+        println!("talaria: AVX is on (OSXSAVE + XCR0=0x7, the context goes through XSAVE)");
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_main(start_info: u64) -> ! {
+    serial::init();
+    // On bare metal the instance console is filled by the FIRMWARE, and raw
+    // COM1 does not get into it at all (verified by a probe: code that certainly
+    // did execute in sector 0 gave not a single line). The only path on metal is
+    // BIOS/multiboot2, so on it the screen is enabled BEFORE the first line: otherwise
+    // the early output (the memory map, PCI, errors) would be seen by nobody.
+    let mb2 = boot::is_multiboot2();
+    // `talaria.rebootat=<point>` — bisecting THE EARLIEST bring-up on bare
+    // metal, where before the disk comes up there is not a single channel. The signal is a reboot:
+    // the instance console shows the firmware banner again, and "one banner" against
+    // "many banners" answers whether the kernel reached the point. The points are:
+    // mb2 | idt | lapic | mem | paging (beyond that there is already a trace on disk).
+    // A BIOS boot through GRUB gives multiboot2 info; we convert it into the same
+    // hvm_start_info the kernel already knows how to read — the path is shared after that.
+    let start_info = if mb2 { boot::mb2_convert(start_info) } else { start_info };
+    println!("talaria: boot, start_info={:#x}", start_info);
+    fr::record(fr::BOOT, start_info);
+    // The cmdline is read FIRST of all (it is only a memory read): it is needed both by
+    // the rebootat points below and by the early trace on disk.
+    let mut cmdline = read_cmdline(start_info);  // mut: the mode suite appends a tail (talaria.suite=)
+    // The screen as a second channel — ONLY on an explicit talaria.console=vga.
+    // It used to be enabled on the BIOS path by itself, "so that at least something is
+    // visible on metal"; on metal it turned out to be invisible (verified), while touching the legacy
+    // 0xB8000 window on a machine without a VGA device is an extra risk in the most opaque zone
+    // of the bring-up, where there is nothing to debug with.
+    if cmdline::has(cmdline, "talaria.console", "vga") { vga::enable(); }
+    if cmdline::flag(cmdline, "talaria.noshoot") { syscall::NO_SHOOTDOWN.store(true, core::sync::atomic::Ordering::SeqCst); println!("talaria: the TLB shootdown is DISABLED (diagnostics)"); }
+    rebootat("mb2", cmdline);
+    idt::init();
+    println!("talaria: the IDT is installed (exception handlers)");
+    rebootat("idt", cmdline);
+    mem::init(start_info);
+    // an allocator test: take 3 frames
+    for _ in 0..3 { if let Some(f) = mem::alloc_frame() { println!("talaria: alloc_frame -> {:#x}", f); } }
+    println!("talaria: free frames = {}", mem::free_frames());
+    rebootat("mem", cmdline);
+    paging::init(); // our own page tables (1G) instead of the static boot tables
+    fr::record(fr::PAGING, 0);
+    rebootat("paging", cmdline);
+
+    // The early trace on disk comes up HERE, right after the page tables —
+    // before AVX, the TSC, sync, percpu, ACPI and the PCI enumeration. On bare metal the kernel has not a single visible
+    // output channel, and everything that runs BEFORE the disk comes up is, on a hang,
+    // indistinguishable: c6i.metal gave exactly that — the loader reached phase
+    // 4, and not a byte from the kernel appeared on the volume.
+    println!("talaria: cmdline = {}", cmdline::Masked(cmdline));
+    audit_or_refuse(cmdline, "the image");
+    let early_trace = trace::lba_from_cmdline(cmdline);
+    if let Some(lba) = early_trace {
+        trace::arm(lba);
+        println!("talaria: the early trace on disk: LBA {} (+{} KB)", lba, trace::CAP / 1024);
+        pci::init();                 // MCFG is not parsed yet -> the 0xCF8 ports; enough for NVMe
+        let ok = fs::blk_open();
+        pci::reset_access();         // do not get stuck on legacy access (ECAM will be chosen by MCFG)
+        println!("talaria: the early disk is {}, COM1 is {}", if ok { "up" } else { "NOT up" },
+            if serial::tx_dead() { "DEAD (output goes only to the screen and the trace)" } else { "alive" });
+        trace::mark("the early disk (before AVX/TSC/sync/ACPI/PCI)");
+    } else { trace::stop(); }        // no trace was requested — output from now on bypasses the buffer
+
+    // Everything the early disk CAN do without comes up after it.
+    // The reason is bare metal: before the disk comes up the kernel has no channel, and every extra
+    // step in that zone turns into an indistinguishable hang. percpu (GS.base)
+    // is needed by the syscall stub, and the legacy silence by the first `sti`; neither is required before
+    // NVMe.
+    percpu::init(0); // GS.base of the BSP -> PerCpu[0] (the syscall stub reads gs:8 and so on)
+    // The legacy silence: after a UEFI boot the firmware leaves the 8259 PIC
+    // unmasked and LVT0 in ExtINT — the very first sti would catch a storm of PIT IRQs
+    // with a foreign vector. We mask both PICs and all the LVTs before any interrupt window.
+    smp::legacy_quiesce(cmdline);
+    rebootat("lapic", cmdline);
+    trace::mark("percpu + the legacy silence (PIC/LAPIC)");
+    enable_avx();   // AVX/AVX2 for user software built with -march=native (e.g. large C++ with AVX2)
+    trace::mark("avx");
+    let tsc_hz = tsc::calibrate();
+    tsc::set_hz(tsc_hz);
+    println!("talaria: tsc = {} Hz", tsc_hz);
+    trace::mark("tsc");
+    sync::init(); // detect the wait primitives (waitpkg/mwaitx/mwait/hlt)
+    vdso::init(); // the process's clock without a syscall (a code page + a data page)
+    trace::mark("sync");
+    cat::init();  // L3 CAT (cache partitioning) + the L3 size for the DMA rings' footprint
+    // The hardware counters come up ALWAYS rather than on a flag: programming them costs
+    // seven MSR writes once per boot, and without them the system is opaque —
+    // no IPC, no cache misses, no branch predictor. Diagnostics that have to be
+    // switched on in advance are never on when an incident happens.
+    pmu::init();
+    parse_tuning_opts(cmdline);
+    coredump::configure_from_cmdline(cmdline);  // talaria.core=<path>[,full] — ELF core dumps
+    if cmdline::value(cmdline, "talaria.gdb") == Some("break") { gdb::BREAK_AT_START.store(true, core::sync::atomic::Ordering::SeqCst); }
+    if let Some(v) = cmdline::value(cmdline, "talaria.sigtrace") {
+        if let Ok(n) = v.parse::<u64>() { syscall::SIGTRACE.store(n, core::sync::atomic::Ordering::SeqCst); }
+    }
+    smp::lapic_calibrate();                  // the LAPIC timer's frequency by the TSC: the slice is set in nanoseconds
+    tsc::wall_init(cmdline);                 // CLOCK_REALTIME: talaria.epoch= or kvmclock
+    for tok in cmdline.split_whitespace() { // talaria.apcr4mask=0x.. — bisecting a CR4 bit on an AP
+        if let Some(v) = tok.strip_prefix("talaria.apcr4mask=") {
+            let v = v.trim_start_matches("0x");
+            if let Ok(m) = u64::from_str_radix(v, 16) {
+                smp::AP_CR4_MASK.store(m, Ordering::SeqCst);
+                println!("talaria: the AP CR4 mask {:#x} (these bits are NOT cloned onto APs)", m);
+            }
+        }
+    }
+    netdev::want_from_cmdline(cmdline); // talaria.nic=<driver> — the operator outranks the automation
+    syscall::shm_from_cmdline(cmdline);      // talaria.shmdelay=/shmlock= — the gate shmrace
+    shell::configure_from_cmdline(cmdline); // talaria.rows=/cols= — the operator terminal's size
+    filed::configure_from_cmdline(cmdline); // talaria.filed=<port>/talaria.filedtoken=
+    parse_early_opts(cmdline);
+    // `talaria.trace=<LBA>` — the early trace ON DISK. On bare metal the kernel has not
+    // a single visible output channel (verified: neither COM1 nor the screen), so
+    // the block layer comes up HERE — before ACPI, the PCI enumeration, SMP and the network —
+    // and the whole accumulated log goes as raw sectors into the gap before the kernel. After that
+    // every phase (`trace::mark`) appends to the trace, so that after a hang the disk
+    // holds the log up to exactly the last point passed.
+    // ACPI: rsdp_paddr from start_info (+32) — the UEFI stub/QEMU; 0 -> the fallbacks
+    acpi::init(unsafe { *((start_info + 32) as *const u64) });
+    // The power button (stop-instances / system_powerdown): a SIGTERM to the workload,
+    // a deadline to exit, a sync, S5. Without this an instance stop is a power cut.
+    acpi::button_arm(cmdline::num(cmdline, "talaria.pwrbtn").unwrap_or(20));
+    // The "logical core -> APIC id" map is built right after MADT and before
+    // any AP comes up. Everything in the kernel above this point speaks in logical numbers.
+    smp::topology_init();
+    // The per-node memory areas are built HERE: the RAM map arrived from the loader
+    // before ACPI, while the nodes are known only after SRAT — before this point there is nothing
+    // to split the memory by nodes on. Without SRAT it does nothing.
+    mem::numa_init();
+    trace::mark("acpi");
+    netsys::configure_from_cmdline(cmdline); // talaria.ip=/gw=/dns= (tap 10.0.0.x by default, slirp 10.0.2.x)
+    fs::vf_init_net(netsys::cfg_dns());      // /etc/resolv.conf, /etc/hosts for the musl resolver
+    if cmdline::flag(cmdline, "talaria.pci") || cmdline::test_is(cmdline, "pci") { pci::init(); } // ECAM/ivshmem (microvm pcie=on)
+    // The second attempt to bring the disk up for the early trace. On bare metal NVMe lives
+    // not on bus 0 (on c6i.metal it is c2:00.0) and is visible only through the ECAM window from
+    // MCFG, i.e. AFTER ACPI is parsed. Before that there is physically nowhere
+    // to write the early trace: the first attempt honestly does not find the controller.
+    if trace::armed() && !fs::blk_ready() && fs::blk_open() {
+        println!("talaria: the disk came up on the second attempt (after ACPI: ECAM from MCFG)");
+    }
+    trace::mark("pci");
+    // A suite of modes per image (`talaria.suite=<the list's LBA>`). Our item
+    // is taken HERE — after the disk is certainly up (on metal it appears
+    // only with ECAM from MCFG, i.e. after ACPI), but before the mode is chosen further down
+    // main. The trace moves into this run's slot so that the logs do not
+    // overwrite one another; the counter grows on the disk at once, even before the run
+    // itself: if it hangs, it is visible from outside at which item that happened.
+    if let (Some(lba), Some(slba)) = (early_trace, suite::lba_from_cmdline(cmdline)) {
+        if let Some((tail, i)) = suite::take(slba) {
+            // Slot 0 is the shared "prologue": before the list is parsed the kernel does not yet know whose
+            // run this is, and the early flushes (every 2 KB) go exactly there.
+            // So the runs occupy slots from the FIRST one: otherwise the prologue of the next
+            // boot would overwrite the previous run's log (caught by the very first
+            // local suite run: 2 KB of prologue were left in slot 0).
+            trace::arm(lba + (i + 1) * suite::SLOT);
+            if cmdline_append(tail) {
+                cmdline = cmdline_now();
+                audit_or_refuse(cmdline, "the suite item");
+                parse_early_opts(cmdline);
+                // THE NETWORK options of the tail must be re-read too. `netsys::
+                // configure_from_cmdline` runs earlier in main — before
+                // the suite item has even been read from disk — so
+                // `talaria.ip=dhcp` from the item was silently not applied, and the kernel
+                // went onto the network with the default static address
+                // (10.0.0.2/24 from the QEMU profile). On EC2 that looked like
+                // "ENA came up but IMDS does not answer": the address was not from the subnet.
+                // Exactly the same pitfall as with user-data, in new clothes.
+                netsys::configure_from_cmdline(cmdline);
+                fs::vf_init_net(netsys::cfg_dns());
+            }
+            println!("talaria: the suite: cmdline = {}, the trace in LBA {}", cmdline::Masked(cmdline), lba + (i + 1) * suite::SLOT);
+        }
+    }
+    // The cmdline tail from EC2 user-data — ONE AMI for all the experiments.
+    // We bring the stack up right here (before the mode is chosen), and further on the modes' branches see
+    // netsys::ready() and do not open the NIC again. The mode=fast cannot be chosen this
+    // way (the cell on an AP takes the NIC for itself) — it comes only from talaria.cfg.
+    let cmdline = if cmdline::flag(cmdline, "talaria.userdata") {
+        if let Some((a, sz)) = virtnet::mmio_window_from_cmdline(cmdline).or_else(virtnet::scan_mmio_window) {
+            virtnet::MMIO_ADDR.store(a as u64, Ordering::SeqCst);
+            virtnet::MMIO_SIZE.store(sz as u64, Ordering::SeqCst);
+        }
+        match runmode::open_nic() {
+            Some((d, m)) => {
+                netsys::init(d, m, tsc_hz);
+                let mut ud = [0u8; 512];
+                let n = imds::user_data(&mut ud);
+                let tail = if n > 0 { core::str::from_utf8(&ud[..n]).unwrap_or("") } else { "" };
+                if n > 0 {
+                    if cmdline_append(tail) { println!("talaria: user-data -> cmdline += {:?}", tail); }
+                    else { println!("talaria: the user-data did not fit into the cmdline buffer ({} bytes)", n); }
+                } else { println!("talaria: the user-data is empty"); }
+                // The options of THE TAIL that were parsed BEFORE the merge must be re-read: both the "early"
+                // ones (strace/netprof/ext2/ena) and the network ones (kecho/kts/netidle/imds) —
+                // otherwise talaria.kecho from user-data did not bring the kernel echo up and the RTT
+                // measurement honestly showed "all lost".
+                let c = cmdline_now();
+                parse_early_opts(c);
+                acpi::button_from_tail(c);
+                netsys::configure_from_cmdline(c);
+                netsys::line_late();
+                // WE REOPEN THE NIC ONLY IF THE TAIL TOUCHES IT.
+                //
+                // Taking the stack down is needed so that the mode's branch opens the NIC
+                // again with ALL the options: some of them (`talaria.ena=llq/rss`,
+                // `talaria.ip=`) apply ONLY at the moment of opening. But if
+                // the user-data brought no such options — and a typical stand tail is
+                // `talaria.smp=`, `talaria.manifest=`, `talaria.stat=` — then
+                // reopening gives nothing and costs a SECOND set of rings and
+                // DMA buffers.
+                //
+                // And the second set turned out to be a defect. On EC2 a node with a large
+                // workload (mongod, an image of one and a half gigabytes) received from the device, after a few
+                // seconds, a FATAL ERROR —
+                // `DEV_STS=0x21` (READY|FATAL_ERROR), receive stopped dead, and
+                // the machine disappeared from the network after a successful DHCP lease.
+                // The discriminator named the cause: the same mongod with ONE
+                // initialisation works (`sts=0x1`, receive goes on), while a tiny
+                // tlgen survives even two — i.e. it is not about the workload or the
+                // instance type but about where the SECOND set lands.
+                //
+                // The cheap half is fixed here: do not do what is unnecessary. Protecting the
+                // DMA memory from the workload's allocator is a separate item
+                // (docs/TODO.md).
+                if let Some(tok) = tail_touches_nic(tail) {
+                    // THE GUILTY TOKEN IS PRINTED BY NAME: reopening the NIC
+                    // costs `DEV_STS=0x21` (see `tail_touches_nic`), and learning
+                    // about it forty minutes later from a silent server is expensive.
+                    println!("talaria: the user-data touches the network (the token {:?}) — the NIC will be reopened", tok);
+                    netsys::teardown_keep_lease();
+                }
+            }
+            None => println!("talaria: user-data: no NIC found — the cmdline tail was not received"),
+        }
+        let c = cmdline_now();
+        println!("talaria: the final cmdline = {}", cmdline::Masked(c));
+        audit_or_refuse(c, "user-data");
+        parse_early_opts(c);   // in case there was no NIC and the branch above did not fire
+        c
+    } else { cmdline };
+    trace::mark("the cmdline is ready (the network/user-data are done)");
+
+    // ── The built-in self-checks (`talaria.test=<name>`) and the production modes
+    //    (`talaria.mode=<name>`). Both parse THE WHOLE NAME (crate::cmdline) rather than
+    //    searching for a substring: a name that is a prefix of another no longer starts someone else's mode.
+    //    The modes' contents are in selftest/ and runmode.rs; the bring-up stays here.
+    selftest::run(cmdline);
+    runmode::run(cmdline, tsc_hz)
+}
+
+/// The `talaria.net*` knobs that are applied to the LIVE stack and do NOT require
+/// reopening the NIC.
+///
+/// THE LIST MUST BE COMPLETE, AND HERE IS WHY. The rule below reopens the NIC on
+/// any UNKNOWN `talaria.net*` — "erring on the safe side". The side was
+/// chosen wrongly, and the price is written in this same file a line below: a second
+/// set of rings on a node with a live workload costs `DEV_STS=0x21`, i.e. the NIC
+/// stops receiving at all. The price of a MISSED reopen is incomparably smaller:
+/// an opening option was not applied, and that is visible in the log.
+///
+/// Caught once at the cost of half a stand run: a new knob
+/// `talaria.netscan=` (the back stop of a waiter's scan of the set — nothing to do with
+/// the device) arrived in user-data, fell under the prefix, the NIC was
+/// reopened after the DHCP lease had already been obtained, and the node with MariaDB went silent
+/// forever with a live listener and 690 million stack passes.
+///
+/// Hence the suspicion about past measurements too: `netslice`, `netyield`,
+/// `netpark`, `netsolo`, `netprof`, `netidle` — all of them scheduler knobs, all of them travelling
+/// in A/Bs through user-data, and all of them reopening the NIC until now.
+///
+/// THE GATE: `cmdline::selftest` requires EVERY registered `talaria.net*`
+/// knob to be either here or in `NET_OPEN_OPTS` — a new knob without a
+/// decision "does it reopen the NIC or not" does not pass the regression rather than waiting for a stand.
+pub(crate) const NET_LIVE_OPTS: &[&str] = &[
+    "talaria.netirq=",    // the NIC's line is set on the live stack (`netsys::line_late`)
+    "talaria.netscan=", "talaria.netslice=", "talaria.netyield=",
+    "talaria.netpark=", "talaria.netsolo=", "talaria.netprof=", "talaria.netpause=",
+    "talaria.nettrace=", "talaria.netidle=",
+];
+
+/// The `talaria.net*` knobs that REALLY apply only when the NIC is
+/// opened (the rule of an address by interface name) — reopening for them is legitimate.
+pub(crate) const NET_OPEN_OPTS: &[&str] = &["talaria.net="];
+
+/// Whether the user-data tail has options that apply ONLY when the NIC is opened.
+///
+/// It returns the guilty token itself rather than just "yes": reopening the NIC is
+/// a decision that may cost a node, and it must be named in the log
+/// by name. Without that a failure looks like "the server is silent" forty minutes
+/// after its cause travelled in user-data.
+fn tail_touches_nic(tail: &str) -> Option<&str> {
+    tail.split_whitespace().find(|t| {
+        if NET_LIVE_OPTS.iter().any(|p| t.starts_with(p)) { return false; }
+        t.starts_with("talaria.ena=") || t.starts_with("talaria.ip=")
+            || t.starts_with("talaria.net")
+            || t.starts_with("talaria.mmio")
+            || t.starts_with("talaria.pci") || t.starts_with("talaria.irq=")
+            || t.starts_with("talaria.kecho") || t.starts_with("talaria.kts")
+            || t.starts_with("talaria.imds")
+    })
+}
+
+/// The options read ONCE before the mode is chosen. Called twice when
+/// `talaria.userdata=1` is on: the second time already with the tail from user-data
+/// glued on, so every setter here must be idempotent.
+static SCHED_OPTS_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// ALL THE TUNING AND DIAGNOSTIC KNOBS ARE IN ONE FUNCTION, AND IT IS CALLED
+/// AGAIN AFTER EVERY CMDLINE MERGE.
+///
+/// There was a mine here of the same kind as `talaria.wakebal=`, only
+/// wider: these knobs were parsed ONCE, at the beginning of `main` — i.e. BEFORE
+/// the tail from EC2 user-data (and the suite item's tail) is glued to the command line.
+/// On a stand the tail is the only way to set anything, which means:
+///
+/// * `talaria.stat=` from terraform NEVER enabled the counter block. That is exactly
+///   why the console of the EC2 runs has not a single `stat:` line — not because
+///   "the instrument cannot pour the block out in time", as was thought, but because the snapshot was not
+///   assembled at all;
+/// * an A/B on `talaria.wakepreempt=`, `netslice=`, `idleslice=`, `nosteal=`,
+///   `netyield=`, `fscache=`, `readahead=` on EC2 compared TWO IDENTICAL
+///   kernels. The conclusion "the threshold/the quantum has nothing to do with it" from such runs means nothing;
+/// * `talaria.fstrace=`, `talaria.top=`, `talaria.futexhang=` were silent.
+///
+/// And all of it LOOKED as if it worked: the `cmdline` registry prints a recognised
+/// knob from the FINAL string ("knob talaria.stat = 10000"), i.e. exactly what
+/// the operator expects from an applied setting.
+///
+/// All the actions here are idempotent stores, so a repeated call is safe
+/// (the placement rules, which ACCUMULATE, live separately and are closed
+/// `SCHED_OPTS_DONE`).
+fn parse_tuning_opts(cmdline: &str) {
+    // Mark WHAT the operator named explicitly: the manifest will not override these values
+    // (see `cellman::tune_locked` — otherwise an A/B on such a knob on a stand is
+    // impossible: the image with the manifest is built in advance).
+    {
+        use cellman::*;
+        let mut m = 0u32;
+        for (key, bit) in [("talaria.slice", TUNE_SLICE), ("talaria.idleslice", TUNE_IDLESLICE),
+                           ("talaria.netslice", TUNE_NETSLICE), ("talaria.wakepreempt", TUNE_WAKEPREEMPT),
+                           ("talaria.readahead", TUNE_READAHEAD), ("talaria.netyield", TUNE_NETYIELD),
+                           ("talaria.fscache", TUNE_FSCACHE), ("talaria.huge", TUNE_HUGE)] {
+            if cmdline::value(cmdline, key).is_some() { m |= bit; }
+        }
+        if m != 0 { TUNE_FROM_CMDLINE.fetch_or(m, core::sync::atomic::Ordering::SeqCst); }
+    }
+    pmu::configure_from_cmdline(cmdline);
+    netsys::pollgap_from_cmdline(cmdline);   // talaria.pollgap=<ns>: an idle stack pass no more often than that
+    netsys::idlepoll_from_cmdline(cmdline);  // talaria.idlepoll=<ns>: a core without work runs the stack
+    netsys::netscan_from_cmdline(cmdline);   // talaria.netscan=<ns>: the back stop for skipping the set scan
+    netsys::ringhonest_from_cmdline(cmdline); // talaria.ringhonest=0 — the old "the NIC is silent" criterion
+    ext2::devlock_from_cmdline(cmdline);
+    ext2::trace_from_cmdline(cmdline);       // talaria.fstrace=<ms>: a trace of long FS lock holds
+    ext2::fscache_from_cmdline(cmdline);     // talaria.fscache=<MB> (0 — by memory)
+    ext2::ra_from_cmdline(cmdline);          // talaria.readahead=<blocks> (0 — off)
+    ext2::dirty_from_cmdline(cmdline);       // talaria.dirtyfrac=N / talaria.dirtychunk=B: the pre-emptive flush of dirty data
+    ext2::evict_from_cmdline(cmdline);       // talaria.evictbatch=<blocks>: evicting a dirty slot in a batch
+    ext2::jrnwait_from_cmdline(cmdline);     // talaria.jrnwait=<ms>: the threshold for the "the journal is busy with a neighbour" diagnosis
+    ext2::dirtyage_from_cmdline(cmdline);     // talaria.dirtyage=<ms>: the pre-emptive flush of data by age
+    ext2::jrnfree_from_cmdline(cmdline);     // talaria.jrnfree=0: the journal is busy during the data phase too (an A/B)
+    ext2::fscnt_from_cmdline(cmdline);       // talaria.fscnt=0: walks over the whole cache instead of counters (an A/B)
+    fs::fua_from_cmdline(cmdline);           // talaria.fua=0/1: FUA on a durable write (the default follows the device's VWC)
+    fs::iowin_from_cmdline(cmdline);         // talaria.iowin=0/1/2: the interrupt window while waiting for the device
+    ext2::wrwin_from_cmdline(cmdline);       // talaria.wrwin=0: the preemption window in a long write (a rollback)
+    sync::wakepreempt_from_cmdline(cmdline); // talaria.wakepreempt=<ns>: the price of the wakeup tail
+    sync::configure_hang_from_cmdline(cmdline); // talaria.futexhang=<s> — "HUNG" (silent by default)
+    obs::configure_from_cmdline(cmdline);    // talaria.stat=<ms>, talaria.top=<ms>[,rss]
+    netsys::netyield_from_cmdline(cmdline);  // talaria.netyield=<µs> (0 — a waiter does not yield the core)
+    netsys::wakepull_from_cmdline(cmdline);  // talaria.wakepull=1 / talaria.wakeidle=1 — a wakeup against the spinners
+    netsys::netpause_from_cmdline(cmdline);  // talaria.netpause=<N> (a pause between stack passes)
+    smp::netslice_from_cmdline(cmdline);     // talaria.netslice=<µs> (0 — the slice is the common one)
+    smp::idleslice_from_cmdline(cmdline);    // talaria.idleslice=<µs> (0 — the period is the common one)
+    if cmdline::flag(cmdline, "talaria.tickprof") { sched::TP_ON.store(true, core::sync::atomic::Ordering::SeqCst); } // breaking the tick's cost down by phase
+    paging::huge_from_cmdline(cmdline);      // talaria.huge=<MB>: the large-page threshold (0 — off)
+    paging::lazytlb_from_cmdline(cmdline);   // talaria.lazytlb=0: ring a neighbour in hlt (the default — it flushes by itself)
+    if cmdline::flag(cmdline, "talaria.nosteal") { affinity::NOSTEAL.store(true, core::sync::atomic::Ordering::SeqCst); }
+    if cmdline::flag(cmdline, "talaria.nowakebal") { affinity::NOWAKEBAL.store(true, core::sync::atomic::Ordering::SeqCst); }
+    if let Some(v) = cmdline::value(cmdline, "talaria.wakebal=") {
+        if let Ok(n) = v.parse::<u8>() { affinity::WAKEBAL_RULE.store(n, core::sync::atomic::Ordering::SeqCst); }
+    }
+    if let Some(v) = cmdline::value(cmdline, "talaria.stealbal=") {
+        if let Ok(n) = v.parse::<u8>() { affinity::STEALBAL_RULE.store(n, core::sync::atomic::Ordering::SeqCst); }
+    }
+    if let Some(v) = cmdline::value(cmdline, "talaria.stealwait=") {
+        if let Ok(n) = v.parse::<u64>() { affinity::STEAL_WAIT_NS.store(n * 1000, core::sync::atomic::Ordering::SeqCst); }
+    }
+    if cmdline::flag(cmdline, "talaria.stealpush") { sched::STEAL_PUSH.store(true, core::sync::atomic::Ordering::SeqCst); }
+    if cmdline::flag(cmdline, "talaria.runhist") { sched::RUNHIST_ON.store(true, core::sync::atomic::Ordering::SeqCst); }
+    if cmdline::flag(cmdline, "talaria.nobalance") { affinity::NOBALANCE.store(true, core::sync::atomic::Ordering::SeqCst); }
+    if cmdline::flag(cmdline, "talaria.trefs") { crate::proc::TRACE_REF.store(true, core::sync::atomic::Ordering::SeqCst); }
+    if cmdline::flag(cmdline, "talaria.sysprof") { syscall::SYSPROF.store(true, core::sync::atomic::Ordering::SeqCst); }
+    if cmdline::num(cmdline, "talaria.uacheck") == Some(0) { uaccess::ENABLED.store(false, core::sync::atomic::Ordering::SeqCst); }
+    // `talaria.sysrow=1,18` — print these syscalls in the `stat:` block even when
+    // they did not make the top ten by time (`write` under mongodb never
+    // makes it, while it is exactly the one that pays for the pre-emptive flush).
+    if let Some(v) = cmdline::value(cmdline, "talaria.sysrow") {
+        let k = metrics::sysrow_set(v);
+        crate::println!("stat: syscalls on request: {} numbers accepted out of \"{}\"", k, v);
+        if k == 0 { crate::println!("stat: WARNING: talaria.sysrow= gave not a single number — there will be no row"); }
+    }
+    // `talaria.prof=1` — as before (a sample on every tick); `talaria.prof=<hz>` —
+    // with decimation. Zero ticks per second does not happen, so a one reads
+    // as "enable" rather than as "one sample per second".
+    if let Some(v) = cmdline::value(cmdline, "talaria.prof") {
+        if let Ok(n) = v.parse::<u64>() {
+            if n > 0 {
+                let got = sched::prof_set_hz(if n == 1 { 0 } else { n });
+                sched::PROF_ON.store(true, core::sync::atomic::Ordering::SeqCst);
+                println!("talaria: the sampling profile is on — {} samples/s, the stack up to {} frames", got, sched::PROFR_D);
+            }
+        }
+    }
+    for tok in cmdline.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("talaria.stuck=") {
+            if let Ok(n) = v.parse::<u64>() { sched::STUCK_TICKS.store(n, core::sync::atomic::Ordering::SeqCst); }
+        }
+    }
+}
+
+fn parse_early_opts(cmdline: &str) {
+    // The tuning knobs are RIGHT HERE: this parsing is called after every cmdline
+    // merge (user-data, a suite item), and that is exactly what was missing.
+    parse_tuning_opts(cmdline);
+    // `talaria.console=nopoll` is RIGHT HERE rather than in main's prologue: a knob
+    // from user-data was silently not applied (the parsing happened before the cmdline
+    // merge), and the "console polling" counter in `stat:` kept growing. The same
+    // mine as with the ACPI button.
+    console::configure_from_cmdline(cmdline);
+    // `talaria.poweroff=1` — having finished a mode, POWER THE MACHINE OFF (ACPI S5) rather
+    // than halt in hlt. On EC2 that moves the instance to `stopped`: the billing
+    // stops, and the instance's state becomes an unambiguous answer to the
+    // question "did the run reach its end or stall", which on metal there is no other way to get.
+    suite::set_poweroff(cmdline::flag(cmdline, "talaria.poweroff"));
+    // The control plane's token (`talaria.ctltoken=`). It is set ONLY here and
+    // only from outside: there is no default value, and without a token the /ctl route is closed.
+    ctlplane::configure_from_cmdline(cmdline);
+    // `talaria.irr=N` — print the interrupt state on the first N syscalls.
+    for tok in cmdline.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("talaria.irr=") {
+            if let Ok(n) = v.parse::<u64>() { syscall::IRR_TRACE.store(n, Ordering::Relaxed); }
+        }
+    }
+    // `talaria.switches=N` — print the first N context switches.
+    for tok in cmdline.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("talaria.switches=") {
+            if let Ok(n) = v.parse::<u64>() { sched::SWITCH_TRACE.store(n, Ordering::Relaxed); }
+        }
+    }
+    // Thread placement on cores without a manifest (see affinity.rs).
+    // Idempotent only for the flags; the rules accumulate, so on a repeated
+    // read of the cmdline (talaria.userdata=1) we take them once.
+    if !SCHED_OPTS_DONE.swap(true, Ordering::SeqCst) {
+        for tok in cmdline.split_whitespace() {
+            // The pools are declared BEFORE the rules: a rule may refer to a pool
+            // (in a manifest the order does not matter — there are two passes there, while here
+            // the command line is read once, left to right).
+            if let Some(v) = tok.strip_prefix("talaria.pool=") { affinity::stash_pool(v); }
+        }
+        for tok in cmdline.split_whitespace() {
+            if let Some(v) = tok.strip_prefix("talaria.pin=") { affinity::stash_pins(v); }
+            if let Some(v) = tok.strip_prefix("talaria.sched=") { affinity::stash_flags(v); }
+        }
+    }
+    // `talaria.slice=N` — the scheduler's slice length IN NANOSECONDS.
+    //
+    // It used to be the LAPIC's initial counter, and it meant different things on different
+    // hardware: at N=500000 the tick came once every 8 ms under QEMU and once every 320 ms on
+    // `c6i.metal` — i.e. the "slice" differed fortyfold while reading in the code as
+    // "500 µs". Now the timer's frequency is measured by the TSC (`lapic_calibrate`), and
+    // N means the same thing everywhere. The knob remains: a long slice
+    // reproduces the behaviour that used to happen by itself.
+    for tok in cmdline.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("talaria.slice=") {
+            if let Ok(n) = v.parse::<u32>() {
+                smp::TIMER_SLICE.store(n, Ordering::Relaxed);
+                println!("talaria: the scheduler's slice: {} ns", n);
+            }
+        }
+    }
+    // `talaria.tickmin=N` — the minimum a task must run (ns) before a rotation on a tick
+    // (see `sched::TICKMIN_NS`).
+    for tok in cmdline.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("talaria.tickmin=") {
+            if let Ok(n) = v.parse::<u64>() {
+                sched::TICKMIN_NS.store(n, Ordering::Relaxed);
+                println!("talaria: a tick rotation does not remove a task that has run less than {} ns (talaria.tickmin)", n);
+            }
+        }
+    }
+    // `talaria.reqfirst=N` — a thread with a request in progress does not yield the core
+    // TO A NETWORK WAITER until N ns have passed since the request began (see `sched::REQFIRST_NS`).
+    for tok in cmdline.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("talaria.reqfirst=") {
+            if let Ok(n) = v.parse::<u64>() {
+                sched::REQFIRST_NS.store(n, Ordering::Relaxed);
+                println!("talaria: a thread with a request in progress does not yield the core to a network waiter for {} ns (talaria.reqfirst)", n);
+            }
+        }
+    }
+    // `talaria.sync=hlt|mwait` — forcing a wait tier (see sync::init).
+    for tok in cmdline.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("talaria.sync=") {
+            let m = match v {
+                "hlt" => Some(sync::MODE_HLT),
+                "mwait" => Some(sync::MODE_MWAIT),
+                "mwaitx" => Some(sync::MODE_MWAITX),
+                "waitpkg" => Some(sync::MODE_WAITPKG),
+                _ => None,
+            };
+            if let Some(m) = m { sync::force_mode(m); }
+        }
+    }
+    // `talaria.heartbeat=<seconds>` — the kernel's pulse from the timer tick.
+    for tok in cmdline.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("talaria.heartbeat=") {
+            if let Ok(n) = v.parse::<u64>() {
+                sched::HEARTBEAT_TICKS.store(n, Ordering::Relaxed);
+                println!("talaria: the kernel's pulse every {} scheduler ticks", n);
+            }
+        }
+    }
+    if let Some(secs) = cmdline::num(cmdline, "talaria.stop") { // a clean workload stop after N seconds (a SIGTERM to pid 1)
+        if secs > 0 { sched::STOP_AT_NS.store(tsc::mono_ns() + secs * 1_000_000_000, Ordering::SeqCst); println!("talaria: talaria.stop={} s", secs); }
+    }
+    // talaria.console=vga — enable the screen as a second output channel
+    // (on the BIOS path it is already on from the very start), =serial — switch it off.
+    if cmdline::has(cmdline, "talaria.console", "vga") && !vga::enabled() {
+        vga::enable();
+        println!("talaria: the VGA screen is enabled as a second output channel");
+    }
+    if cmdline::has(cmdline, "talaria.console", "serial") && vga::enabled() {
+        vga::disable();
+        println!("talaria: the VGA screen is off, output goes only to COM1");
+    }
+    for tok in cmdline.split_whitespace() { // talaria.strace=N — a trace of the first N syscalls
+        if let Some(v) = tok.strip_prefix("talaria.strace=") { if let Ok(n) = v.parse::<u64>() { syscall::strace_enable(n); } }
+        // talaria.netprof=N — a profile of the datapath's stages, a summary every N turns
+        if let Some(v) = tok.strip_prefix("talaria.netprof=") { netprof::enable(v.parse::<u64>().unwrap_or(2000)); }
+        // talaria.ext2=nojournal — write ext2 without transactions (comparison/diagnostics)
+        if tok == "talaria.ext2=nojournal" { ext2::set_nojournal(); }
+        // talaria.ext2=journal=data — the data goes into the transaction rather than in place
+        if tok == "talaria.ext2=journal=data" { ext2::set_journal_data(); }
+        // talaria.ext2=dxcheck — verify every htree lookup against a linear walk
+        if tok == "talaria.ext2=dxcheck" { ext2::set_dxcheck(); }
+        // talaria.ext2=dxlimit=N — an index node is "full" at N entries
+        // (a regression of the de-indexing path: a real root holds 508)
+        if let Some(v) = tok.strip_prefix("talaria.ext2=dxlimit=") {
+            if let Ok(n) = v.parse::<usize>() { ext2::set_dxlimit(n); }
+        }
+        // talaria.cell=identity — a mode=cell workload in the kernel's identity AS (as it was before)
+        if tok == "talaria.cell=identity" { user::CELL_IDENTITY.store(true, Ordering::SeqCst); }
+        // LLQ and accel_mode are enabled BY DEFAULT (the production
+        // configuration: 34 µs RTT against 43 on Linux). talaria.ena=llq/accel
+        // are kept as no-ops — old scripts and docs write them.
+        if tok == "talaria.ena=llq" { ena::WANT_LLQ.store(true, Ordering::SeqCst); }
+        if tok == "talaria.ena=nollq" { ena::WANT_LLQ.store(false, Ordering::SeqCst); }
+        if tok == "talaria.ena=noaccel" { ena::WANT_ACCEL.store(false, Ordering::SeqCst); }
+        // talaria.ena=phc — the device's clock (AWS Time Sync through ENA)
+        if tok == "talaria.ena=phc" { ena::WANT_PHC.store(true, Ordering::SeqCst); }
+        // talaria.ena=rss — RSS as in the Linux driver (a diff by kprobe)
+        if tok == "talaria.ena=rss" { ena::WANT_RSS.store(3, Ordering::SeqCst); }
+        if tok == "talaria.ena=rsstbl" { ena::WANT_RSS.store(1, Ordering::SeqCst); }
+        // ...=rsscq — the old (wrong) variant with the CQ index, for cross-checking
+        if tok == "talaria.ena=rsscq" { ena::WANT_RSS.store(1 | 4, Ordering::SeqCst); }
+        if tok == "talaria.ena=rsshash" { ena::WANT_RSS.store(2, Ordering::SeqCst); }
+        // talaria.ena=hibuf — frame buffers above 4 GB
+        if tok == "talaria.ena=hibuf" { ena::WANT_HIBUF.store(true, Ordering::SeqCst); }
+        // talaria.ena=unmask — unmask the interrupt at the end of
+        // a datapath pass (as Linux does at the end of NAPI)
+        if tok == "talaria.ena=unmask" { ena::WANT_UNMASK.store(true, Ordering::SeqCst); }
+        // talaria.ena=mtu9001 — the MTU as on Linux (diagnostics)
+        if tok == "talaria.ena=mtu9001" { ena::WANT_MTU9001.store(true, Ordering::SeqCst); }
+        // the LLQ window and the accelerated queue mode
+        if tok == "talaria.ena=nowc" { ena::WANT_NOWC.store(true, Ordering::SeqCst); }
+        // Read the ENA registers straight from the BAR, bypassing readless (a request into
+        // a register + an answer by DMA). On bare metal the device does not answer such a request;
+        // the kernel switches to direct reads by itself on the first timeout,
+        // but the flag lets one avoid paying for it even once.
+        if tok == "talaria.ena=noreadless" { ena::WANT_NOREADLESS.store(true, Ordering::SeqCst); }
+        if tok == "talaria.ena=accel" { ena::WANT_ACCEL.store(true, Ordering::SeqCst); }
+        if tok == "talaria.ena=meta" { ena::WANT_META.store(true, Ordering::SeqCst); }
+        if tok == "talaria.ena=nocqdb" { ena::WANT_NOCQDB.store(true, Ordering::SeqCst); }
+        if tok == "talaria.ena=intr" { ena::WANT_INTR.store(true, Ordering::SeqCst); }
+        if let Some(v) = tok.strip_prefix("talaria.ena=txbench=") {
+            if let Ok(n) = v.parse::<u64>() { l1::TXBENCH.store(n, Ordering::SeqCst); }
+        }
+        // talaria.ena=rxbench=N — print the RECEIVE rate every N seconds.
+        // Its pair is talaria.ksink=<port> (see netsys) and udp_flood on
+        // the neighbour: we cannot create receive traffic for ourselves.
+        if let Some(v) = tok.strip_prefix("talaria.ena=rxbench=") {
+            if let Ok(n) = v.parse::<u64>() { l1::RXBENCH.store(n, Ordering::SeqCst); }
+        }
+    }
+}
+
+// cmdline lives in ITS OWN buffer rather than as a slice of the start_info page — so that
+// a tail from EC2 user-data can be glued to it (one AMI for all the experiments).
+const CL_MAX: usize = 2048;
+static mut CL_BUF: [u8; CL_MAX] = [0; CL_MAX];
+static mut CL_LEN: usize = 0;
+/// The current cmdline (with all the tails glued on).
+fn cmdline_now() -> &'static str {
+    unsafe { core::str::from_utf8(core::slice::from_raw_parts(core::ptr::addr_of!(CL_BUF) as *const u8, CL_LEN)).unwrap_or("") }
+}
+/// Glue a tail on (through a space). Returns false if it did not fit.
+/// THE TAIL OVERRIDES THE BASE RATHER THAN LYING NEXT TO IT.
+///
+/// `cmdline::value` deliberately takes the FIRST occurrence of a key. So simply
+/// appending a tail at the end makes it powerless for any key that
+/// is already baked into the image — and that is exactly what user-data is for: one AMI for
+/// all the experiments, with the differences arriving from outside.
+///
+/// The price of silence here was high. The stand's image is built with `talaria.smp=2`
+/// (the value from the workload's passport), while terraform passes `talaria.smp=4`
+/// in user-data. The string came out as `... talaria.smp=2 talaria.smp=4 ...`,
+/// the two won — and the Talaria side ran on TWO cores against four on
+/// Linux (`the SMP scheduler: online cores mask=0x3`). The knob looked set,
+/// the comparison looked fair, and both times that was untrue.
+///
+/// So before appending, the keys present in the tail are cleaned out of the base.
+/// The override is printed: a knob that changed behaviour silently is the same
+/// defect, only deferred.
+/// An audit of the `talaria.*` knobs (see `cmdline::audit`): every one is printed with
+/// its parsed value, while an unknown key, a value of the wrong kind or a duplicate is
+/// A BOOT REFUSAL (`cmdline::refuse`).
+fn audit_or_refuse(cmdline: &str, origin: &str) {
+    if cmdline::audit(cmdline) { return; }
+    cmdline::refuse(cmdline, origin);
+}
+
+fn cmdline_append(tail: &str) -> bool {
+    unsafe {
+        let b = &mut *core::ptr::addr_of_mut!(CL_BUF);
+        // 1. Reassemble the base, dropping the tokens whose key is named in the tail.
+        let mut out = [0u8; CL_MAX];
+        let mut n = 0usize;
+        let base = core::str::from_utf8(&b[..CL_LEN]).unwrap_or("");
+        for tok in base.split_whitespace() {
+            let key = match tok.find('=') { Some(i) => &tok[..i], None => tok };
+            let shadowed = tail.split_whitespace().any(|t| {
+                let tk = match t.find('=') { Some(i) => &t[..i], None => t };
+                tk == key && t.find('=').is_some()
+            });
+            if shadowed {
+                crate::println!("talaria: the user-data overrides {:?}", tok);
+                continue;
+            }
+            if n + 1 + tok.len() >= CL_MAX { return false; }
+            if n > 0 { out[n] = b' '; n += 1; }
+            out[n..n + tok.len()].copy_from_slice(tok.as_bytes());
+            n += tok.len();
+        }
+        // 2. Append the tail.
+        if n + 1 + tail.len() >= CL_MAX { return false; }
+        if n > 0 { out[n] = b' '; n += 1; }
+        out[n..n + tail.len()].copy_from_slice(tail.as_bytes());
+        n += tail.len();
+        b[..n].copy_from_slice(&out[..n]);
+        CL_LEN = n;
+        true
+    }
+}
+
+/// `talaria.rebootat=<point>`: on reaching it the kernel reboots the machine.
+/// The point is bare metal, where before the disk comes up there is no channel at all:
+/// the number of firmware banners in the instance console is the answer "it got there / it did not".
+fn rebootat(tag: &str, cmdline: &str) {
+    for tok in cmdline.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("talaria.rebootat=") {
+            if v == tag {
+                println!("talaria: the point {} was passed — rebooting (a signal for metal)", tag);
+                suite::reboot();
+            }
+        }
+    }
+}
+
+fn read_cmdline(start_info: u64) -> &'static str {
+    unsafe {
+        let magic = *(start_info as *const u32);
+        let version = *((start_info + 4) as *const u32);
+        let cl = *((start_info + 24) as *const u64);
+        println!(
+            "talaria: start_info magic={:#x} ver={} cmdline_paddr={:#x}",
+            magic, version, cl
+        );
+        if magic != 0x336E_C578 {
+            return "";
+        }
+        let cmdline_paddr = *((start_info + 24) as *const u64);
+        if cmdline_paddr == 0 {
+            return "";
+        }
+        let p = cmdline_paddr as *const u8;
+        let mut len = 0;
+        while len < CL_MAX - 1 && *p.add(len) != 0 {
+            len += 1;
+        }
+        let b = &mut *core::ptr::addr_of_mut!(CL_BUF);
+        core::ptr::copy_nonoverlapping(p, b.as_mut_ptr(), len);
+        CL_LEN = len;
+        cmdline_now()
+    }
+}
+
+/// The machine is panicking: the locks that would otherwise wait for the culprit indefinitely
+/// (`fs::dev_lock`) are bypassed — the trace on disk matters more than the order of records.
+static PANICKING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+pub fn panicking() -> bool { PANICKING.load(core::sync::atomic::Ordering::Relaxed) }
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    PANICKING.store(true, core::sync::atomic::Ordering::SeqCst);
+    println!("PANIC: {}", info);
+    trace::flush();   // on metal a panic is visible only through the trace on disk
+    // A panic inside a suite item must not eat the rest of the list.
+    // Only the BSP reboots the machine (see the same argument in idt.rs: there is one
+    // NVMe queue, and writing into it from APs in a race spoils our own log).
+    if smp::my_logical() == 0 { suite::park(); }
+    loop { unsafe { core::arch::asm!("hlt") }; }
+}

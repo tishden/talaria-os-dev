@@ -1,0 +1,60 @@
+diff --git a/harness/include/shm_segment.h b/harness/include/shm_segment.h
+index df0f8d7..7a1b09e 100644
+--- a/harness/include/shm_segment.h
++++ b/harness/include/shm_segment.h
+@@ -17,15 +17,22 @@ class Segment {
+  public:
+   // Create (producer) or open (reader) the named segment. On failure, prints to
+   // stderr and exits -- these are simple CLI tools.
++  // HARNESS_SHM_DIR (optional): back the segment by a plain file <dir><name>
++  // instead of POSIX shm -- e.g. a PCI BAR resource of an ivshmem device inside
++  // a VM (the ring then lives in host memory). No ftruncate in that mode.
++  static const char* shm_dir() { return std::getenv("HARNESS_SHM_DIR"); }
++
+   static Segment open(const std::string& name, size_t size, bool create) {
+     int flags = create ? (O_CREAT | O_RDWR) : O_RDWR;
+-    int fd = shm_open(name.c_str(), flags, 0600);
++    const char* dir = shm_dir();
++    int fd = dir ? ::open((std::string(dir) + name).c_str(), flags, 0600)
++                 : shm_open(name.c_str(), flags, 0600);
+     if (fd < 0) {
+       fprintf(stderr, "shm_open(%s) failed: %s\n", name.c_str(),
+               std::strerror(errno));
+       std::exit(1);
+     }
+-    if (create && ftruncate(fd, static_cast<off_t>(size)) != 0) {
++    if (create && !dir && ftruncate(fd, static_cast<off_t>(size)) != 0) {
+       fprintf(stderr, "ftruncate failed: %s\n", std::strerror(errno));
+       std::exit(1);
+     }
+@@ -39,7 +46,7 @@ class Segment {
+ 
+   void* base() const { return base_; }
+ 
+-  void unlink() { shm_unlink(name_.c_str()); }
++  void unlink() { if (!shm_dir()) shm_unlink(name_.c_str()); }
+ 
+   ~Segment() {
+     if (base_ && base_ != MAP_FAILED) munmap(base_, size_);
+diff --git a/transport/include/attach.h b/transport/include/attach.h
+index a2a2003..fe65e24 100644
+--- a/transport/include/attach.h
++++ b/transport/include/attach.h
+@@ -12,6 +12,7 @@
+ #include <memory>
+ #include <string>
+ 
++#include <cstdlib>
+ #include "shm_ring.h"
+ #include "shm_segment.h"
+ 
+@@ -21,7 +22,8 @@ namespace transport {
+ inline std::unique_ptr<shm::Segment> attach_when_ready(
+     const std::string& name, uint32_t slots,
+     volatile std::sig_atomic_t* stop = nullptr) {
+-  const std::string path = "/dev/shm" + name;
++  const char* dir = std::getenv("HARNESS_SHM_DIR");  // see shm_segment.h
++  const std::string path = (dir ? std::string(dir) : std::string("/dev/shm")) + name;
+   const size_t size = shm::region_size(slots);
+   struct stat st;
+   while (stat(path.c_str(), &st) != 0 || static_cast<size_t>(st.st_size) < size) {

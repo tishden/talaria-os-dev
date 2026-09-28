@@ -1,0 +1,26 @@
+# A Talaria cell manifest — a CONTRACT the control plane guarantees at start.
+# If a resource cannot be given exclusively, the cell does not start
+# (§6.2 of the design document: a guarantee, not "a check with a warning").
+
+[cell]
+name   = "md-echo"
+binary = "bench/ixgbe/target/release/talaria-ixgbe"
+mode   = "cell"          # cell | link
+
+[cpu]
+cores             = [2]  # cores owned by the cell
+require_isolation = false # true => do not start if the core is not in isolcpus
+sched_fifo        = true
+# llc_mask        = "0x0f"  # optional: an L3 mask (Intel CAT) — the contract requires resctrl
+
+[memory]
+hugepages_1g = 1         # 1 GB pages the cell needs
+# numa_node  = 0         # optional: the NUMA node of the memory (mbind); the contract checks the core
+
+[device]
+nic    = "0000:03:00.0"  # the NIC, expected to be on vfio-pci already
+driver = "vfio-pci"
+
+[run]
+seconds = 0              # 0 = forever (until `talaria down`)
+# crash_after = 0        # optional: an artificial crash after N s (to test the supervisor)

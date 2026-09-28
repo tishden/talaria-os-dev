@@ -1,0 +1,5 @@
+sqlite3
+*.o
+disk-sqlite.img
+sqlite.zip
+sqlite-amalgamation-*/

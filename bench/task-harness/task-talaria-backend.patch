@@ -1,0 +1,15 @@
+diff --git a/transport/io/udp_backend.cpp b/transport/io/udp_backend.cpp
+index 7b305a5..c77c0ad 100644
+--- a/transport/io/udp_backend.cpp
++++ b/transport/io/udp_backend.cpp
+@@ -248,8 +248,10 @@ std::unique_ptr<Backend> make_tcp_dpdk_backend(const Config& cfg,
+ std::unique_ptr<Backend> make_tcp_xdp_backend(const Config& cfg,
+                                               std::string* err);
+ 
++std::unique_ptr<Backend> make_talaria_backend(const Config& cfg, std::string* err);  // io/talaria_backend.cpp (Talaria OS zero-syscall rings)
+ std::unique_ptr<Backend> make_backend(const Config& cfg, std::string* err) {
+   if (cfg.kind == "udp") return make_udp_backend(cfg, err);
++  if (cfg.kind == "talaria") return make_talaria_backend(cfg, err);
+   if (cfg.kind == "xdp") return make_xdp_backend(cfg, err);
+   if (cfg.kind == "dpdk") return make_dpdk_backend(cfg, err);
+   if (cfg.kind == "tcp") return make_tcp_backend(cfg, err);

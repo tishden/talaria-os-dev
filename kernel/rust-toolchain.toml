@@ -1,0 +1,10 @@
+# The kernel toolchain pin: the build uses unstable features
+# (-Z json-target-spec, build-std) — an unpinned nightly would break for every
+# new user at each incompatible snapshot. Updating the pin is a deliberate
+# commit with a green test.sh, not automation.
+# This is the snapshot (rustc 1.100.0-nightly f7d782a3b) on which the
+# v1.0-preview gates passed. rustup picks the file up automatically: in kernel
+# `cargo -Z json-target-spec build --release` is enough (no `rustup run nightly`).
+[toolchain]
+channel = "nightly-2026-08-20"
+components = ["rust-src", "clippy", "rustfmt"]

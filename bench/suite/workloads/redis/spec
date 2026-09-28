@@ -1,0 +1,7 @@
+ip=@GUEST_IP@/24
+gw=@HOST_IP@
+tune=lowlat
+exec=/redis-server
+arg=redis-server
+arg=/redis.conf
+env=HOME=/

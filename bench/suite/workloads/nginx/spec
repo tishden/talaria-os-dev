@@ -1,0 +1,11 @@
+ip=@GUEST_IP@/24
+gw=@HOST_IP@
+tune=lowlat
+exec=/nginx/nginx
+arg=nginx
+arg=-p
+arg=/nginx/
+arg=-c
+arg=nginx.conf
+env=HOME=/
+env=PATH=/nginx

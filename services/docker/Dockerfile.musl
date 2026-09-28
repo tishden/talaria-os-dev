@@ -1,0 +1,20 @@
+# The talaria-musl toolchain: musl-gcc for static Talaria user binaries
+# (linked at 0x10000000, see USER-GUIDE §6.1 and examples/hello-talaria).
+# Build: services/docker/build-images.sh
+#
+# The dnf settings are the same as in Dockerfile.qemu, and for the same measured reasons —
+# see the comment there before changing any of them.
+FROM fedora:40
+# The static musl package has been renamed across Fedora releases, so the name is tried
+# both ways in ONE layer (a second install layer would re-download all the metadata).
+RUN dnf install -y --disablerepo=updates --setopt=retries=20 --setopt=timeout=120 \
+      --setopt=minrate=1000 --setopt=max_parallel_downloads=1 --setopt=zchunk=False \
+      gcc glibc-static util-linux-core musl-gcc musl-libc-static strace \
+ || dnf install -y --disablerepo=updates --setopt=retries=20 --setopt=timeout=120 \
+      --setopt=minrate=1000 --setopt=max_parallel_downloads=1 --setopt=zchunk=False \
+      gcc glibc-static util-linux-core musl-gcc musl-static strace
+RUN dnf clean all
+# An image without a working musl-gcc must not be reported as built: it would only fail
+# later, when the user binaries are linked.
+RUN command -v musl-gcc >/dev/null || { echo "musl-gcc missing: package renamed again?"; exit 1; }
+CMD ["/bin/bash"]

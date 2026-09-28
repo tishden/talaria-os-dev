@@ -1,0 +1,32 @@
+# The Talaria stand image (talaria-qemu2): QEMU/KVM + networking for test.sh/validate.sh/run.sh.
+# Build: services/docker/build-images.sh (or docker build -t talaria-qemu2 -f Dockerfile.qemu .)
+#
+# Four settings below are not decoration — without any one of them this image does not
+# build today. They were found by building it from a fresh clone (the release gate):
+#
+# * `--disablerepo=updates`: Fedora 40 is end-of-life and its `updates` repository no
+#   longer serves metadata, so a plain `dnf install` here fails on every machine. The
+#   release repository is archived and frozen, which is what we want anyway — it pins the
+#   stand to QEMU 8.2.2 for good instead of whatever `updates` last held. Every measurement
+#   published in docs/ is judged against this version; raising it is a deliberate step, not
+#   a side effect of rebuilding the image.
+# * `max_parallel_downloads=1`: dnf's parallel fetches mean parallel DNS, and DNS from
+#   inside a container goes out through docker's NAT. Measured on the release host: 20
+#   parallel resolutions from a container failed 20 out of 20 while the same 20 from the
+#   host succeeded 20 out of 20, and a single one from the container worked. Serialising
+#   costs build time; the image is built once.
+# * `zchunk=False`: the archived mirrors serve the `.zck` metadata over HTTP range
+#   requests, and those are what drop first.
+# * ONE `dnf install` layer: a second one would run after `dnf clean all` and re-download
+#   the whole repository metadata — the single largest transfer of the build, and the one
+#   that failed most often.
+FROM fedora:40
+RUN dnf install -y --disablerepo=updates --setopt=retries=20 --setopt=timeout=120 \
+      --setopt=minrate=1000 --setopt=max_parallel_downloads=1 --setopt=zchunk=False \
+      qemu-system-x86-core qemu-img iproute iputils socat \
+      gcc glibc-static util-linux-core python3 \
+ && dnf clean all
+# The version is printed at build time: the stand is pinned, and a silent change of it
+# would move every number in docs/ without anyone noticing.
+RUN qemu-system-x86_64 --version | head -1
+CMD ["/bin/bash"]

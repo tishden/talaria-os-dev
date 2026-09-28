@@ -1,0 +1,144 @@
+# Talaria OS CI.
+#
+# What runs here: kernel build in both configurations, clippy as a gate, host
+# unit tests of the kernel (kernel-unit/), the ring-3 test binaries built with the project's own docker
+# toolchains, and a syntax check of the shell/python tooling.
+# What does not: the full QEMU regression (kernel/test.sh, kernel/validate.sh)
+# needs /dev/kvm and ~20 minutes; it is the local gate described in
+# CONTRIBUTING.md.
+name: CI
+# BY HAND FOR NOW (the owner's decision): the gate is the local run described in
+# CONTRIBUTING.md, and this workflow is started from the Actions tab when it is
+# wanted. It has never run on a GitHub runner yet — the two jobs that need docker
+# and /dev/kvm are the ones to watch the first time. To make it automatic (and a
+# required check in branch protection), uncomment the two triggers below.
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  # pull_request:
+
+jobs:
+  kernel-minimal:
+    name: kernel (no selftest, plain cargo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The toolchain is pinned in kernel/rust-toolchain.toml; rustup installs
+      # it on the first cargo call. The vDSO is assembled by build.rs with the
+      # host C compiler, so no docker image is needed here.
+      - name: Build
+        working-directory: kernel
+        run: cargo -Z json-target-spec build --release --no-default-features
+      - name: Clippy
+        working-directory: kernel
+        run: cargo clippy -Zjson-target-spec --release --no-default-features -- -D warnings
+
+  kernel-full:
+    name: kernel (with selftest binaries)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build toolchain images (musl, alpine-build)
+        run: |
+          docker build -t talaria-musl -f services/docker/Dockerfile.musl services/docker
+          docker build -t talaria-alpine-build -f services/docker/Dockerfile.alpine-build services/docker
+      - name: Build ring-3 test binaries
+        run: make -C kernel/user all
+      - name: Build
+        working-directory: kernel
+        run: cargo -Z json-target-spec build --release
+      - name: Clippy
+        working-directory: kernel
+        run: cargo clippy -Zjson-target-spec --release -- -D warnings
+
+  kernel-unit:
+    name: kernel unit tests (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        working-directory: kernel-unit
+        run: cargo test
+      - name: Clippy
+        working-directory: kernel-unit
+        run: cargo clippy --all-targets -- -D warnings
+      # The same sources are compiled twice (here and in the kernel), so the two
+      # builds must agree on the edition and on the lint policy — otherwise the
+      # tests judge code that is not quite the code the kernel runs.
+      - name: Edition matches the kernel's
+        run: diff <(grep '^edition' kernel/Cargo.toml) <(grep '^edition' kernel-unit/Cargo.toml)
+      - name: Lint policy matches the kernel's
+        run: diff <(sed -n '/^\[lints.clippy\]/,$p' kernel/Cargo.toml) <(sed -n '/^\[lints.clippy\]/,$p' kernel-unit/Cargo.toml)
+
+  regression-subset:
+    name: QEMU regression (deterministic subset)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # GitHub's Linux runners expose /dev/kvm, so the real thing can boot here. What
+      # runs is the DETERMINISTIC part (TAL_CI=1): ring 3, the FS and the journal, the
+      # process model, the operator's side — about 175 assertions in ~7 minutes. What
+      # does not: the network probes, the latency gates and the boot-image chains
+      # (bios/tboot/UEFI). On a shared runner those judge the neighbour rather than the
+      # kernel — they stay the local gate described in CONTRIBUTING.md.
+      - name: KVM is available
+        run: test -e /dev/kvm && ls -l /dev/kvm
+      - name: Toolchain images (qemu stand, musl, alpine-build)
+        run: services/docker/build-images.sh
+      - name: Ring-3 binaries and the regression disk
+        run: make -C kernel/user all && (cd kernel && python3 mkfs.py)
+      - name: Kernel
+        working-directory: kernel
+        run: cargo -Z json-target-spec build --release
+      - name: The subset
+        # `clock` measures a servo against the host's own clock: on a shared runner it
+        # reports the runner's jitter, not ours.
+        run: TAL_CI=1 TAL_SKIP='talaria.test=clock' kernel/test.sh
+  coverage:
+    name: kernel unit coverage (report only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The number is printed for a human (which pure module is thin), and it is a
+      # GATE at the floor: the modules wired into kernel-unit are covered at ~98.5 %
+      # of lines, so 95 % leaves room for an ordinary change and trips on a module
+      # added without tests — which is the rule this crate exists for.
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Coverage of the modules under test (floor 95 % of lines)
+        working-directory: kernel-unit
+        run: cargo llvm-cov --summary-only --fail-under-lines 95
+      - name: Coverage as lcov (an artefact)
+        working-directory: kernel-unit
+        run: cargo llvm-cov --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-unit-coverage
+          path: kernel-unit/lcov.info
+
+  control-plane:
+    name: control-plane
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        working-directory: control-plane
+        run: cargo build --release
+      - name: Test
+        working-directory: control-plane
+        run: cargo test
+
+  scripts:
+    name: shell/python syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: sh -n / bash -n (by shebang)
+        run: |
+          git ls-files '*.sh' | while read -r f; do
+            if head -1 "$f" | grep -q bash; then bash -n "$f"; else sh -n "$f"; fi
+          done
+      - name: python -m py_compile
+        run: |
+          python3 -m py_compile kernel/tools/talaria-pack kernel/tools/talaria-check \
+                  kernel/mkfs.py kernel/mkfs2.py

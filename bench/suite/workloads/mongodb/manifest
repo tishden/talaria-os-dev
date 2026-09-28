@@ -1,0 +1,49 @@
+# MongoDB 4.0.5 (Alpine musl, a dynamic ELF) on Talaria.
+binary=/usr/bin/mongod
+args=mongod --dbpath /data/db --bind_ip_all --port 27017 --wiredTigerCacheSizeGB 0.25 --setParameter diagnosticDataCollectionEnabled=false --setParameter disableLogicalSessionCacheRefresh=true --nounixsocket --quiet
+env=HOME=/
+env=LD_LIBRARY_PATH=/usr/lib:/lib
+env=PATH=/usr/bin:/bin
+
+# ── Measured settings (see the header of kernel/src/cellman.rs) ─────────────
+# netslice: the slice on a core where someone is waiting for the network. This build
+# takes no interrupts from the NIC — a frame is seen by the thread waiting for it in
+# recv/epoll_wait, and while a computing neighbour holds the core, nobody sees the frame.
+# On mongod this was unmistakable: p50 69 µs (better than Linux) and p99 530, i.e. exactly one slice.
+# 100 µs was chosen BY MEASUREMENT on this workload (p99 528 -> 250 µs).
+netslice=100
+# wakepreempt: how much a woken thread may gain before it preempts a computing one. The
+# machine default of 150 µs was visible in mongod's tail as a PLATEAU: the "socket->reader"
+# stage had p50 1.4 µs against p99 182, i.e. the reader was waiting for the CPU, not the network.
+# A sweep on THIS workload (ping, the median of two repeats, µs):
+#            150 (default)  50      20
+#   2200  p99.9   7014     6096    310
+#   5500  p99      670      348    391
+#   5500  p99.9  60408      823    857
+#  11000  p99      725     1862   1179
+#  11000  p99.9   2876    17783   6871
+# Below saturation the tail is this threshold, and 20 µs removes it by a factor of 20-70. AT THE
+# VERY CEILING (11 thousand) the default is better: there the tail is already a queue, and
+# frequent preemption only adds switches. 20 was taken: a service's working point is
+# not the ceiling but what lies below it.
+wakepreempt=20000
+# slice: the scheduler's quantum length for THIS workload. The machine default is 500 µs,
+# and on EC2 it was visible in the tail LITERALLY: the service latency of `ping` held a
+# plateau at exactly the quantum length, independent of the rate as it grew fivefold.
+#          rate     p99 at 500 µs     p99 at 150 µs
+#         13 965         492 µs            76 µs
+#         20 948         495 µs            68 µs
+# (on Linux at the same rates 99 and 67 — so 150 µs brings the tail to parity, while
+# 500 gave a 5-7x loss with a BETTER median: our p50 was 57-58 against
+# 55-56, the whole gap was the quantum.) SERVICE latency was measured: an open
+# loop at these rates includes the generator's debt and settles nothing.
+slice=150000
+# fscache: THE FS BLOCK CACHE. The machine default is a sixteenth of the frame
+# allocator, which on the stand is 180 MB (the allocator takes 3021 MB of 8047). On Linux
+# the same accesses are served by the page cache of the whole machine.
+# On insert we did 21776 disk reads of 558 µs each (nine times more than writes) at a
+# 10 % cache miss rate — i.e. the "write tail" was a READ tail (no barriers were left by
+# then at all: EBS has no volatile write cache). A/B 180 -> 512 MB, insert p99.9:
+# 10404 -> 417, 5440 -> 489, 10510 -> 456 µs at the three top rates, 5108 -> 3805 at the
+# middle one; p99 0.76-0.88; the median unchanged. On Linux the same numbers are 190-400 µs.
+fscache=512

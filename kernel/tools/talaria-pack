@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""talaria-pack — pack an application into a bootable Talaria OS disk.
+
+One tool instead of copy-pasted mkdisk scripts: builds a TFS1 image (flat,
+read-only), TFS2 (directories, read-only) or ext2 (read-write; needs mkfs.ext2
+from e2fsprogs) and can generate /cell.manifest (the workload declaration for
+talaria.mode=cell|proc).
+
+Usage:
+  talaria-pack -o disk.img [--fs tfs1|tfs2|ext2] [--size 64M] [--journal] INPUTS... [manifest flags]
+
+INPUTS are files or directories, each as host_path[:disk_path]:
+  myapp                  ->  /myapp
+  cfg/app.ini:/cfg/app.ini
+  libs/:/lib             (a whole directory; tfs2/ext2 only)
+
+Manifest flags (they generate /cell.manifest unless one is given as an input):
+  --app HOST_BIN     the workload binary: placed at /<name> and written as binary=
+  --args="A B C"     arguments (without argv[0]; the '=' form is required if the
+                     value starts with '-': --args="--port 80")
+  --env K=V          an environment variable (repeatable)
+  --restart N        automatic restarts on failure (default 3)
+  --watchdog SECS    restart when there is no network progress for N seconds (0 = off)
+  --core N           LEGACY alias of --pin main:N
+  --pin PAT:TARGET   a rule placing threads on cores (repeatable):
+                     PAT — main or a thread-name pattern ('rx*', '*worker*'),
+                     TARGET — a core number, dedicated (the OS picks the core) or shared.
+                     Example: --pin main:dedicated --pin 'md_*:dedicated' --pin '*:shared'
+  --no-spread        do not spread unpinned threads over free cores
+  --no-balance       do not balance the load of the shared pool's cores
+  --no-numa          do not gather the threads of one process on one NUMA node
+  --numa-node N      put the workload (and its memory) on NUMA node N (writes node=N)
+  --pool NAME:LIST   a named core pool (repeatable): LIST — numbers and ranges
+                     separated by commas. Example: --pool fast:2,3 --pool bg:4-7
+                     Threads are sent into a pool by a rule: --pin 'md_*:fast'
+  --irq CORE         the core for device interrupts (default — the control
+                     plane; a dedicated core never gets them)
+
+Examples:
+  talaria-pack -o disk.img --app myapp                          # TFS1 + manifest
+  talaria-pack -o disk.img --app srv --args "--port 80" --restart 5 --env HOME=/
+  talaria-pack -o disk.img --fs tfs2 --app myapp cfg/:/cfg
+  talaria-pack -o disk.img --fs ext2 --size 128M --app mydb data/:/data
+  talaria-pack -o disk.img --fs ext2 --journal --app mydb        # ext2 + JBD2
+  talaria-pack -o disk.img --app trader --pin main:dedicated --pin 'md_*:dedicated'
+  talaria-pack -o disk.img --app trader --pool fast:1,2 --pool bg:3-7 \
+               --pin 'md_*:fast' --pin '*:bg' --numa-node 0
+
+Running the disk (see docs/USER-GUIDE.md §6):
+  qemu ... -append "console=ttyS0 talaria.mode=cell" -drive file=disk.img,...
+TFS1 limits: flat names <= 24 bytes, no directories. TFS2: paths <= 83 bytes.
+"""
+import argparse, os, struct, subprocess, sys, tempfile
+
+SECTOR = 512
+
+
+def collect(inputs):
+    """[(host, disk)] with directories expanded. disk has no leading '/'."""
+    out = []
+    for spec in inputs:
+        if ':' in spec:
+            host, disk = spec.rsplit(':', 1)
+        else:
+            host, disk = spec, os.path.basename(spec.rstrip('/'))
+        disk = disk.strip('/')
+        if os.path.isdir(host):
+            for root, _dirs, names in os.walk(host):
+                for n in sorted(names):
+                    h = os.path.join(root, n)
+                    rel = os.path.relpath(h, host)
+                    out.append((h, (disk + '/' + rel).strip('/') if disk else rel))
+        elif os.path.isfile(host):
+            if not disk:
+                sys.exit("talaria-pack: empty disk path for %s" % host)
+            out.append((host, disk))
+        else:
+            sys.exit("talaria-pack: no such file or directory: %s" % host)
+    return out
+
+
+def build_manifest(a):
+    name = os.path.basename(a.app)
+    lines = ["binary=/%s" % name]
+    argline = name + ((" " + a.args) if a.args else "")
+    lines.append("args=%s" % argline)
+    lines.append("restart=%d" % a.restart)
+    if a.watchdog: lines.append("watchdog=%d" % a.watchdog)
+    if a.core is not None: lines.append("core=%d" % a.core)
+    for p in a.pool: lines.append("pool=%s" % p)
+    for r in a.pin: lines.append("pin=%s" % r)
+    if a.numa_node is not None: lines.append("node=%d" % a.numa_node)
+    if a.irq is not None: lines.append("irq=%d" % a.irq)
+    if a.no_spread: lines.append("spread=off")
+    if a.no_balance: lines.append("balance=off")
+    if a.no_numa: lines.append("numa=off")
+    for e in a.env: lines.append("env=%s" % e)
+    return ("\n".join(lines) + "\n").encode()
+
+
+def pack_tfs1(files, out):
+    entries, body, lba = b"", b"", 1
+    for disk, data in files:
+        if '/' in disk:
+            sys.exit("talaria-pack: TFS1 is flat — '%s' contains a directory (use --fs tfs2)" % disk)
+        nb = disk.encode()
+        if len(nb) > 24:
+            sys.exit("talaria-pack: TFS1 name > 24 bytes: %s (use --fs tfs2)" % disk)
+        entries += nb.ljust(24, b'\0') + struct.pack("<II", lba, len(data))
+        padded = data + b'\0' * ((-len(data)) % SECTOR)
+        body += padded
+        lba += len(padded) // SECTOR
+    block0 = (struct.pack("<II", 0x31534654, len(files)) + entries)
+    if len(block0) > SECTOR:
+        sys.exit("talaria-pack: TFS1 holds %d files, %d given (use --fs tfs2)"
+                 % ((SECTOR - 8) // 32, len(files)))
+    img = block0.ljust(SECTOR, b'\0') + body
+    img += b'\0' * ((-len(img)) % SECTOR)
+    open(out, 'wb').write(img)
+
+
+def pack_tfs2(files, out):
+    NAMELEN = 84
+    dirs = []
+    for disk, _ in files:
+        parts = disk.split('/')
+        for i in range(1, len(parts)):
+            d = '/'.join(parts[:i])
+            if d not in dirs: dirs.append(d)
+    entries = [(d, b'', True) for d in dirs] + [(f, d, False) for f, d in files]
+    for name, _, _ in entries:
+        if len(name.encode()) > NAMELEN - 1:
+            sys.exit("talaria-pack: TFS2 path > 83 bytes: %s" % name)
+    count = len(entries)
+    dirsec = (16 + count * 96 + SECTOR - 1) // SECTOR
+    if dirsec > 32:
+        sys.exit("talaria-pack: TFS2 directory > 32 sectors (%d entries — use --fs ext2)" % count)
+    lba, body, table = dirsec, b'', b''
+    for name, data, isdir in entries:
+        nb = name.encode().ljust(NAMELEN, b'\0')
+        if isdir:
+            table += nb + struct.pack('<III', 0, 0, 1)
+        else:
+            table += nb + struct.pack('<III', lba, len(data), 0)
+            padded = data + b'\0' * ((-len(data)) % SECTOR)
+            body += padded
+            lba += len(padded) // SECTOR
+    hdr = struct.pack('<III', 0x32534654, count, dirsec) + b'\0' * 4
+    open(out, 'wb').write((hdr + table).ljust(dirsec * SECTOR, b'\0') + body)
+
+
+def pack_ext2(files, out, size, journal=False):
+    with tempfile.TemporaryDirectory() as td:
+        for disk, data in files:
+            p = os.path.join(td, disk)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, 'wb') as f: f.write(data)
+        # no dir_index — the Talaria kernel writes linear directories (see mkext2.sh).
+        # --journal: JBD2, as in mkext2.sh; features that change the format of journal
+        # tags and directories (metadata_csum, 64bit) are turned off.
+        feat = "^dir_index,^resize_inode,^ext_attr"
+        feat += ",has_journal,^metadata_csum,^64bit" if journal else ",^has_journal"
+        try:
+            subprocess.run(["mkfs.ext2", "-q", "-F", "-b", "4096",
+                            "-O", feat, "-d", td, out, size], check=True)
+        except FileNotFoundError:
+            sys.exit("talaria-pack: no mkfs.ext2 (install e2fsprogs)")
+        # The image goes to disk, not into the host's page cache: otherwise the guest's
+        # first barrier turns into an fdatasync of the whole image in QEMU (see mkext2.sh).
+        subprocess.run(["sync", out], check=False)
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument('-o', '--out', required=True)
+    ap.add_argument('--fs', choices=['tfs1', 'tfs2', 'ext2'], default='tfs1')
+    ap.add_argument('--size', default='64M', help='size of the ext2 image (default 64M)')
+    ap.add_argument('--journal', action='store_true',
+                    help='ext2 with a JBD2 journal (metadata transactions; see USER-GUIDE §7.1)')
+    ap.add_argument('--app', help='the workload binary: an input + a generated /cell.manifest')
+    ap.add_argument('--args', default='', help='workload arguments (without argv[0])')
+    ap.add_argument('--env', action='append', default=[], help='K=V (repeatable)')
+    ap.add_argument('--restart', type=int, default=3)
+    ap.add_argument('--watchdog', type=int, default=0)
+    ap.add_argument('--core', type=int, default=None)
+    ap.add_argument('--pin', action='append', default=[], help='<pattern>:<core|dedicated|shared|pool name> (repeatable)')
+    ap.add_argument('--pool', action='append', default=[], help='<name>:<core list> (repeatable)')
+    ap.add_argument('--numa-node', type=int, default=None, dest='numa_node')
+    ap.add_argument('--irq', type=int, default=None)
+    ap.add_argument('--no-spread', action='store_true')
+    ap.add_argument('--no-balance', action='store_true')
+    ap.add_argument('--no-numa', action='store_true')
+    ap.add_argument('-h', '--help', action='store_true')
+    ap.add_argument('inputs', nargs='*')
+    a = ap.parse_args()
+    if a.help or (not a.inputs and not a.app):
+        print(__doc__); sys.exit(0)
+
+    pairs = collect(a.inputs)
+    if a.app:
+        if not os.path.isfile(a.app):
+            sys.exit("talaria-pack: no binary: %s" % a.app)
+        pairs.insert(0, (a.app, os.path.basename(a.app)))
+        if not any(d == 'cell.manifest' for _h, d in pairs):
+            pairs.append((None, 'cell.manifest'))  # to be generated
+
+    files, seen = [], set()
+    for host, disk in pairs:
+        if disk in seen:
+            sys.exit("talaria-pack: duplicate disk path: /%s" % disk)
+        seen.add(disk)
+        data = build_manifest(a) if host is None else open(host, 'rb').read()
+        files.append((disk, data))
+
+    {'tfs1': pack_tfs1, 'tfs2': pack_tfs2,
+     'ext2': lambda f, o: pack_ext2(f, o, a.size, a.journal)}[a.fs](files, a.out)
+
+    total = os.path.getsize(a.out)
+    print("%s: %s, %d bytes, files=%d" % (a.out, a.fs, total, len(files)))
+    for disk, data in files:
+        print("  /%-38s %d bytes" % (disk, len(data)))
+    if a.app:
+        print("manifest: talaria.mode=cell (multi-threaded, supervised) or talaria.mode=proc (own address space, fork)")
+
+
+if __name__ == '__main__':
+    main()
