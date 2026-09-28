@@ -217,7 +217,8 @@ pub fn configure_from_cmdline(cmdline: &str) {
                 let ms = ms.max(1000);
                 STAT_NS.store(ms * 1_000_000, Ordering::SeqCst);
                 STAT_NEXT.store(0, Ordering::SeqCst);
-                crate::println!("talaria: the stat block into the log every {} ms (the workload may be stopped by a timeout); it goes onto the line in portions — if it cannot keep up, a snapshot is skipped and that is visible in the counter", ms);
+                crate::println!("talaria: the stat block into the log every {} ms (the workload may be stopped by a timeout); it goes onto the line in \
+                    portions — if it cannot keep up, a snapshot is skipped and that is visible in the counter", ms);
             }
             _ => crate::println!("talaria: talaria.stat={} — not a number of milliseconds, the snapshot was not enabled", v),
         }
@@ -237,7 +238,8 @@ pub fn configure_from_cmdline(cmdline: &str) {
     PERIOD_NS.store(ms * 1_000_000, Ordering::SeqCst);
     PERIOD_RSS.store(rss, Ordering::SeqCst);
     NEXT_NS.store(0, Ordering::SeqCst);
-    crate::println!("talaria: a top snapshot into the log every {} ms (the table walk for RSS is {}); it goes onto the line in portions — a short period cannot be carried by a polled UART, and the skips are in the counter",
+    crate::println!("talaria: a top snapshot into the log every {} ms (the table walk for RSS is {}); it goes onto the line in portions — a short period \
+        cannot be carried by a polled UART, and the skips are in the counter",
         ms, if rss { "on — it costs milliseconds" } else { "off" });
 }
 
@@ -421,7 +423,8 @@ fn stat_block(due_ns: u64, now_ns: u64, whence: &str) {
     let (taken, skipped) = stat_counts();
     let (b, c) = (crate::serial::CAP_BYTES.load(Ordering::Relaxed), crate::serial::CAP_TSC.load(Ordering::Relaxed));
     let hz = crate::tsc::calibrate_cached().max(1);
-    crate::println!("stat: snapshots assembled {}, skipped (the previous one not poured out) {}, bytes that did not fit {}; poured {} bytes in {} ms ({} ns/byte)",
+    crate::println!("stat: snapshots assembled {}, skipped (the previous one not poured out) {}, bytes that did not fit {}; poured {} bytes in {} ms ({} \
+        ns/byte)",
         taken, skipped, crate::serial::CAP_LOST.load(Ordering::Relaxed),
         b, c / (hz / 1000).max(1), if b == 0 { 0 } else { crate::tsc::cycles_to_ns(c, hz) / b });
     if TOP_SKIPPED.load(Ordering::Relaxed) != 0 {
@@ -429,7 +432,8 @@ fn stat_block(due_ns: u64, now_ns: u64, whence: &str) {
     }
     crate::println!("stat: the worst assembly of a block into memory: {} µs",
         crate::tsc::cycles_to_ns(STAT_BUILD_TSC.load(Ordering::Relaxed), hz) / 1000);
-    crate::println!("stat: the worst single pour: {} µs for {} bytes (the tick's budget is 150 µs); from network waiters' spins {} bytes, the tick yielded to a spin {} times",
+    crate::println!("stat: the worst single pour: {} µs for {} bytes (the tick's budget is 150 µs); from network waiters' spins {} bytes, the tick yielded to \
+        a spin {} times",
         crate::tsc::cycles_to_ns(crate::serial::CAP_WORST_TSC.load(Ordering::Relaxed), hz) / 1000,
         crate::serial::CAP_WORST_N.load(Ordering::Relaxed),
         FLUSH_SPIN_BYTES.load(Ordering::Relaxed), FLUSH_TICK_SKIP.load(Ordering::Relaxed));

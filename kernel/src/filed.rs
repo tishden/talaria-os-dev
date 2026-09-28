@@ -571,7 +571,8 @@ pub fn cmd(arg: &str) {
 /// will be said about different files.
 pub fn selftest() -> bool {
     let mut ok = true;
-    let mut check = |c: bool, what: &str| { if !c { crate::println!("filed-test: FAIL {}", what); ok = false; } else { crate::println!("filed-test: ok {}", what); } };
+    let mut check = |c: bool, what: &str| { if !c { crate::println!("filed-test: FAIL {}", what); ok = false; } else { crate::println!("filed-test: ok {}",
+        what); } };
     let c1 = !crc32_update(!0, b"123456789");
     check(c1 == 0xCBF4_3926, "CRC32(\"123456789\") = 0xcbf43926 (the IEEE reference)");
     let c2 = !crc32_update(!0, b"");

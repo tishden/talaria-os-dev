@@ -58,12 +58,14 @@ pub fn init() {
     // — the syscall/fxsave frames on the user stack, a read() into a buffer — would go straight into the frame SHARED with the child).
     // SAFETY: P5 — CR0.WP on THIS core, before the tables are published — after it a kernel write
     // into an RO page faults instead of silently changing a page shared with a child.
-    unsafe { let mut cr0: u64; core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack)); cr0 |= 1 << 16; core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack)); }
+    unsafe { let mut cr0: u64; core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack)); cr0 |= 1 << 16; core::arch::asm!("mov cr0, {}",
+        in(reg) cr0, options(nomem, nostack)); }
     // SMEP: ring 0 must not FETCH from a user page (the kernel never does — see
     // `enable_smep`). It is printed either way: a protection one believes in without
     // seeing it in the log is the kind that turns out to have been off.
     let smep = unsafe { enable_smep() };
-    crate::println!("talaria: paging: SMEP {} (ring 0 does not execute the workload's pages), SMAP is not used — the kernel copies user memory with plain loads (uaccess.rs)",
+    crate::println!("talaria: paging: SMEP {} (ring 0 does not execute the workload's pages), SMAP is not used — the kernel copies user memory with plain \
+        loads (uaccess.rs)",
                     if smep { "is ON" } else { "is NOT SUPPORTED by this CPU" });
     if !has_1g() {
         crate::println!("talaria: paging: 1G pages are not supported, I leave the boot tables");
@@ -1605,7 +1607,8 @@ pub fn lazy_fault(vaddr: u64) -> bool {
             let left = LAZY_GIVEUP_TRACE.load(core::sync::atomic::Ordering::Relaxed);
             if left > 0 {
                 LAZY_GIVEUP_TRACE.store(left - 1, core::sync::atomic::Ordering::Relaxed);
-                crate::println!("[paging] the lazy reservation {:#x}: a frame was not allocated (rejected {}) — the workload will get a SIGSEGV on its own memory",
+                crate::println!("[paging] the lazy reservation {:#x}: a frame was not allocated (rejected {}) — the workload will get a SIGSEGV on its own \
+                    memory",
                     a, nrej);
             }
             return false;
@@ -1661,7 +1664,8 @@ pub fn map_fresh_pages(vaddr: u64, pages: u64) -> bool {
     for _ in 0..pages {
         // the frame must not coincide with a privately mapped identity vaddr of this AS (a write through identity)
         let mut fr = 0u64;
-        for _ in 0..8 { match crate::mem::alloc_contig_node(1, node) { Some(f) => { if virt_to_phys(f) == f || f >= 0x1_0000_0000 { fr = f; break; } } None => return false } }
+        for _ in 0..8 { match crate::mem::alloc_contig_node(1, node) { Some(f) => { if virt_to_phys(f) == f || f >= 0x1_0000_0000 { fr = f; break; } }
+            None => return false } }
         if fr == 0 { return false; }
         // SAFETY: P1 — a frame straight from the allocator, zeroed through the identity map before
         // anybody can see it.

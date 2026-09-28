@@ -107,7 +107,8 @@ pub fn init(start_info: u64) {
         // not a single boot line said anything about it.
         let seen = (END.load(Ordering::Relaxed) - NEXT.load(Ordering::Relaxed)) / 1048576;
         if total_ram / 1048576 > seen * 3 / 2 {
-            crate::println!("talaria: ATTENTION: the allocator sees {} MB out of the machine's {} MB (identity 0..4 GB) — the FS block cache is by default computed from the VISIBLE share; set fscache= in the manifest explicitly",
+            crate::println!("talaria: ATTENTION: the allocator sees {} MB out of the machine's {} MB (identity 0..4 GB) — the FS block cache is by default \
+                computed from the VISIBLE share; set fscache= in the manifest explicitly",
                 seen, total_ram / 1048576);
         }
         // THE REFCOUNT TABLE MUST COVER EVERYTHING THE ALLOCATOR HANDS OUT.
@@ -117,7 +118,8 @@ pub fn init(start_info: u64) {
         // three gigabytes of the allocator, and not a single line said anything about it.
         let top_frame = END.load(Ordering::Relaxed) >> 12;
         if top_frame > rc_capacity_frames() {
-            crate::println!("talaria: ATTENTION: the COW refcount table covers {} MB, while the allocator hands out up to {:#x} ({} MB) — the frames above will be considered shared (extra copies and leaks, but not corruption)",
+            crate::println!("talaria: ATTENTION: the COW refcount table covers {} MB, while the allocator hands out up to {:#x} ({} MB) — the frames above \
+                will be considered shared (extra copies and leaks, but not corruption)",
                 rc_capacity_frames() * 4096 / 1048576, END.load(Ordering::Relaxed),
                 END.load(Ordering::Relaxed) / 1048576);
         }
@@ -572,7 +574,8 @@ pub static RC_OUTSIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomi
 pub fn rc_capacity_frames() -> u64 { RC_MAX as u64 }
 
 /// Set a frame's refcount (the number of COW references).
-pub fn rc_set(phys: u64, v: u8) { let i = (phys >> 12) as usize; if i < RC_MAX { unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(REFCNT[i]), v); } } }
+pub fn rc_set(phys: u64, v: u8) { let i = (phys >> 12) as usize; if i < RC_MAX { unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(REFCNT[i]), v); } }
+    }
 /// Get the refcount. OUTSIDE the table it is "shared" (2) rather than "free" (0): see the header.
 pub fn rc_get(phys: u64) -> u8 {
     let i = (phys >> 12) as usize;

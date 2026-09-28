@@ -385,8 +385,10 @@ pub fn dump_app() {
         for j in 0..(d.n as usize).min(APP_DUMP_EV) {
             let e = d.ev[j];
             let dt = e.tsc.wrapping_sub(d.t0);
-            let (sg, us) = if dt < (1u64 << 62) { ("+", dt.saturating_mul(1_000_000) / hz) } else { ("-", d.t0.wrapping_sub(e.tsc).saturating_mul(1_000_000) / hz) };
-            let why = match e.why & 0x7f { 1 => "hint", 2 => "a foreign hint->rotation", 3 => "rotation", 4 => "stay:lock", 5 => "stay:nobody", 6 => "stay:interception", 7 => "steal", 8 => "stay:it ran little", 9 => "stay:a request in progress", _ => "?" };
+            let (sg, us) = if dt < (1u64 << 62) { ("+", dt.saturating_mul(1_000_000) / hz) } else { ("-",
+                d.t0.wrapping_sub(e.tsc).saturating_mul(1_000_000) / hz) };
+            let why = match e.why & 0x7f { 1 => "hint", 2 => "a foreign hint->rotation", 3 => "rotation", 4 => "stay:lock", 5 => "stay:nobody",
+                6 => "stay:interception", 7 => "steal", 8 => "stay:it ran little", 9 => "stay:a request in progress", _ => "?" };
             crate::print!(" [{}{} {} t{}->t{} {}", sg, us, if e.why & 0x80 != 0 { "tick" } else { "yield" }, e.from, e.to, why);
             if e.hint != 255 { crate::print!(" h:t{}", e.hint); }
             if e.why & 0x80 != 0 { if e.rip == 3 { crate::print!(" @r3"); } else if e.rip != 0 { crate::print!(" @{:#x}", e.rip); } }

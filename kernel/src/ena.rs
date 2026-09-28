@@ -469,7 +469,8 @@ impl Ena {
         let kicked = self.tx_db_dirty;
         let had_rx = self.rx_cq_dirty;   // §4.6: was the receive path handled in this pass
         fence(Ordering::SeqCst);
-        if self.tx_db_dirty { w32(self.regs + self.tx_db, self.tx_tail as u32); self.tx_db_dirty = false; self.db_writes += 1; self.llq_burst_left = self.llq_burst; }
+        if self.tx_db_dirty { w32(self.regs + self.tx_db, self.tx_tail as u32); self.tx_db_dirty = false; self.db_writes += 1;
+            self.llq_burst_left = self.llq_burst; }
         if self.rx_db_dirty { w32(self.regs + self.rx_db, self.rx_tail as u32); self.rx_db_dirty = false; self.db_writes += 1; }
         // §A1: the calls into the CQ's HEAD. A modern ena_com does not make them at all
         // (ena_com_update_dev_comp_head has been removed), but with us without them the receive path once
@@ -1006,7 +1007,8 @@ pub fn probe_at(d: &crate::pci::PciDev) -> Option<Ena> {
         // w8 = feature_version | entry_size_recommended<<8 | max_wide_llq_depth<<16
         // (we print it in order to make sure of accel_mode's offset: if w8 is parsed
         // meaningfully, then accel_mode really is in w9)
-        crate::println!("ena: the LLQ: num={} depth={} hdr_sup={:#x} entry_sup={:#x} dnbh_sup={:#x} stride_sup={:#x} w8={:#x} (ver={} recommended={}) accel_sup={:#x} max_burst={} B",
+        crate::println!("ena: the LLQ: num={} depth={} hdr_sup={:#x} entry_sup={:#x} dnbh_sup={:#x} stride_sup={:#x} w8={:#x} (ver={} recommended={}) \
+            accel_sup={:#x} max_burst={} B",
             l[2], l[3], hdr_s, ent_s, dnbh_s, str_s, l[8], l[8] & 0xFF, (l[8] >> 8) & 0xFF,
             l[9] & 0xFFFF, (l[9] >> 16) & 0xFFFF);
         // §7.3: we send a SET_FEATURE(LLQ) ONLY by talaria.ena=llq. The configuration
@@ -1047,7 +1049,8 @@ pub fn probe_at(d: &crate::pci::PciDev) -> Option<Ena> {
                         e.llq_burst = (burst_sz as usize / esz) as u16;
                         e.llq_burst_left = e.llq_burst;
                     }
-                    crate::println!("ena: the LLQ is configured (a record of {} B, an inline header of up to {} B, stride={:#x}, accel: sup={:#x} enabled={:#x}, meta={} burst={} records)",
+                    crate::println!("ena: the LLQ is configured (a record of {} B, an inline header of up to {} B, stride={:#x}, accel: sup={:#x} \
+                        enabled={:#x}, meta={} burst={} records)",
                         e.llq_entry, e.llq_hdr_max, stride, accel_sup, c[12], e.llq_meta, e.llq_burst);
                 } else {
                     crate::println!("ena: the SET_FEATURE(LLQ) was rejected — we stay on the host descriptors");

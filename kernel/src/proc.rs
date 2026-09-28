@@ -172,7 +172,8 @@ fn href_dec_close(h: i64) {
     }
 }
 pub fn fd_get_cloexec(ufd: i64) -> i64 { let p = cur_proc(); if ufd < 0 || ufd as usize >= FDN { return -9; } unsafe { FDFL[p][ufd as usize] as i64 } }
-pub fn fd_set_cloexec(ufd: i64, v: i64) -> i64 { let p = cur_proc(); if ufd < 0 || ufd as usize >= FDN { return -9; } unsafe { FDFL[p][ufd as usize] = (v & 1) as u8; } 0 }
+pub fn fd_set_cloexec(ufd: i64, v: i64) -> i64 { let p = cur_proc(); if ufd < 0 || ufd as usize >= FDN { return -9; } unsafe {
+    FDFL[p][ufd as usize] = (v & 1) as u8; } 0 }
 /// fork: the child inherits the parent's table (the references +1), the signal handlers, the mask, the cwd.
 pub fn fork_into(parent: usize, child: usize) {
     ensure(parent);
@@ -182,7 +183,8 @@ pub fn fork_into(parent: usize, child: usize) {
     unsafe {
         for i in 0..FDN { FDFL[child][i] = FDFL[parent][i]; }
         INITED[child] = true;
-        for s in 0..65 { SA_HANDLER[child][s] = SA_HANDLER[parent][s]; SA_FLAGS[child][s] = SA_FLAGS[parent][s]; SA_MASK[child][s] = SA_MASK[parent][s]; SA_RESTORER[child][s] = SA_RESTORER[parent][s]; }
+        for s in 0..65 { SA_HANDLER[child][s] = SA_HANDLER[parent][s]; SA_FLAGS[child][s] = SA_FLAGS[parent][s]; SA_MASK[child][s] = SA_MASK[parent][s];
+            SA_RESTORER[child][s] = SA_RESTORER[parent][s]; }
         SIGMASK[child] = SIGMASK[parent]; PENDING[child] = 0; PPEND[child] = 0; NOTIFIED[child] = false;
         CWD[child] = CWD[parent]; CWDL[child] = CWDL[parent];
         MMAP_NEXT[child] = MMAP_NEXT[parent];
@@ -327,7 +329,9 @@ static mut SA_FLAGS: [[u64; 65]; NT] = [[0; 65]; NT];
 static mut SA_RESTORER: [[u64; 65]; NT] = [[0; 65]; NT];
 static mut SA_MASK: [[u64; 65]; NT] = [[0; 65]; NT];
 static mut PENDING: [u64; NT] = [0; NT];   // per-task (tkill/tgkill)
-static mut PPEND: [u64; NT] = [0; NT];     // per-process (kill/SIGCHLD): the leader's index; it is taken by any thread for which the signal is not masked (sigwait and the like)
+// per-process (kill/SIGCHLD): the leader's index; it is taken by any thread for
+// which the signal is not masked (sigwait and the like)
+static mut PPEND: [u64; NT] = [0; NT];
 static mut SIGMASK: [u64; NT] = [0; NT];   // per-task
 
 /// rt_sigaction(sig, act*, oldact*): kernel struct {handler, flags, restorer, mask}.
@@ -370,9 +374,11 @@ pub fn sigmask_of(t: usize) -> u64 { unsafe { SIGMASK[t] } }
 pub fn thread_inherit_sigmask(parent: usize, child: usize) { unsafe { SIGMASK[child] = SIGMASK[parent]; PENDING[child] = 0; } }
 pub fn set_sigmask(t: usize, m: u64) { unsafe { SIGMASK[t] = m; } }
 /// Put a signal to the task t (pending).
-pub fn send(t: usize, sig: u64) { if t < NT && (1..=64).contains(&sig) { unsafe { let v = core::ptr::read_volatile(addr_of!(PENDING[t])) | (1u64 << (sig - 1)); core::ptr::write_volatile(addr_of_mut!(PENDING[t]), v); } } }
+pub fn send(t: usize, sig: u64) { if t < NT && (1..=64).contains(&sig) { unsafe { let v = core::ptr::read_volatile(addr_of!(PENDING[t])) | (1u64 << (sig - 1));
+    core::ptr::write_volatile(addr_of_mut!(PENDING[t]), v); } } }
 /// A signal to a PROCESS (the leader p): any of its threads for which it is not masked will take it.
-pub fn send_proc(p: usize, sig: u64) { if p < NT && (1..=64).contains(&sig) { unsafe { let v = core::ptr::read_volatile(addr_of!(PPEND[p])) | (1u64 << (sig - 1)); core::ptr::write_volatile(addr_of_mut!(PPEND[p]), v); } } }
+pub fn send_proc(p: usize, sig: u64) { if p < NT && (1..=64).contains(&sig) { unsafe {
+    let v = core::ptr::read_volatile(addr_of!(PPEND[p])) | (1u64 << (sig - 1)); core::ptr::write_volatile(addr_of_mut!(PPEND[p]), v); } } }
 /// A SIGTERM to all the live processes (by their leaders) — the regular stop of the machine. It returns the number of processes.
 pub fn term_all() -> usize {
     let mut n = 0;
@@ -428,15 +434,18 @@ pub fn sig_pending_t(t: usize) -> bool {
 /// Take and return the lowest deliverable signal of the current task (None — there is none).
 pub fn take_pending() -> Option<u64> { take_pending_in(!0u64 & !sigmask_of(crate::sched::current_id())) }
 /// Whether there is a pending signal from the set `set` (signalfd readiness).
-pub fn pending_in(set: u64) -> bool { let t = crate::sched::current_id(); let p = crate::sched::proc_of(t); unsafe { (core::ptr::read_volatile(addr_of!(PENDING[t])) | core::ptr::read_volatile(addr_of!(PPEND[p]))) & set != 0 } }
+pub fn pending_in(set: u64) -> bool { let t = crate::sched::current_id(); let p = crate::sched::proc_of(t); unsafe {
+    (core::ptr::read_volatile(addr_of!(PENDING[t])) | core::ptr::read_volatile(addr_of!(PPEND[p]))) & set != 0 } }
 /// Take and return the lowest pending signal from the set `set` (sigtimedwait; the mask is not taken into account).
 pub fn take_pending_in(set: u64) -> Option<u64> {
     let t = crate::sched::current_id(); let p = crate::sched::proc_of(t);
     unsafe {
         let own = core::ptr::read_volatile(addr_of!(PENDING[t])) & set;
-        if own != 0 { let s = own.trailing_zeros() as u64; core::ptr::write_volatile(addr_of_mut!(PENDING[t]), core::ptr::read_volatile(addr_of!(PENDING[t])) & !(1u64 << s)); return Some(s + 1); }
+        if own != 0 { let s = own.trailing_zeros() as u64; core::ptr::write_volatile(addr_of_mut!(PENDING[t]),
+            core::ptr::read_volatile(addr_of!(PENDING[t])) & !(1u64 << s)); return Some(s + 1); }
         let pp = core::ptr::read_volatile(addr_of!(PPEND[p])) & set;
-        if pp != 0 { let s = pp.trailing_zeros() as u64; core::ptr::write_volatile(addr_of_mut!(PPEND[p]), core::ptr::read_volatile(addr_of!(PPEND[p])) & !(1u64 << s)); return Some(s + 1); }
+        if pp != 0 { let s = pp.trailing_zeros() as u64; core::ptr::write_volatile(addr_of_mut!(PPEND[p]),
+            core::ptr::read_volatile(addr_of!(PPEND[p])) & !(1u64 << s)); return Some(s + 1); }
         None
     }
 }

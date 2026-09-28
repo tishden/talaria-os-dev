@@ -513,7 +513,8 @@ fn phys_topology(n: usize) {
         for k in 0..l { if cores[k] == cores[l] { seen = true; break; } }
         if !seen { uniq += 1; }
     }
-    crate::println!("smp: the layout by the physical cores (CPUID 0x0B, the SMT shift {}): the logical ones 0..{} -> the cores {:?} the threads {:?}; DIFFERENT physical cores {}",
+    crate::println!("smp: the layout by the physical cores (CPUID 0x0B, the SMT shift {}): the logical ones 0..{} -> the cores {:?} the threads {:?}; \
+        DIFFERENT physical cores {}",
         smt_shift, show, &cores[..show], &threads[..show], uniq);
 }
 

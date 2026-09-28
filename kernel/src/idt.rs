@@ -351,7 +351,8 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
         let v = crate::syscall::LAST_SYS[t].load(core::sync::atomic::Ordering::Relaxed);
         if v != u64::MAX { crate::println!("║ the task's last syscall: #{} (the return into {:#x})", v >> 48, v & 0xFFFF_FFFF_FFFF); }
     }
-    crate::println!("║ the task t{} (DEAD={}) CR3={:#x} cr3reg={:#x}", crate::sched::current_id(), !crate::sched::task_alive(crate::sched::current_id()), crate::sched::task_cr3(crate::sched::current_id()), crate::paging::current_cr3());
+    crate::println!("║ the task t{} (DEAD={}) CR3={:#x} cr3reg={:#x}", crate::sched::current_id(), !crate::sched::task_alive(crate::sched::current_id()),
+        crate::sched::task_cr3(crate::sched::current_id()), crate::paging::current_cr3());
     crate::println!("║ rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}", f.rax, f.rbx, f.rcx, f.rdx);
     crate::println!("║ rsi={:#018x} rdi={:#018x} rbp={:#018x} r8 ={:#018x}", f.rsi, f.rdi, f.rbp, f.r8);
     crate::println!("║ r9 ={:#018x} r10={:#018x} r11={:#018x} r12={:#018x}", f.r9, f.r10, f.r11, f.r12);

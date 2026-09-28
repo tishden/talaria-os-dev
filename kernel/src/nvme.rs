@@ -336,7 +336,8 @@ pub fn probe_nth(n: usize) -> Option<Nvme> {
     let lbads = unsafe { core::ptr::read_volatile((idbuf + 128 + 16 * flbas as u64 + 2) as *const u8) };
     crate::mem::free_contig(idbuf, 1);
     if lbads != 9 { crate::println!("nvme: an LBA of {} bytes is not supported (512 is needed)", 1u32 << lbads); return None; }
-    crate::println!("nvme: {:02x}:{:02x}.{} BAR0={:#x} nsze={} blocks ({} MB), an IO pair qid=1 of depth {}, a transfer of up to {} KB, polling; the volatile write cache is {}",
+    crate::println!("nvme: {:02x}:{:02x}.{} BAR0={:#x} nsze={} blocks ({} MB), an IO pair qid=1 of depth {}, a transfer of up to {} KB, polling; the volatile \
+        write cache is {}",
         d.bus, d.dev, d.func, bar0, n.nsze, n.nsze * 512 / 1048576, QD, n.max_xfer / 1024,
         if n.vwc { "THERE (a barrier is mandatory)" } else { "ABSENT (a write is durable on completion — a barrier is not needed)" });
     Some(n)

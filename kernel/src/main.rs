@@ -172,7 +172,8 @@ extern "C" fn rust_main(start_info: u64) -> ! {
     // 0xB8000 window on a machine without a VGA device is an extra risk in the most opaque zone
     // of the bring-up, where there is nothing to debug with.
     if cmdline::has(cmdline, "talaria.console", "vga") { vga::enable(); }
-    if cmdline::flag(cmdline, "talaria.noshoot") { syscall::NO_SHOOTDOWN.store(true, core::sync::atomic::Ordering::SeqCst); println!("talaria: the TLB shootdown is DISABLED (diagnostics)"); }
+    if cmdline::flag(cmdline, "talaria.noshoot") { syscall::NO_SHOOTDOWN.store(true, core::sync::atomic::Ordering::SeqCst); println!("talaria: the TLB \
+        shootdown is DISABLED (diagnostics)"); }
     rebootat("mb2", cmdline);
     idt::init();
     println!("talaria: the IDT is installed (exception handlers)");

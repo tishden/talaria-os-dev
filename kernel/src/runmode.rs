@@ -55,7 +55,9 @@ pub fn run(cmdline: &str, tsc_hz: u64) -> ! {
     //    talaria.mode=proc — a process in
     //    its own AS (fork/COW, signals, a dynamic ELF). Both with the network (connect/DNS),
     //    the NIC is optional for cell/proc. Plus talaria.test=connect — a regression of outgoing TCP.
-    if crate::cmdline::mode_is(cmdline, "cell") || crate::cmdline::mode_is(cmdline, "proc") || crate::cmdline::test_is(cmdline, "connect") || crate::cmdline::test_is(cmdline, "netshoot") || crate::cmdline::test_is(cmdline, "idleshoot") || crate::cmdline::test_is(cmdline, "forktls") {
+    if crate::cmdline::mode_is(cmdline, "cell") || crate::cmdline::mode_is(cmdline, "proc") || crate::cmdline::test_is(cmdline,
+        "connect") || crate::cmdline::test_is(cmdline, "netshoot") || crate::cmdline::test_is(cmdline, "idleshoot") || crate::cmdline::test_is(cmdline,
+        "forktls") {
         // talaria.smp=N (2..=MAXCPU): bring up N-1 APs with schedulers of pinned threads —
         // the workload (mode=cell/proc) migrates its threads with sched_setaffinity.
         crate::smp::start_from_cmdline(cmdline);
@@ -137,7 +139,9 @@ pub fn run(cmdline: &str, tsc_hz: u64) -> ! {
         }
     }
     // The server mode: netsys on the BSP + a musl server in ring 3 (the socket syscalls -> smoltcp)
-    if crate::cmdline::mode_is(cmdline, "server") || crate::cmdline::mode_is(cmdline, "eserver") || crate::cmdline::mode_is(cmdline, "diskserver") || crate::cmdline::mode_is(cmdline, "userver") || crate::cmdline::mode_is(cmdline, "mtsrv") || crate::cmdline::mode_is(cmdline, "forksrv") || crate::cmdline::mode_is(cmdline, "mongoose") || crate::cmdline::mode_is(cmdline, "redis") {
+    if crate::cmdline::mode_is(cmdline, "server") || crate::cmdline::mode_is(cmdline, "eserver") || crate::cmdline::mode_is(cmdline,
+        "diskserver") || crate::cmdline::mode_is(cmdline, "userver") || crate::cmdline::mode_is(cmdline, "mtsrv") || crate::cmdline::mode_is(cmdline,
+        "forksrv") || crate::cmdline::mode_is(cmdline, "mongoose") || crate::cmdline::mode_is(cmdline, "redis") {
         // The same check as for cell/proc above: if the stack is already up from the
         // user-data phase, we do not create a second set of rings.
         match if crate::netsys::ready() { None } else { open_nic() } {
@@ -517,7 +521,8 @@ fn run_manifest_process_at(path: &[u8]) -> ! {
 /// work": there are no refusal lines, because there was no refusal.
 fn manifest_fit(n: usize, cap: usize) {
     if n >= cap {
-        println!("talaria: WARNING — the manifest was read exactly up to the buffer's limit ({} bytes): the file's tail was DISCARDED, the settings in it were not applied", cap);
+        println!("talaria: WARNING — the manifest was read exactly up to the buffer's limit ({} bytes): the file's tail was DISCARDED, the settings in it were \
+            not applied", cap);
     }
 }
 

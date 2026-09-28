@@ -384,7 +384,8 @@ pub fn rqwait_report() {
     let wall_ms = (crate::tsc::mono_ns() - RQWAIT_T0.load(Ordering::Relaxed)) / 1_000_000;
     let sum_ms = crate::sched::RQ_SUM_US.load(Ordering::Relaxed) / 1000;
     let share = if wall_ms == 0 { 0 } else { sum_ms * 100 / wall_ms };
-    println!("RQWAIT: the ready ones waited for the processor for a total of {} ms out of {} ms of the wall — the share of the waiting is {}%, the worst is {} us",
+    println!("RQWAIT: the ready ones waited for the processor for a total of {} ms out of {} ms of the wall — the share of the waiting is {}%, the worst is {} \
+        us",
         sum_ms, wall_ms, share, crate::sched::RQ_MAX_US.load(Ordering::Relaxed));
 }
 
@@ -406,7 +407,8 @@ extern "C" fn task_ioy_yielder() -> ! {
     let wall_ms = crate::tsc::mono_ns().wrapping_sub(t0) / 1_000_000;
     let (ioy, rq, run) = (crate::sched::ioy_ns(me) / 1_000_000, crate::sched::rq_ns(me) / 1_000_000, crate::sched::run_ns(me) / 1_000_000);
     let sum = ioy + rq + run;
-    println!("ioyacct: the wall is {} ms; A: was yielding to the device {} ms, was waiting for the processor {} ms, was running {} ms, the sum is {} ms", wall_ms, ioy, rq, run, sum);
+    println!("ioyacct: the wall is {} ms; A: was yielding to the device {} ms, was waiting for the processor {} ms, was running {} ms, the sum is {} ms",
+        wall_ms, ioy, rq, run, sum);
     crate::metrics::print_waiters("ioyacct:  ");
     let ok = ioy * 10 >= wall_ms * 6            // the yield is the greater part of the wall
         && rq * 10 <= wall_ms                   // the waiting for the processor is crumbs (pre-emption by a tick inside the spin)

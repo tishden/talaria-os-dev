@@ -309,7 +309,8 @@ impl SmolDev {
                 FLUSH_WAITED.fetch_add(1, Relaxed);
                 let w0 = crate::tsc::rdtsc();
                 let r = self.sh.take_bounded();
-                crate::sched::DEV_WAIT.note_cycles(crate::tsc::rdtsc().wrapping_sub(w0), crate::percpu::cpu_id() as u64 | (crate::sched::current_id().min(255) as u64) << 8 | 4 << 16);
+                crate::sched::DEV_WAIT.note_cycles(crate::tsc::rdtsc().wrapping_sub(w0),
+                    crate::percpu::cpu_id() as u64 | (crate::sched::current_id().min(255) as u64) << 8 | 4 << 16);
                 match r {
                     Some(g) => g,
                     None => { FLUSH_GAVEUP.fetch_add(1, Relaxed); note_borrow(false); return; }
@@ -634,7 +635,8 @@ impl Device for SmolDev {
                     RX_TAKE_WAITED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     let w0 = crate::tsc::rdtsc();
                     let r = self.sh.take_bounded();
-                    crate::sched::DEV_WAIT.note_cycles(crate::tsc::rdtsc().wrapping_sub(w0), crate::percpu::cpu_id() as u64 | (crate::sched::current_id().min(255) as u64) << 8 | 1 << 16);
+                    crate::sched::DEV_WAIT.note_cycles(crate::tsc::rdtsc().wrapping_sub(w0),
+                        crate::percpu::cpu_id() as u64 | (crate::sched::current_id().min(255) as u64) << 8 | 1 << 16);
                     match r {
                         Some(g) => g,
                         None => { RX_TAKE_GAVEUP.fetch_add(1, core::sync::atomic::Ordering::Relaxed); note_borrow(false); return None; }

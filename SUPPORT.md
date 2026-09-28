@@ -4,8 +4,9 @@
 
 The project is provided **as is, without warranty and without support
 obligations** (Apache-2.0, see sections 7-8 of `LICENSE`). Issues and pull
-requests are read on a best-effort basis, with no SLA. Before asking, please
-look at `docs/USER-GUIDE.md` §14 (troubleshooting), `docs/PRODUCT.md`
+requests (<https://github.com/tishden/talaria-os-dev/issues>) are read on a
+best-effort basis, with no SLA. Before asking, please look at
+`docs/USER-GUIDE.md` §14 (troubleshooting), `docs/PRODUCT.md`
 (boundaries and limits) and `kernel/tools/talaria-check` (compatibility
 diagnostics for your binary).
 

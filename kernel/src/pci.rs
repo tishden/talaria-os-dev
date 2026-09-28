@@ -394,8 +394,9 @@ pub fn msix_enable_masked(d: &PciDev) -> u16 {
                 core::ptr::write_volatile(e as *mut u32, 0xFEE0_0000);        // msg addr: LAPIC BSP
                 core::ptr::write_volatile((e + 4) as *mut u32, 0);            // msg addr hi
                 core::ptr::write_volatile((e + 8) as *mut u32, crate::idt::MSI_VECTOR_BASE as u32 + i as u32); // msg data: the vector
-                core::ptr::write_volatile((e + 12) as *mut u32, 0);           // vector control: unmasked
-                                                                              // (in the IDT there stand the stubs MSI_VECTOR_BASE.. with an EOI — the delivery is safe)
+                // vector control: unmasked (in the IDT there stand the stubs
+                // MSI_VECTOR_BASE.. with an EOI — the delivery is safe)
+                core::ptr::write_volatile((e + 12) as *mut u32, 0);
             }
         }
     }

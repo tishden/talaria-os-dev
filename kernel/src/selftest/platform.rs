@@ -108,7 +108,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if crate::pci::intr_kind(&alveo) != "INTx (not wired up)" { println!("nicdev: FAILURE — a card without MSI/MSI-X was not recognised"); ok = false; }
             // The priority: if there are both, MSI-X is taken.
             let mut d_both = alveo; d_both.msix_cap = 0x70; d_both.msi_cap = 0x50;
-            if crate::pci::intr_kind(&d_both) != "MSI-X" { println!("nicdev: FAILURE — with both capabilities something other than MSI-X was chosen"); ok = false; }
+            if crate::pci::intr_kind(&d_both) != "MSI-X" { println!("nicdev: FAILURE — with both capabilities something other than MSI-X was chosen");
+                ok = false; }
             println!("nicdev: the classification of the interrupts: MSI-X / MSI / INTx / both -> MSI-X");
 
             // 2) A NEW DRIVER THROUGH THE TABLE. We bring the loopback card up by the same path
@@ -227,7 +228,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                             let t = crate::tsc::rdtsc(); while crate::tsc::rdtsc() - t < hz / 100 { core::hint::spin_loop(); }
                         }
                         let (ppm, err, adj, steps, back, feeds) = crate::tsc::wall_stats();
-                        println!("phc-test: the wall-clock discipline by the PHC: samples {}, adjustments {}, steps {}, backwards {}, the correction {} ppm, the error {} ns",
+                        println!("phc-test: the wall-clock discipline by the PHC: samples {}, adjustments {}, steps {}, backwards {}, the correction {} ppm, \
+                            the error {} ns",
                             feeds, adj, steps, back, ppm, err);
                         if back != 0 { println!("phc-test: FAILURE — the wall clock went backwards"); ok = false; }
                         println!("phc-test: {}", if ok { "ALL OK" } else { "FAILURE" });

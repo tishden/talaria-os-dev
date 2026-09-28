@@ -155,7 +155,8 @@ fn dec(mut v: u8, out: &mut [u8; 3]) -> usize { // u8 -> a decimal string
 /// Generate /etc/resolv.conf and /etc/hosts from the kernel's network configuration.
 pub fn vf_init_net(dns: [u8; 4]) {
     let mut ip = [0u8; 16]; let mut n = 0;
-    for (i, o) in dns.iter().enumerate() { let mut d = [0u8; 3]; let m = dec(*o, &mut d); ip[n..n + m].copy_from_slice(&d[..m]); n += m; if i < 3 { ip[n] = b'.'; n += 1; } }
+    for (i, o) in dns.iter().enumerate() { let mut d = [0u8; 3]; let m = dec(*o, &mut d); ip[n..n + m].copy_from_slice(&d[..m]); n += m; if i < 3 {
+        ip[n] = b'.'; n += 1; } }
     vf_set(0, &[b"nameserver ", &ip[..n], b"\noptions timeout:3 attempts:3\n"]);
     vf_set(1, &[b"127.0.0.1 localhost\n"]);
     vf_set(2, &[b"talaria\0"]);
@@ -293,7 +294,8 @@ pub fn init() -> bool {
         Some((kind, count)) => {
             if let crate::tfs::Tfs::V2 { dirsec } = kind {
                 for sct in 1..dirsec {
-                    if blk.read_blocks(sct, &mut db[sct * SECTOR_SIZE..(sct + 1) * SECTOR_SIZE]).is_err() { println!("talaria: blk read dir fail"); return false; }
+                    if blk.read_blocks(sct, &mut db[sct * SECTOR_SIZE..(sct + 1) * SECTOR_SIZE]).is_err() { println!("talaria: blk read dir fail");
+                        return false; }
                 }
             }
             for i in 0..count.min(MAXF) {
@@ -573,7 +575,8 @@ pub fn iowin_from_cmdline(cmdline: &str) {
     if let Some(n) = crate::cmdline::num(cmdline, "talaria.iowin") {
         IO_WIN_MODE.store((n as u32).min(2), core::sync::atomic::Ordering::SeqCst);
         crate::println!("fs: the interrupt window while waiting for the device — mode {} ({})", n.min(2),
-            match n.min(2) { 0 => "off, a spin with IF=0", 1 => "the tick arrives, we do not carry the lock's holder away", _ => "the tick arrives and is free to preempt" });
+            match n.min(2) { 0 => "off, a spin with IF=0", 1 => "the tick arrives, we do not carry the lock's holder away", _ => "the tick arrives and is free \
+                to preempt" });
     }
 }
 /// Open the interrupt window. `true` — the window was opened (a step of the wait was made).
@@ -1228,7 +1231,8 @@ pub fn dev_wait_free() {
         if spins > 256 {
             spins = 0;
             let cpu = crate::percpu::cpu_id();
-            if crate::sched::cpu_has_other_runnable(cpu, crate::sched::current_id()) { crate::sched::yield_origin(crate::sched::YO_FS); crate::sched::yield_now(); continue; }
+            if crate::sched::cpu_has_other_runnable(cpu, crate::sched::current_id()) { crate::sched::yield_origin(crate::sched::YO_FS);
+                crate::sched::yield_now(); continue; }
         }
         crate::paging::tlb_service();
         core::hint::spin_loop();

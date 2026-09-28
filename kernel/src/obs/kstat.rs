@@ -144,10 +144,14 @@ pub fn fs() {
                     to, alien, yields,
                     if to == 0 && alien == 0 { " (the first two: the norm is zero)" } else { " <- THE FIRST TWO MUST BE ZEROS" });
                 let (chunks, bal, devwait) = crate::ext2::wb_stats();
-                crate::println!("kstat fs: the flush without the lock: portions {}, the balance {}, waited for the device {}, yields {}", chunks, bal, devwait, crate::fs::dev_handoffs());
+                crate::println!("kstat fs: the flush without the lock: portions {}, the balance {}, waited for the device {}, yields {}", chunks, bal, devwait,
+                    crate::fs::dev_handoffs());
                 let (tx, ck, b) = crate::ext2::barrier_stats();
-                crate::println!("kstat fs: the journal: transactions {}, checkpoints {} (copies from the journal {}); the barriers: data {}, the transaction {}, the checkpoint {}, the journal's superblock {}, the recover flag {}, others {}; journal walks {}, waited for someone else's transaction longer than the diagnosis threshold {}",
-                    tx, ck, crate::ext2::ckpt_old(), b[0], b[1], b[2], b[3], b[4], b[5], crate::ext2::JRN_BYPASS.load(core::sync::atomic::Ordering::Relaxed), crate::ext2::JRN_LONGWAIT.load(core::sync::atomic::Ordering::Relaxed));
+                crate::println!("kstat fs: the journal: transactions {}, checkpoints {} (copies from the journal {}); the barriers: data {}, the transaction \
+                    {}, the checkpoint {}, the journal's superblock {}, the recover flag {}, others {}; journal walks {}, waited for someone else's \
+                    transaction longer than the diagnosis threshold {}",
+                    tx, ck, crate::ext2::ckpt_old(), b[0], b[1], b[2], b[3], b[4], b[5], crate::ext2::JRN_BYPASS.load(core::sync::atomic::Ordering::Relaxed),
+                        crate::ext2::JRN_LONGWAIT.load(core::sync::atomic::Ordering::Relaxed));
             }
         }
         crate::shell::Backend::Tfs => crate::println!("kstat fs: TFS (read-only), files {}", crate::fs::nfiles()),
@@ -172,7 +176,8 @@ pub fn net() {
             let ms = |c: u64| c / (hz / 1000).max(1);
             let us = |c: u64| c.saturating_mul(1_000_000) / hz;
             let c = crate::netsys::NET_CONT.load(R);
-            crate::println!("kstat net: the stack's lock: takes {}, with a wait {} ({}%), waited {} ms, held {} ms ({} ns per take, the worst {} µs), longer than a second {}",
+            crate::println!("kstat net: the stack's lock: takes {}, with a wait {} ({}%), waited {} ms, held {} ms ({} ns per take, the worst {} µs), longer \
+                than a second {}",
                 t, c, c * 100 / t, ms(crate::netsys::NET_WAIT_TSC.load(R)),
                 ms(crate::netsys::NET_HELD_TSC.load(R)),
                 crate::netsys::NET_HELD_TSC.load(R).saturating_mul(1_000_000_000 / 1000) / (hz / 1000).max(1) / t,

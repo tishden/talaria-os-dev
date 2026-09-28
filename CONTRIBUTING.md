@@ -90,8 +90,8 @@ after every kernel build (`test.sh` does it when the stub is stale).
 
 ## How to propose a change
 
-An issue describing the problem or idea, then a pull request with a test and a
-green gate. For anything large (a new subsystem, an ABI change) open an issue
+An issue (<https://github.com/tishden/talaria-os-dev/issues>) describing the
+problem or idea, then a pull request with a test and a green gate. For anything large (a new subsystem, an ABI change) open an issue
 with the design first — it saves everyone time. For "how does X work" read
 DEVELOPMENT-GUIDE first: almost every mechanism is described there together
 with its pitfalls.

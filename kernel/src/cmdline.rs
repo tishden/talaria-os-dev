@@ -521,7 +521,8 @@ impl core::fmt::Display for Nearest<'_> {
 pub fn refuse(cmdline: &str, origin: &str) -> ! {
     crate::println!("talaria: BOOT REFUSED: the command line ({}) contains something the kernel did not understand — see the lines above", origin);
     crate::println!("talaria: BOOT REFUSED: cmdline = {}", Masked(cmdline));
-    crate::println!("talaria: BOOT REFUSED: all the kernel's knobs are listed in kernel/src/cmdline.rs (KNOBS), the modes in MODES, the self-checks in selftest/");
+    crate::println!("talaria: BOOT REFUSED: all the kernel's knobs are listed in kernel/src/cmdline.rs (KNOBS), the modes in MODES, the self-checks in \
+        selftest/");
     crate::trace::flush();
     crate::acpi::poweroff();
     loop { unsafe { core::arch::asm!("cli; hlt") } }
