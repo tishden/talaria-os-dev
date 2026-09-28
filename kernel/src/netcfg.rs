@@ -226,7 +226,8 @@ pub fn apply_pending() {
             let nm = core::str::from_utf8(&r.name[..r.nlen]).unwrap_or("");
             let ifx = match find_iface(nm) {
                 Some(x) => x,
-                None => { crate::println!("net: the rule for '{}' — there is no such interface (cards {}); `ip` will show the names and the MACs", nm, netsys::nifs()); continue; }
+                None => { crate::println!("net: the rule for '{}' — there is no such interface (cards {}); `ip` will show the names and the MACs", nm,
+                    netsys::nifs()); continue; }
             };
             match r.kind {
                 K_DHCP => { netsys::if_set_dhcp(ifx, true); crate::println!("net: {} — DHCP switched on by a rule", nm); }
@@ -271,7 +272,8 @@ pub fn cmd_ip(arg: &str) {
             let op = it.next().unwrap_or("");
             let a = it.next().unwrap_or("");
             let dev = it.next().unwrap_or("");
-            let ifx = match find_iface(dev) { Some(x) => x, None => { crate::println!("ip: there is no interface '{}' — `ip` will show the list", dev); return; } };
+            let ifx = match find_iface(dev) { Some(x) => x, None => { crate::println!("ip: there is no interface '{}' — `ip` will show the list", dev); return;
+                } };
             match op {
                 "add" => match netsys::parse_ip(a) {
                     Some((ip, p)) => { netsys::if_set_addr(ifx, ip, p); crate::print!("ip: {} <- ", dev); puts_ip(ip); crate::println!("/{}", p); }
@@ -325,7 +327,8 @@ pub fn cmd_route(arg: &str) {
             let netstr = it.next().unwrap_or("");
             let (mut net, mut prefix) = ([0u8; 4], 0u8);
             if netstr != "default" && netstr != "0.0.0.0/0" {
-                match netsys::parse_ip(netstr) { Some((n, p)) => { net = n; prefix = p; }, None => { crate::println!("usage: route add <net/length|default> via <gateway> dev <if>"); return; } }
+                match netsys::parse_ip(netstr) { Some((n, p)) => { net = n; prefix = p; }, None => { crate::println!("usage: route add <net/length|default> \
+                    via <gateway> dev <if>"); return; } }
             }
             let mut gw = [0u8; 4];
             let mut dev = "";
@@ -338,7 +341,8 @@ pub fn cmd_route(arg: &str) {
             }
             let ifx = if dev.is_empty() {
                 // without a dev the interface is chosen by the same rule as for a packet to the gateway
-                match egress(gw) { Some(x) => x, None => { crate::println!("route: it is impossible to tell through which interface — specify dev <if>"); return; } }
+                match egress(gw) { Some(x) => x, None => { crate::println!("route: it is impossible to tell through which interface — specify dev <if>");
+                    return; } }
             } else {
                 match find_iface(dev) { Some(x) => x, None => { crate::println!("route: there is no interface '{}'", dev); return; } }
             };
@@ -426,7 +430,8 @@ pub fn cmd_dns(arg: &str) {
 /// an automatic route does not touch the operator's one.
 pub fn selftest() -> bool {
     let mut ok = true;
-    let mut check = |c: bool, what: &str| { if !c { crate::println!("netcfg-test: FAIL {}", what); ok = false; } else { crate::println!("netcfg-test: ok {}", what); } };
+    let mut check = |c: bool, what: &str| { if !c { crate::println!("netcfg-test: FAIL {}", what); ok = false; } else { crate::println!("netcfg-test: ok {}",
+        what); } };
     clear();
     check(mask(24) == 0xFFFF_FF00 && mask(0) == 0 && mask(32) == 0xFFFF_FFFF, "the mask by the prefix's length");
     check(in_net([10, 0, 1, 7], [10, 0, 1, 0], 24), "an address is in its own network");
@@ -436,7 +441,8 @@ pub fn selftest() -> bool {
     add_route_f([10, 9, 1, 1], 16, [10, 0, 0, 1], 0, 1, false);
     let r = routes().iter().find(|r| r.used && r.prefix == 16).map(|r| r.net);
     check(r == Some([10, 9, 0, 0]), "a route's network is normalised by the mask");
-    check(parse_mac("52-54-00-12-34-56") == Some([0x52, 0x54, 0, 0x12, 0x34, 0x56]), "the parsing of a MAC in a rule (addressing a card independently of the order)");
+    check(parse_mac("52-54-00-12-34-56") == Some([0x52, 0x54, 0, 0x12, 0x34, 0x56]), "the parsing of a MAC in a rule (addressing a card independently of the \
+        order)");
     check(parse_mac("net0").is_none(), "an interface's name is not taken for a MAC");
     clear();
     ok

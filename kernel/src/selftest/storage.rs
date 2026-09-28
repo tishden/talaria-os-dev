@@ -81,7 +81,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 let (jc, jb, _) = crate::ext2::jrn_stats();
                 println!("fsbench: {} blocks of 4K: the write {} us, the fsync {} us (there were {} dirty), a repeated fsync {} us",
                     nblocks, t_wr * 1_000_000 / hz, t_fs * 1_000_000 / hz, dirty, t_fs2 * 1_000_000 / hz);
-                println!("fsbench: the disk: the blocks {} the ranges {} the barriers {} the commands {} | the journal: the transactions {} the blocks {} the submissions {}",
+                println!("fsbench: the disk: the blocks {} the ranges {} the barriers {} the commands {} | the journal: the transactions {} the blocks {} the \
+                    submissions {}",
                     w1 - w0, r1 - r0, f1 - f0, c1 - c0, jc, jb, crate::ext2::jrn_io());
                 // §2.4: the trips into the bitmap per nblocks blocks of data must be
                 // about nblocks/PREA_RUN (it used to be one per EVERY block).
@@ -267,7 +268,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 let n = crate::ext2::read_all(b"/t/hello.txt", &mut buf);
                 let ok1 = n == 24 && &buf[..24] == b"hello from talaria ext2\n";
                 let h = crate::ext2::open(b"/t/app.log", 0, 0); let sz = if h >= 0 { crate::ext2::fd_size(h) } else { 0 }; if h >= 0 { crate::ext2::close(h); }
-                println!("ext2v: hello.txt {} ({} bytes), app.log {} bytes -> {}", if ok1 { "ok" } else { "MISMATCH" }, n, sz, if ok1 && sz == 6 { "PERSISTED OK" } else { "FAILED" });
+                println!("ext2v: hello.txt {} ({} bytes), app.log {} bytes -> {}", if ok1 { "ok" } else { "MISMATCH" }, n, sz, if ok1 && sz == 6 { "PERSISTED \
+                    OK" } else { "FAILED" });
             } else { println!("ext2v: ext2 is not mounted"); }
             crate::suite::park()
         }
@@ -393,7 +395,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             let after_ms = got.wrapping_sub(t_rel) / (hz / 1000);
             let timeouts = crate::fs::RING_TIMEOUT.load(SeqCst);
             let bypass = crate::fs::RING_BYPASS.load(SeqCst);
-            println!("RINGLOCK: we held it for {} ms, the AP's read completed {} ms after the release (the success {}), the diagnoses {}, the bypasses {}, ahead of time: {}",
+            println!("RINGLOCK: we held it for {} ms, the AP's read completed {} ms after the release (the success {}), the diagnoses {}, the bypasses {}, \
+                ahead of time: {}",
                 hold / (hz / 1000), after_ms, OK.load(SeqCst) == 1, timeouts, bypass, early);
             if got != 0 && !early && OK.load(SeqCst) == 1 && timeouts == 1 && bypass == 0 && after_ms < 100 { println!("RINGLOCK: OK"); }
             else { println!("RINGLOCK: FAIL"); }
@@ -499,7 +502,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             let long = crate::ext2::JRN_LONGWAIT.load(SeqCst);
             let byp = BYP.load(SeqCst).wrapping_sub(byp0);
             let rc = RC.load(SeqCst) as i64;
-            println!("JRNWAIT: we held it for {} ms, the sync from the AP completed {} ms after the release (the code {}), the diagnoses {}, the journal's bypasses {}, ahead of time: {}",
+            println!("JRNWAIT: we held it for {} ms, the sync from the AP completed {} ms after the release (the code {}), the diagnoses {}, the journal's \
+                bypasses {}, ahead of time: {}",
                 hold / (hz / 1000), after_ms, rc, long, byp, early);
             // THE WAIT IS BROKEN DOWN BY THE HOLDER'S PHASE rather than dumped into one.
             let msd = (hz / 1000).max(1);
@@ -552,7 +556,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 let (_, fb1, _, _) = crate::ext2::wbage_stats_of(FS);
                 fsync_dirty[r] = d1 - d0;
                 age_blocks[r] = ab1 - ab0;
-                println!("DIRTYAGE: talaria.dirtyage={}: {} blocks were flushed by age (the average age is {} us), the fsync carried away {} dirty ones over {} call(s), its population +{}",
+                println!("DIRTYAGE: talaria.dirtyage={}: {} blocks were flushed by age (the average age is {} us), the fsync carried away {} dirty ones over \
+                    {} call(s), its population +{}",
                     if r == 0 { 0 } else { 200 }, ab1 - ab0,
                     if ab1 > ab0 { (as1 - as0) / (ab1 - ab0) } else { 0 }, d1 - d0, c1 - c0, fb1 - fb0);
             }
@@ -672,7 +677,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 && blocks[1] >= DEBT as u64 && blocks[0] >= DEBT as u64
                 && quiet_skip >= 3 && quiet_flush == 0 && audit_ok;
             if ok { println!("DIRTYSMEAR: OK"); }
-            else { println!("DIRTYSMEAR: FAIL (the worst {} against {} with the ceiling {}, the flushes {} against {}, the blocks {} against {}, the silence {}/{}, the clock {})",
+            else { println!("DIRTYSMEAR: FAIL (the worst {} against {} with the ceiling {}, the flushes {} against {}, the blocks {} against {}, the silence \
+                {}/{}, the clock {})",
                 worst[0], worst[1], cap, flushes[0], flushes[1], blocks[0], blocks[1], quiet_skip, quiet_flush, audit_ok); }
             crate::suite::park()
         }
@@ -745,7 +751,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 }
             }
             crate::ext2::JRNFREE.store(true, SeqCst);
-            println!("JRNFREE: the holder stretches the data phase for 600 ms; the neighbour: with talaria.jrnfree=0 it waited {} ms (the episodes of \"{}\" {}), with jrnfree=1 — {} ms (the episodes {})",
+            println!("JRNFREE: the holder stretches the data phase for 600 ms; the neighbour: with talaria.jrnfree=0 it waited {} ms (the episodes of \"{}\" \
+                {}), with jrnfree=1 — {} ms (the episodes {})",
                 waited[0], crate::ext2::JSTAGE_NAMES[1], eps[0], waited[1], eps[1]);
             let _ = crate::ext2::close(ha); let _ = crate::ext2::close(hb);
             let _ = crate::ext2::unlink(b"/jf-a.txt", false);
@@ -847,7 +854,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             let busy_ok = rc2 == 0 && w1 - w0 == 1 && us(waited) >= 250_000 && us(rest2) < 50_000;
             let _ = crate::ext2::close(h);
             let _ = crate::ext2::unlink(b"/fsyncph.txt", false);
-            if quiet_ok && busy_ok { println!("FSYNCPH: OK"); } else { println!("FSYNCPH: FAIL (the quiet one {}, under a neighbour {}, the details {}: the flush {} times/{} us, the other {} times/{} us with a remainder of {} us)",
+            if quiet_ok && busy_ok { println!("FSYNCPH: OK"); } else { println!("FSYNCPH: FAIL (the quiet one {}, under a neighbour {}, the details {}: the \
+                flush {} times/{} us, the other {} times/{} us with a remainder of {} us)",
                 quiet_ok, busy_ok, sub_ok, wb_n, us(wb_t), ot_n, us(ot_t), us(rest)); }
             crate::suite::park()
         }
@@ -908,7 +916,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             let a_fs = audit("fsync", &mut bad);
             let meta_left = a_fs[0].0 - a_fs[1].0;
             let pass2 = p17n1 - p17n0;
-            println!("DCNT: the fsync (the code {}): the dirty ones {} (the data {}, the metadata {}), waiting for the journal are {}+{}, the second pass over the cache {} times",
+            println!("DCNT: the fsync (the code {}): the dirty ones {} (the data {}, the metadata {}), waiting for the journal are {}+{}, the second pass over \
+                the cache {} times",
                 rc, a_fs[0].0, a_fs[1].0, meta_left, a_fs[2].0, a_fs[3].0, pass2);
             let fsync_ok = rc == 0 && pass2 == 0 && a_fs[2].0 == 0 && a_fs[3].0 == 0 && meta_left > 0;
             let rcs = crate::ext2::sync_all();
@@ -946,7 +955,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             }
             let percall = |i: usize| if calls[i] > 0 { cost[i] / calls[i] } else { 0 };
             let (c_small, c_big) = (percall(0), percall(1));
-            println!("DCNT: the counting of the dirty ones with a cache of {} MB — {} cycles per call ({} calls, {} us in total); with {} MB — {} cycles ({} calls, {} us)",
+            println!("DCNT: the counting of the dirty ones with a cache of {} MB — {} cycles per call ({} calls, {} us in total); with {} MB — {} cycles ({} \
+                calls, {} us)",
                 mbs[0], c_small, calls[0], us(cost[0]), mbs[1], c_big, calls[1], us(cost[1]));
             // The cache grew sixteenfold. A walk would grow together with it;
             // a counter does not grow — a tolerance of three times plus a noise of 200 cycles.
@@ -970,12 +980,14 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 crate::ext2::FSCNT.store(true, SeqCst);
                 let _ = crate::ext2::sync_all();
             }
-            println!("DCNT: the same counting with talaria.fscnt=0 (a walk over the cache of {} MB) — {} cycles per call, that is, the counter is cheaper by a factor of {}",
+            println!("DCNT: the same counting with talaria.fscnt=0 (a walk over the cache of {} MB) — {} cycles per call, that is, the counter is cheaper by a \
+                factor of {}",
                 mbs[1], c_off, if c_big > 0 { c_off / c_big } else { 0 });
             let ab_ok = !sized || (c_off > 0 && c_off >= c_big * 10);
             let ok = bad == 0 && seen && fsync_ok && sync_ok && a_end[0].0 == 0 && size_ok && ab_ok;
             if ok { println!("DCNT: OK"); }
-            else { println!("DCNT: FAIL (the divergences {}, the dirty ones are visible {}, the fsync {}, the sync {}, it is clean at the end {}, the price does not grow {}, the knob is honest {}, the cache was reallocated {})",
+            else { println!("DCNT: FAIL (the divergences {}, the dirty ones are visible {}, the fsync {}, the sync {}, it is clean at the end {}, the price \
+                does not grow {}, the knob is honest {}, the cache was reallocated {})",
                 bad, seen, fsync_ok, sync_ok, a_end[0].0 == 0, size_ok, ab_ok, sized); }
             crate::suite::park()
         }
@@ -1014,7 +1026,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             for _ in 0..3 { let _ = crate::ext2::write(h, blk.as_ptr(), blk.len()); let _ = crate::ext2::fsync(h); }
             let (an1, ab1, as1, am1) = crate::ext2::wbage_stats_of(FS);
             let (c1, d1, f1) = crate::ext2::fsd_stats();
-            println!("WBAGE: a flush at once: the portions {}, the blocks {}, the average age {} us, the worst {} us; the fsync calls {} (the dirty blocks {}, the file has {})",
+            println!("WBAGE: a flush at once: the portions {}, the blocks {}, the average age {} us, the worst {} us; the fsync calls {} (the dirty blocks {}, \
+                the file has {})",
                 an1, ab1, if ab1 > 0 { as1 / ab1 } else { 0 }, am1, c1 - c0, d1 - d0, f1 - f0);
             let fresh_ok = ab1 >= 3 && am1 < 50_000 && c1 - c0 == 3 && d1 - d0 == 3 && f1 - f0 >= 3;
             // 2) A FLUSH AFTER 300 ms: the age must see that
@@ -1042,7 +1055,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             let (bn1, bb1, bs1, bm1) = crate::ext2::wbage_stats_of(BAL);
             let (an3, ab3, _as3, _am3) = crate::ext2::wbage_stats_of(FS);
             let bwait = if bb1 > bb0 { (bs1 - bs0) / (bb1 - bb0) } else { 0 };
-            println!("WBAGE: a flush by the write's threshold: the portions {}, the blocks {}, this portion's age {} us, the worst {} us; the fsync population is untouched: the portions +{}, the blocks +{}",
+            println!("WBAGE: a flush by the write's threshold: the portions {}, the blocks {}, this portion's age {} us, the worst {} us; the fsync population \
+                is untouched: the portions +{}, the blocks +{}",
                 bn1 - bn0, bb1 - bb0, bwait, bm1, an3 - an2, ab3 - ab2);
             let bal_ok = bb1 > bb0 && (250_000..=600_000).contains(&bwait) && an3 == an2 && ab3 == ab2;
             let _ = crate::ext2::fsync(h);

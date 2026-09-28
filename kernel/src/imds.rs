@@ -79,7 +79,8 @@ fn token_get(token: &mut [u8; 128]) -> usize {
             while crate::tsc::rdtsc() - t0 < hz / 2 { netsys::poll(); core::hint::spin_loop(); }
         }
         tries += 1;
-        if let Some(nn) = http(b"PUT /latest/api/token HTTP/1.1\r\nHost: 169.254.169.254\r\nX-aws-ec2-metadata-token-ttl-seconds: 21600\r\nConnection: close\r\n\r\n", token) {
+        if let Some(nn) = http(b"PUT /latest/api/token HTTP/1.1\r\nHost: 169.254.169.254\r\nX-aws-ec2-metadata-token-ttl-seconds: 21600\r\nConnection: \
+            close\r\n\r\n", token) {
             if nn > 0 {
                 if tries > 1 {
                     crate::println!("imds: the token was obtained on attempt {} ({} s of waiting)",

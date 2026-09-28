@@ -645,7 +645,8 @@ pub fn wait_on_ex(addr: *const u32, val: u32, deadline: Option<u64>, kind: u64, 
             let cur = unsafe { core::ptr::read_volatile(addr) };
             let lvt = crate::smp::lapic_peek(0x320);
             if HANG_PRN.load(Ordering::Relaxed) == 1 { dump_tasks(); } // the first one to notice prints EVERYBODY
-            crate::println!("[futex] IT HAS HUNG: t{} on cpu{} has been waiting for 3 s @{:#x} val={:#x} cur={:#x} woken={} kind={} sleep={} deadline={} LVT={:#x} armed-preempt={}",
+            crate::println!("[futex] IT HAS HUNG: t{} on cpu{} has been waiting for 3 s @{:#x} val={:#x} cur={:#x} woken={} kind={} sleep={} deadline={} \
+                LVT={:#x} armed-preempt={}",
                 t, cpu, addr as u64, val, cur, WOKEN[t].load(Ordering::SeqCst), kind,
                 WSLEEP[t].load(Ordering::SeqCst), deadline.is_some(), lvt,
                 ARMED_PREEMPT.load(Ordering::SeqCst));

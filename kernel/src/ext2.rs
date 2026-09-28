@@ -790,7 +790,8 @@ unsafe fn writeback_slot(slot: usize) {
     {
         let now = dstamp_of(t0);
         let (mut age_sum, mut age_max, mut age_k) = (0u64, 0u32, 0usize);
-        for i in 0..k { let s = slot + i; if COWN[s] != 0 { let a = age_of(now, CDIRTIME[s]); age_sum += a as u64; if a > age_max { age_max = a; } age_k += 1; } }
+        for i in 0..k { let s = slot + i; if COWN[s] != 0 { let a = age_of(now, CDIRTIME[s]); age_sum += a as u64; if a > age_max { age_max = a; } age_k += 1; }
+            }
         wbage_note(WbC::Evict, age_k, age_sum, age_max);
     }
     let p = (CACHE_BASE as *mut u8).add(slot * BSZ);
@@ -1517,7 +1518,8 @@ pub fn fs_lock() -> FsGuard {
             // SAFETY: E4 + E1 — we own the lock from this point, so the trace's baseline is
             // ours to write.
             unsafe { FS_TRACE_RD0 = STATS_RD; FS_TRACE_WR0 = STATS_WR; FS_TRACE_FL0 = STATS_FLUSH; FS_TRACE_CH0 = WB_CHUNKS.load(Ordering::Relaxed);
-                     FS_TRACE_EM0 = EVICT_META.load(Ordering::Relaxed); FS_TRACE_ED0 = EVICT_DATA.load(Ordering::Relaxed); FS_TRACE_JS0 = JSB_FLUSH.load(Ordering::Relaxed); }
+                     FS_TRACE_EM0 = EVICT_META.load(Ordering::Relaxed); FS_TRACE_ED0 = EVICT_DATA.load(Ordering::Relaxed);
+                         FS_TRACE_JS0 = JSB_FLUSH.load(Ordering::Relaxed); }
             let rt = real_task();
             FS_OWNER_REAL.store(rt.is_some(), Ordering::SeqCst);
             // The number is always printed in the diagnostics; in the recognition of the recursion it
@@ -1600,14 +1602,18 @@ pub fn fs_lock() -> FsGuard {
                 }
                 let sys = { let v = crate::syscall::LAST_SYS[t].load(Ordering::Relaxed);
                             if v == u64::MAX { -1 } else { (v >> 48) as i64 } };
-                crate::println!("ext2: the FS lock did not give in within {} s: core {} holds it (the task {} \"{}\", already {} ms), it is {}; it RUNS on core {} (it is assigned to {}), the last syscall {}; the core's yields {}, the foreign entries {}, the owner moved {}; we keep waiting (give-ups 0)",
+                crate::println!("ext2: the FS lock did not give in within {} s: core {} holds it (the task {} \"{}\", already {} ms), it is {}; it RUNS on \
+                    core {} (it is assigned to {}), the last syscall {}; the core's yields {}, the foreign entries {}, the owner moved {}; we keep waiting \
+                    (give-ups 0)",
                     waited / hz.max(1), FS_OWNER.load(Ordering::SeqCst), t, crate::obs::comm(t), held_ms,
-                    if crate::sched::task_dead(t) { "DEAD" } else if crate::sync::waiting_on(t) != 0 { "ASLEEP on a word (only the one that writes into the word will wake it)" } else { "ready" },
+                    if crate::sched::task_dead(t) { "DEAD" } else if crate::sync::waiting_on(t) != 0 { "ASLEEP on a word (only the one that writes into the \
+                        word will wake it)" } else { "ready" },
                     on, crate::sched::cpu_of(t), sys,
                     FS_LOCK_YIELDS.load(Ordering::Relaxed), FS_REENTER_ALIEN.load(Ordering::Relaxed),
                     FS_RECUR_MIGRATED.load(Ordering::Relaxed));
             } else {
-                crate::println!("ext2: the FS lock did not give in within {} s: core {} holds it (the task {}, already {} ms), the core's yields {}; we keep waiting (give-ups 0)",
+                crate::println!("ext2: the FS lock did not give in within {} s: core {} holds it (the task {}, already {} ms), the core's yields {}; we keep \
+                    waiting (give-ups 0)",
                     waited / hz.max(1), FS_OWNER.load(Ordering::SeqCst), ot, held_ms,
                     FS_LOCK_YIELDS.load(Ordering::Relaxed));
             }
@@ -1761,7 +1767,8 @@ unsafe fn dev_barrier() { dev_barrier_src(BAR_OTHER) }
 /// Who asks for the barriers (the diagnostics: on a gp3-class disk a barrier is 15-30 ms, and
 /// their number per fsync decides everything).
 pub static BAR_SRC: [core::sync::atomic::AtomicU64; 6] = [const { core::sync::atomic::AtomicU64::new(0) }; 6];
-const BAR_DATA: usize = 0; const BAR_TXN: usize = 1; const BAR_CKPT: usize = 2; const BAR_JSB: usize = 3; const BAR_RECOV: usize = 4; const BAR_OTHER: usize = 5;
+const BAR_DATA: usize = 0; const BAR_TXN: usize = 1; const BAR_CKPT: usize = 2; const BAR_JSB: usize = 3; const BAR_RECOV: usize = 4;
+    const BAR_OTHER: usize = 5;
 /// SAFETY: E1 — under the FS lock; the statistics it keeps per source are module statics
 /// like the rest.
 unsafe fn dev_barrier_src(src: usize) {
@@ -1808,7 +1815,8 @@ fn fs_lock_released() {
         let sc = if t < crate::sched::NTASKS { crate::syscall::LAST_SYS[t].load(Relaxed) >> 48 } else { u64::MAX };
         // SAFETY: E1 — printed by the task that has just held the lock, from its own baseline.
         unsafe {
-            crate::println!("ext2: the FS lock was held for {} us: the task {} the syscall {}, under the lock reads {} writes {} barriers {} portions {} evictions of metadata {} data blocks {} journal flushes {}, the flush's depth {}",
+            crate::println!("ext2: the FS lock was held for {} us: the task {} the syscall {}, under the lock reads {} writes {} barriers {} portions {} \
+                evictions of metadata {} data blocks {} journal flushes {}, the flush's depth {}",
                 held / (hz / 1_000_000).max(1), t, sc,
                 STATS_RD - FS_TRACE_RD0, STATS_WR - FS_TRACE_WR0, STATS_FLUSH - FS_TRACE_FL0,
                 WB_CHUNKS.load(Relaxed) - FS_TRACE_CH0,
@@ -1849,7 +1857,8 @@ fn ro_err() -> Option<i64> {
 }
 static FS_RO_SAID: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// Only for the gate `ioerr`: bring the FS back from read-only (the counter of the refusals is zeroed).
-pub fn ro_reset_for_test() { crate::fs::WRITE_FAILED.store(0, core::sync::atomic::Ordering::SeqCst); FS_RO_SAID.store(false, core::sync::atomic::Ordering::SeqCst); }
+pub fn ro_reset_for_test() { crate::fs::WRITE_FAILED.store(0, core::sync::atomic::Ordering::SeqCst); FS_RO_SAID.store(false,
+    core::sync::atomic::Ordering::SeqCst); }
 /// Has the counter of the refusals grown since the `snap` — then a synchronisation operation
 /// must answer EIO rather than 0.
 fn io_err_since(snap: u64) -> i64 {
@@ -2046,7 +2055,8 @@ pub fn mount() -> bool {
                 crate::println!("ext2: a block of {} > {} is not supported", b, BSZ); return false;
             }
             Err(crate::ext2sb::Bad::Geometry) => {
-                crate::println!("ext2: the superblock does not add up (the blocks {}, the first {}, per group {}, the inodes per group {}) — the volume is not taken",
+                crate::println!("ext2: the superblock does not add up (the blocks {}, the first {}, per group {}, the inodes per group {}) — the volume is not \
+                    taken",
                     rd32(&sb2, 4), rd32(&sb2, 20), rd32(&sb2, 32), rd32(&sb2, 40));
                 return false;
             }
@@ -2099,7 +2109,8 @@ pub fn mount() -> bool {
         dcnt_reset();
         for i in 0..ncache() { COWN[i] = 0; }
         let (tot, ngr, isz, bsz) = (TOTAL_BLOCKS, NGROUPS, INODE_SIZE, BSZ);
-        crate::println!("ext2: it is mounted — the block is {} B, {} blocks ({} MB), {} groups, an inode is {} B, free {} blocks / {} inodes, the cache is {} MB write-back",
+        crate::println!("ext2: it is mounted — the block is {} B, {} blocks ({} MB), {} groups, an inode is {} B, free {} blocks / {} inodes, the cache is {} \
+            MB write-back",
             b, tot, (tot as usize * b) >> 20, ngr, isz, rd32(&sb2, 12), rd32(&sb2, 16), (ncache() * bsz) >> 20);
         // §8.4: the journal (a replay when it is non-empty) comes after the cache and
         // the groups' maps are ready: the map of the journal's blocks is read through bmap.
@@ -2378,7 +2389,8 @@ unsafe fn bmap(ino: u32, inb: &mut [u8; 128], fb: u64, alloc: bool, added: &mut 
     fb -= 12;
     let (mut level, mut slot) = (1usize, 12usize);
     let mut span = ptrs;
-    if fb >= ptrs { fb -= ptrs; level = 2; slot = 13; span = ptrs * ptrs; if fb >= span { fb -= span; level = 3; slot = 14; span = ptrs * ptrs * ptrs; if fb >= span { return 0; } } }
+    if fb >= ptrs { fb -= ptrs; level = 2; slot = 13; span = ptrs * ptrs; if fb >= span { fb -= span; level = 3; slot = 14; span = ptrs * ptrs * ptrs;
+        if fb >= span { return 0; } } }
     // the root
     let mut cur = rd32(inb, 40 + slot * 4);
     if cur == 0 { if !alloc { return 0; } cur = alloc_block(goal); if cur == 0 { return 0; } wr32(inb, 40 + slot * 4, cur); *added += 1; }
@@ -2446,7 +2458,8 @@ unsafe fn truncate_to(ino: u32, inb: &mut [u8; 128], newsize: u64) {
     set_size(inb, newsize);
     // zero the tail of the last block (a read beyond size is truncated anyway; for cleanliness at a growth)
     let tail = (newsize % BS as u64) as usize;
-    if tail != 0 { let mut add = 0; let b = bmap(ino, inb, newsize / BS as u64, false, &mut add); if b != 0 { let d = blk(b); for x in &mut d[tail..] { *x = 0; } cflush(b); } }
+    if tail != 0 { let mut add = 0; let b = bmap(ino, inb, newsize / BS as u64, false, &mut add); if b != 0 { let d = blk(b); for x in &mut d[tail..] { *x = 0;
+        } cflush(b); } }
 }
 /// Zero the pointer to the file block fb (after a free_block).
 /// SAFETY: E1 + E2 — under the FS lock; one indirect block borrowed at a time.
@@ -3342,10 +3355,14 @@ static mut OF_PL: [u8; MAXOPEN] = [0; MAXOPEN];
 /// missing lock costs is a WRONG PATH, not memory: a thread closing this `dirfd` while
 /// another resolves against it can be seen half-way, and that race is a use-after-close in
 /// the application to begin with.
-pub fn fd_path(h: i64) -> &'static [u8] { match of(h) { Some(i) => unsafe { let l = OF_PL[i] as usize; core::slice::from_raw_parts(addr_of_mut!(OF_PATH[i]) as *const u8, l) }, None => b"" } }
+pub fn fd_path(h: i64) -> &'static [u8] { match of(h) { Some(i) => unsafe { let l = OF_PL[i] as usize;
+    core::slice::from_raw_parts(addr_of_mut!(OF_PATH[i]) as *const u8, l) }, None => b"" } }
 /// SAFETY: read volatile without the lock (E7): the answer only gets more conservative if
 /// it is stale, and the bounds are checked before the read.
-pub fn is_fd(h: i64) -> bool { h >= FD_BASE && ((h - FD_BASE) as usize) < MAXOPEN && unsafe { core::ptr::read_volatile(core::ptr::addr_of!(OF_INO[(h - FD_BASE) as usize])) } != 0 }
+pub fn is_fd(h: i64) -> bool {
+    h >= FD_BASE && ((h - FD_BASE) as usize) < MAXOPEN
+        && unsafe { core::ptr::read_volatile(core::ptr::addr_of!(OF_INO[(h - FD_BASE) as usize])) } != 0
+}
 fn of(h: i64) -> Option<usize> { if is_fd(h) { Some((h - FD_BASE) as usize) } else { None } }
 /// SAFETY: the unmount path — it runs when the file system is no longer in use, so there is
 /// no holder of a row to take one from.
@@ -3353,7 +3370,8 @@ pub fn reset_open() { unsafe { for h in 0..MAXOPEN { OF_INO[h] = 0; } } }
 /// SAFETY: E1 — under the FS lock: the scan for a free row and the claiming of it are one
 /// critical section, which is what stops two opens taking the same row.
 unsafe fn of_alloc(ino: u32, fl: u32) -> i64 {
-    for h in 0..MAXOPEN { if OF_INO[h] == 0 { OF_INO[h] = ino; OF_POS[h] = 0; OF_FL[h] = fl; OF_RANEXT[h] = u64::MAX; OF_RAWIN[h] = 0; return FD_BASE + h as i64; } }
+    for h in 0..MAXOPEN { if OF_INO[h] == 0 { OF_INO[h] = ino; OF_POS[h] = 0; OF_FL[h] = fl; OF_RANEXT[h] = u64::MAX; OF_RAWIN[h] = 0;
+        return FD_BASE + h as i64; } }
     EMFILE
 }
 
@@ -3395,7 +3413,8 @@ pub fn open(path: &[u8], flags: u64, mode: u32) -> i64 {
         if is_dir(&inb) && (flags & 3) != 0 { return EISDIR; }
         if flags & O_TRUNC != 0 && is_reg(&inb) && (flags & 3) != 0 { truncate_zero(&mut inb); wr32(&mut inb, 16, now()); ino_write(ino, &inb); }
         let h = of_alloc(ino, (flags & (O_APPEND | 0o4000)) as u32);
-        if h >= 0 { let i = (h - FD_BASE) as usize; let p = match path.iter().position(|&c| c == 0) { Some(k) => &path[..k], None => path }; let l = p.len().min(PLEN); OF_PATH[i][..l].copy_from_slice(&p[..l]); OF_PL[i] = if p.len() <= PLEN { l as u8 } else { 0 }; }
+        if h >= 0 { let i = (h - FD_BASE) as usize; let p = match path.iter().position(|&c| c == 0) { Some(k) => &path[..k], None => path };
+            let l = p.len().min(PLEN); OF_PATH[i][..l].copy_from_slice(&p[..l]); OF_PL[i] = if p.len() <= PLEN { l as u8 } else { 0 }; }
         h
     }
 }
@@ -3547,7 +3566,8 @@ pub fn pwrite(h: i64, buf: *const u8, len: usize, off: u64) -> i64 {
     unsafe { dirty_balance(); dirty_age_flush(); }
     let i = match of(h) { Some(i) => i, None => return EBADF };
     // SAFETY: E1 — the lock is held by the caller's guard above; `i` came from `of()`.
-    unsafe { let ino = OF_INO[i]; let mut inb = [0u8; 128]; ino_read(ino, &mut inb); if is_dir(&inb) { return EISDIR; } ino_pwrite_balanced(ino, &mut inb, off, buf, len) }
+    unsafe { let ino = OF_INO[i]; let mut inb = [0u8; 128]; ino_read(ino, &mut inb); if is_dir(&inb) { return EISDIR; } ino_pwrite_balanced(ino, &mut inb, off,
+        buf, len) }
 }
 pub fn write(h: i64, buf: *const u8, len: usize) -> i64 {
     let _fsg = fs_lock();
@@ -3572,7 +3592,8 @@ pub fn lseek(h: i64, off: i64, whence: i64) -> i64 {
     let i = match of(h) { Some(i) => i, None => return EBADF };
     // SAFETY: E1 — the FS lock is taken on the line above; the body is ordinary ext2 work.
     unsafe {
-        let base: i64 = match whence { 0 => 0, 1 => OF_POS[i] as i64, 2 => { let mut inb = [0u8; 128]; ino_read(OF_INO[i], &mut inb); i_size(&inb) as i64 } _ => return EINVAL };
+        let base: i64 = match whence { 0 => 0, 1 => OF_POS[i] as i64, 2 => { let mut inb = [0u8; 128]; ino_read(OF_INO[i], &mut inb); i_size(&inb) as i64 }
+            _ => return EINVAL };
         let np = base + off; if np < 0 { return EINVAL; }
         OF_POS[i] = np as u64; np
     }
@@ -3582,13 +3603,15 @@ pub fn ftruncate(h: i64, len: u64) -> i64 {
     if let Some(e) = ro_err() { return e; }
     let i = match of(h) { Some(i) => i, None => return EBADF };
     // SAFETY: E1 — as above; `i` came from `of()`, hence `< MAXOPEN`.
-    unsafe { let ino = OF_INO[i]; let mut inb = [0u8; 128]; ino_read(ino, &mut inb); if is_dir(&inb) { return EISDIR; } truncate_to(ino, &mut inb, len); wr32(&mut inb, 16, now()); ino_write(ino, &inb); 0 }
+    unsafe { let ino = OF_INO[i]; let mut inb = [0u8; 128]; ino_read(ino, &mut inb); if is_dir(&inb) { return EISDIR; } truncate_to(ino, &mut inb, len);
+        wr32(&mut inb, 16, now()); ino_write(ino, &inb); 0 }
 }
 pub fn truncate(path: &[u8], len: u64) -> i64 {
     let _fsg = fs_lock();
     if let Some(e) = ro_err() { return e; }
     // SAFETY: E1 — the lock is held above; the inode travels as the frame's own copy.
-    unsafe { let ino = match lookup(path) { Ok(n) => n, Err(e) => return e }; let mut inb = [0u8; 128]; ino_read(ino, &mut inb); if is_dir(&inb) { return EISDIR; } truncate_to(ino, &mut inb, len); ino_write(ino, &inb); 0 }
+    unsafe { let ino = match lookup(path) { Ok(n) => n, Err(e) => return e }; let mut inb = [0u8; 128]; ino_read(ino, &mut inb); if is_dir(&inb) {
+        return EISDIR; } truncate_to(ino, &mut inb, len); ino_write(ino, &inb); 0 }
 }
 /// fallocate(mode=0): append zeroes up to off+len (real blocks).
 pub fn fallocate(h: i64, off: u64, len: u64) -> i64 {
@@ -3735,7 +3758,9 @@ unsafe fn fill_stat(ino: u32, inb: &[u8; 128], st: *mut u8) {
     core::ptr::write_unaligned(st.add(8) as *mut u64, ino as u64);           // st_ino
     core::ptr::write_unaligned(st.add(16) as *mut u64, i_links(inb) as u64); // st_nlink
     core::ptr::write_unaligned(st.add(24) as *mut u32, i_mode(inb) as u32);  // st_mode
-    core::ptr::write_unaligned(st.add(28) as *mut u32, 1000); core::ptr::write_unaligned(st.add(32) as *mut u32, 1000); // uid/gid = geteuid() (PostgreSQL checks the owner of the data directory)
+    // uid/gid = geteuid() (PostgreSQL checks the owner of the data directory)
+    core::ptr::write_unaligned(st.add(28) as *mut u32, 1000);
+    core::ptr::write_unaligned(st.add(32) as *mut u32, 1000);
     core::ptr::write_unaligned(st.add(48) as *mut i64, i_size(inb) as i64);  // st_size
     core::ptr::write_unaligned(st.add(56) as *mut i64, BS as i64);           // st_blksize
     core::ptr::write_unaligned(st.add(64) as *mut i64, rd32(inb, 28) as i64); // st_blocks (of 512 bytes)
@@ -3752,13 +3777,15 @@ pub fn fstat(h: i64, st: *mut u8) -> i64 {
 pub fn stat(path: &[u8], st: *mut u8) -> i64 {
     let _fsg = fs_lock();
     // SAFETY: E1 — the lock is held above; `st` is a process pointer checked by `uaccess`.
-    unsafe { let ino = match lookup_follow(path) { Ok(n) => n, Err(e) => return e }; let mut inb = [0u8; 128]; ino_read(ino, &mut inb); fill_stat(ino, &inb, st); 0 }
+    unsafe { let ino = match lookup_follow(path) { Ok(n) => n, Err(e) => return e }; let mut inb = [0u8; 128]; ino_read(ino, &mut inb); fill_stat(ino, &inb,
+        st); 0 }
 }
 /// SAFETY: E1 — the lock is taken on the same line (it was NOT, once: see the rule at
 /// `fs_lock` for what a lockless reader did to the file system).
 pub fn exists(path: &[u8]) -> bool { let _fsg = fs_lock(); unsafe { lookup_follow(path).is_ok() } }
 /// SAFETY: E1 — the lock is taken on the same line.
-pub fn is_dir_path(path: &[u8]) -> bool { let _fsg = fs_lock(); unsafe { match lookup_follow(path) { Ok(n) => { let mut inb = [0u8; 128]; ino_read(n, &mut inb); is_dir(&inb) } Err(_) => false } } }
+pub fn is_dir_path(path: &[u8]) -> bool { let _fsg = fs_lock(); unsafe { match lookup_follow(path) { Ok(n) => { let mut inb = [0u8; 128]; ino_read(n, &mut inb);
+    is_dir(&inb) } Err(_) => false } } }
 
 pub fn mkdir(path: &[u8], mode: u32) -> i64 {
     let _fsg = fs_lock();
@@ -3912,7 +3939,8 @@ pub fn read_all(path: &[u8], dst: &mut [u8]) -> usize {
 /// A file's size by handle.
 /// SAFETY: E1 — the lock is taken on the same line (another of the readers that once went
 /// without it).
-pub fn fd_size(h: i64) -> u64 { let _fsg = fs_lock(); match of(h) { Some(i) => unsafe { let mut inb = [0u8; 128]; ino_read(OF_INO[i], &mut inb); i_size(&inb) }, None => 0 } }
+pub fn fd_size(h: i64) -> u64 { let _fsg = fs_lock(); match of(h) { Some(i) => unsafe { let mut inb = [0u8; 128]; ino_read(OF_INO[i], &mut inb); i_size(&inb) },
+    None => 0 } }
 
 /// A self-test (talaria.test=ext2): create/write/read/rename/delete, the directories, a large file.
 /// A self-test of the symbolic links: a read through a link, a link IN THE MIDDLE of a path,
@@ -3956,7 +3984,8 @@ pub fn ioerr_selftest() -> bool {
 pub fn symlink_selftest() -> bool {
     let _fsg = fs_lock();
     let mut ok = true;
-    let mut check = |c: bool, what: &str| { if !c { crate::println!("symlink-test: FAIL {}", what); ok = false; } else { crate::println!("symlink-test: ok {}", what); } };
+    let mut check = |c: bool, what: &str| { if !c { crate::println!("symlink-test: FAIL {}", what); ok = false; } else { crate::println!("symlink-test: ok {}",
+        what); } };
     // 1. open a file THROUGH a link — the target's content must be read
     let mut buf = [0u8; 64];
     let h = open(b"/link.txt", 0, 0);
@@ -4002,7 +4031,8 @@ pub fn symlink_selftest() -> bool {
 pub fn selftest() -> bool {
     let _fsg = fs_lock();
     let mut ok = true;
-    let mut check = |c: bool, what: &str| { if !c { crate::println!("ext2-test: FAIL {}", what); ok = false; } else { crate::println!("ext2-test: ok {}", what); } };
+    let mut check = |c: bool, what: &str| { if !c { crate::println!("ext2-test: FAIL {}", what); ok = false; } else { crate::println!("ext2-test: ok {}", what);
+        } };
     let h = open(b"/t/hello.txt", O_CREAT | 2, 0o644);
     check(h >= 0 || mkdir(b"/t", 0o755) == 0, "mkdir /t");
     let h = if h < 0 { open(b"/t/hello.txt", O_CREAT | 2, 0o644) } else { h };
@@ -4235,14 +4265,19 @@ pub fn jrn_stats() -> (u64, u64, bool) { unsafe { (JCOMMITS, JBLOCKS, JDIRTY) } 
 /// the already covered phases, and adding them to the parent would mean subtracting the same
 /// time twice — the remainder would lie with a zero.
 pub struct Phase { pub n: core::sync::atomic::AtomicU64, pub tsc: core::sync::atomic::AtomicU64, pub max: core::sync::atomic::AtomicU64 }
-const fn phase() -> Phase { Phase { n: core::sync::atomic::AtomicU64::new(0), tsc: core::sync::atomic::AtomicU64::new(0), max: core::sync::atomic::AtomicU64::new(0) } }
+const fn phase() -> Phase { Phase { n: core::sync::atomic::AtomicU64::new(0), tsc: core::sync::atomic::AtomicU64::new(0),
+    max: core::sync::atomic::AtomicU64::new(0) } }
 pub static FSYNC_PH: [Phase; 22] = [const { phase() }; 22];
-pub const FSYNC_PH_NAMES: [&str; 22] = ["fsync", "the data", "the journal's superblock", "the descriptor+the copies", "the commit", "the checkpoint", "the tail of the deferred data",
-    "the FS lock at the entry", "a foreign transaction", "the barrier before the commit", "the return of the FS lock", "the device's lock", "THE OTHER (not covered by the phases)",
+pub const FSYNC_PH_NAMES: [&str; 22] = ["fsync", "the data", "the journal's superblock", "the descriptor+the copies", "the commit", "the checkpoint", "the \
+    tail of the deferred data",
+    "the FS lock at the entry", "a foreign transaction", "the barrier before the commit", "the return of the FS lock", "the device's lock", "THE OTHER (not \
+        covered by the phases)",
     // THE DETAILS (inside the phases above, they do not enter the remainder) — the flush of the pages:
-    "  the flush: the search and the copy into the buffer", "  the flush: the submission of a portion", "  the flush: the handover of the device", "  the flush: the return of the FS lock", "  the flush: the second pass under the lock",
+    "  the flush: the search and the copy into the buffer", "  the flush: the submission of a portion", "  the flush: the handover of the device", "  the \
+        flush: the return of the FS lock", "  the flush: the second pass under the lock",
     // ...and what lay between the phases and was added into THE OTHER:
-    "  the other: mmap_harvest", "  the other: prea_release", "  the other: the estimation of the journal's capacity", "  the other: the counting of the dirty ones (jrn_pending)"];
+    "  the other: mmap_harvest", "  the other: prea_release", "  the other: the estimation of the journal's capacity", "  the other: the counting of the dirty \
+        ones (jrn_pending)"];
 /// The first DETAIL phase: the indices from it on lie INSIDE the phases 1-11 and do not
 /// go into the remainder by task (otherwise the same time would be subtracted twice).
 pub const PH_SUB: usize = 13;
@@ -4312,7 +4347,8 @@ unsafe fn jrn_mount() {
         match crate::mem::alloc_contig(2) { Some(b) => JSTAGE = b, None => { crate::println!("ext2: there is no memory for the journal"); return; } }
     }
     if JCOPY == 0 {
-        match crate::mem::alloc_contig((JREQS - 1) as u64) { Some(b) => JCOPY = b, None => { crate::println!("ext2: there is no memory for the journal's snapshots"); return; } }
+        match crate::mem::alloc_contig((JREQS - 1) as u64) { Some(b) => JCOPY = b, None => { crate::println!("ext2: there is no memory for the journal's \
+            snapshots"); return; } }
     }
     // the map of the journal's blocks (the journal itself is an ordinary file of the FS)
     let mut inb = [0u8; 128];
@@ -4719,7 +4755,8 @@ unsafe fn jrn_wait_free() {
             if spins > 64 {
                 spins = 0;
                 let cpu = crate::percpu::cpu_id();
-                if crate::sched::cpu_has_other_runnable(cpu, crate::sched::current_id()) { crate::sched::yield_origin(crate::sched::YO_FS); crate::sched::yield_now(); }
+                if crate::sched::cpu_has_other_runnable(cpu, crate::sched::current_id()) { crate::sched::yield_origin(crate::sched::YO_FS);
+                    crate::sched::yield_now(); }
                 else { crate::fs::io_window(); }   // the FS lock is released above — the window is lawful
                 let now = crate::tsc::rdtsc();
                 let st = core::ptr::read_volatile(core::ptr::addr_of!(JBUSY_STAGE)).min(JSTAGES - 1);
@@ -4732,7 +4769,8 @@ unsafe fn jrn_wait_free() {
                     // THE HOLDER IS NAMED BY THE TASK AND THE PHASE: "the journal was busy"
                     // does not become a change, while "the task 7 on the commit for 214 ms"
                     // does.
-                    crate::println!("ext2: the journal is busy with a foreign transaction for {} ms (the task {} at the phase \"{}\", its transaction has been going {} ms), the task {} keeps waiting — we do not write the metadata in place (give-ups 0)",
+                    crate::println!("ext2: the journal is busy with a foreign transaction for {} ms (the task {} at the phase \"{}\", its transaction has been \
+                        going {} ms), the task {} keeps waiting — we do not write the metadata in place (give-ups 0)",
                         waited / ms, core::ptr::read_volatile(core::ptr::addr_of!(JBUSY_TASK)),
                         JSTAGE_NAMES[st], crate::tsc::rdtsc().wrapping_sub(since) / ms, crate::sched::current_id());
                     reports += 1;
@@ -4904,7 +4942,8 @@ unsafe fn jrn_txn(sel: JSel, cap: usize) -> usize {
             JIO += 1;
             // a move across the end of the journal onto its own start is a defect of the estimate
             // `jrn_need`; after a crash such a transaction cannot be replayed
-            if pos < dpos { crate::println!("ext2: THE JOURNAL HAS BEEN OVERFLOWED by the transaction seq {} (the descriptor {}, the tail {}) — the estimate of the room is wrong", seq, dpos, pos); }
+            if pos < dpos { crate::println!("ext2: THE JOURNAL HAS BEEN OVERFLOWED by the transaction seq {} (the descriptor {}, the tail {}) — the estimate \
+                of the room is wrong", seq, dpos, pos); }
             JHEAD = pos;
         }
     }

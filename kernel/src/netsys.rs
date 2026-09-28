@@ -145,7 +145,9 @@ struct Tcp {
 const ORPHAN_IDLE_MS: i64 = 1000;   // without progress for longer — an RST (the Internet's RTT of 0.25 s — with headroom)
 const ORPHAN_CAP_MS: i64 = 10_000;  // for the whole untying — no more than that
 
-const TCP0: Tcp = Tcp { k: K::Free, nonblock: false, port: 0, owner: 0, connecting: false, err: 0, nodelay: false, rx: 0, tx: 0, ifx: 0, tid: 255, h: None, rdy: 0, armed: false, dl: 0, dlx: 0, dlc: 0, dlo: 0, dlr: 0, dls: 0, dlp: 0, dlcpu: 255, dlby: 255, dlpt: [0; 16], dlwhy: [0; WHY_N], trd: 0, trrd: 0, trdus: 0, trdla: 0 };
+const TCP0: Tcp = Tcp { k: K::Free, nonblock: false, port: 0, owner: 0, connecting: false, err: 0, nodelay: false, rx: 0, tx: 0, ifx: 0, tid: 255, h: None,
+    rdy: 0, armed: false, dl: 0, dlx: 0, dlc: 0, dlo: 0, dlr: 0, dls: 0, dlp: 0, dlcpu: 255, dlby: 255, dlpt: [0; 16], dlwhy: [0; WHY_N], trd: 0, trrd: 0,
+    trdus: 0, trdla: 0 };
 // ── the common lock of the network stack ──────────────────────────────────────
 //
 // smoltcp's interfaces, the table of sockets and the card's rings are mut statics and RefCells.
@@ -510,7 +512,8 @@ fn net_enter(wait: bool) -> Option<NetGuard> {
         if hz_diag != 0 && waited > next_report {
             let hz = hz_diag;
             if reports == 0 { NET_LONGWAIT.fetch_add(1, Relaxed); }
-            crate::println!("netsys: the stack's lock did not give in within {} s: core {} holds it (the depth {}, already {} ms), we are core {} task {}; we keep waiting",
+            crate::println!("netsys: the stack's lock did not give in within {} s: core {} holds it (the depth {}, already {} ms), we are core {} task {}; we \
+                keep waiting",
                 waited / hz, NET_OWNER.load(Relaxed), NET_DEPTH.load(Relaxed),
                 tsc::rdtsc().wrapping_sub(NET_SINCE.load(Relaxed)) / (hz / 1000).max(1), me, crate::sched::current_id());
             reports += 1;
@@ -875,7 +878,8 @@ pub fn init_named(dev: &'static mut dyn crate::netdev::NetDev, mac: [u8; 6], drv
     if ready() { let _ = dev; return; }
     let idx = match add_iface(dev, mac, drv, hz) { Some(i) => i, None => return };
     // §7.5: sleeping when idle is possible only with a working LAPIC.
-    if unsafe { CFG_NETIDLE } { crate::smp::lapic_enable(); crate::println!("netsys: idling = a sleep on the receive ring (talaria.netidle=1, the ceiling is 200 us)"); }
+    if unsafe { CFG_NETIDLE } { crate::smp::lapic_enable(); crate::println!("netsys: idling = a sleep on the receive ring (talaria.netidle=1, the ceiling is \
+        200 us)"); }
     // The card's line is laid HERE rather than in a mode's branch: there are four branches, and
     // previously the call stood in one of them (the EC2 path), that is, on an ordinary boot it did not
     // fire at all.
@@ -922,7 +926,8 @@ pub fn init_named(dev: &'static mut dyn crate::netdev::NetDev, mac: [u8; 6], drv
             if unsafe { !CFG_DHCP_WAIT } { got = true; break; }
             let now = tsc::rdtsc();
             if now > next_say {
-                crate::println!("netsys: dhcp: there has been no lease for {} s already (the budget is {} s), the DISCOVER is being repeated", now.wrapping_sub(t0) / hz.max(1), budget);
+                crate::println!("netsys: dhcp: there has been no lease for {} s already (the budget is {} s), the DISCOVER is being repeated",
+                    now.wrapping_sub(t0) / hz.max(1), budget);
                 next_say = now + 10 * hz;
             }
             core::hint::spin_loop();
@@ -1147,7 +1152,8 @@ pub fn ringhonest_from_cmdline(cmdline: &str) {
     if let Some(v) = crate::cmdline::value(cmdline, "talaria.ringhonest") {
         let on = v != "0";
         RING_HONEST.store(on, core::sync::atomic::Ordering::SeqCst);
-        crate::println!("netsys: the sign \"the card is silent\" — {}", if on { "the honest one (the ring's phase bit)" } else { "THE FORMER one (a comparison of the word's value)" });
+        crate::println!("netsys: the sign \"the card is silent\" — {}", if on { "the honest one (the ring's phase bit)" } else { "THE FORMER one (a comparison \
+            of the word's value)" });
     }
 }
 /// Can the driver answer "is there a received frame" (see `poll_gated`).
@@ -1164,7 +1170,8 @@ fn ring_watch_setup() {
     let Some((_, v)) = f.dev.idle_watch() else { return };
     RING_LAST.store(v, core::sync::atomic::Ordering::SeqCst);
     RING_WATCH.store(true, core::sync::atomic::Ordering::SeqCst);
-    crate::println!("netsys: an idle pass of the stack is cancelled BY THE receive RING (a pass for the sake of the timers happens not less often than once every {} us)",
+    crate::println!("netsys: an idle pass of the stack is cancelled BY THE receive RING (a pass for the sake of the timers happens not less often than once \
+        every {} us)",
         POLL_HARD_NS.load(core::sync::atomic::Ordering::Relaxed) / 1000);
 }
 
@@ -1784,7 +1791,8 @@ pub const DL_DUMP_PH: usize = 32;
 pub const DL_DUMP_EV: usize = 40;
 pub const DL_DUMP_N: usize = 6;
 pub const DL_DUMP_US: u64 = 100;
-const DLD0: DlDump = DlDump { used: core::sync::atomic::AtomicBool::new(false), t: 0, c: 0, cpu: 0, by: 0, occ: 0, ot: 255, us: 0, ran_us: 0, sw: 0, n: 0, dl: 0,
+const DLD0: DlDump = DlDump { used: core::sync::atomic::AtomicBool::new(false), t: 0, c: 0, cpu: 0, by: 0, occ: 0, ot: 255, us: 0, ran_us: 0, sw: 0, n: 0,
+    dl: 0,
     ev: [crate::sched::SEV0; DL_DUMP_EV], pr: [PHE0; DL_DUMP_PH], po: [PHE0; DL_DUMP_PH], npr: 0, npo: 0, opt: [0; 16], owhy: [0; WHY_N] };
 pub static mut DL_DUMP: [DlDump; DL_DUMP_N] = [DLD0; DL_DUMP_N];
 /// How many slow deliveries did not fit into the slots (all of them were occupied).
@@ -2780,7 +2788,9 @@ fn warn_no_slots() {
     if next != 0 && now.wrapping_sub(next) >= (1u64 << 62) { return; }   // it is too early yet
     NEXT.store(now.wrapping_add(ms_to_cycles(5000)), core::sync::atomic::Ordering::Relaxed);
     let (used, lis, bl, conn, cl, unb) = census();
-    crate::println!("netsys: ATTENTION: the listener's backlog is NOT REPLENISHED — the TCP slots have run out ({} out of {} are occupied: listeners {}, backlog {}, connections {}, closed but not untied {}, created but not bound {}); accepted over the run {}, closed {}, slot refusals {}. New connections will HANG.",
+    crate::println!("netsys: ATTENTION: the listener's backlog is NOT REPLENISHED — the TCP slots have run out ({} out of {} are occupied: listeners {}, \
+        backlog {}, connections {}, closed but not untied {}, created but not bound {}); accepted over the run {}, closed {}, slot refusals {}. New \
+        connections will HANG.",
         used, NS, lis, bl, conn, cl, unb,
         ACCEPTED.load(core::sync::atomic::Ordering::Relaxed),
         CLOSED.load(core::sync::atomic::Ordering::Relaxed),
@@ -3062,10 +3072,12 @@ pub fn connect(fd: i64, addr: *const u8) -> i64 {
         poll();
         match s(i).state() {
             State::Established => { tt()[i].connecting = false; if trace_on() { crate::println!("net: fd={} established", fd); } return 0; }
-            State::Closed => { tt()[i].connecting = false; tt()[i].err = ECONNREFUSED as i32; if trace_on() { crate::println!("net: fd={} refused", fd); } return ECONNREFUSED; }
+            State::Closed => { tt()[i].connecting = false; tt()[i].err = ECONNREFUSED as i32; if trace_on() { crate::println!("net: fd={} refused", fd); }
+                return ECONNREFUSED; }
             _ => {}
         }
-        if tsc::rdtsc() - t0 > limit { s(i).abort(); tt()[i].connecting = false; if trace_on() { crate::println!("net: fd={} connect timeout", fd); } return ETIMEDOUT; }
+        if tsc::rdtsc() - t0 > limit { s(i).abort(); tt()[i].connecting = false; if trace_on() { crate::println!("net: fd={} connect timeout", fd); }
+            return ETIMEDOUT; }
         _g = None; yield_window(); _g = net_lock();
     }
 }
@@ -3074,7 +3086,8 @@ fn refresh_conn(i: usize) {
     if tt()[i].connecting {
         match s(i).state() {
             State::Established => { tt()[i].connecting = false; if trace_on() { crate::println!("net: fd={} established (async)", TCP_BASE + i as i64); } }
-            State::Closed => { tt()[i].connecting = false; tt()[i].err = ECONNREFUSED as i32; if trace_on() { crate::println!("net: fd={} refused (async)", TCP_BASE + i as i64); } }
+            State::Closed => { tt()[i].connecting = false; tt()[i].err = ECONNREFUSED as i32; if trace_on() { crate::println!("net: fd={} refused (async)",
+                TCP_BASE + i as i64); } }
             _ => {}
         }
     }
@@ -3884,7 +3897,8 @@ pub fn dump_conns() {
         let t = tt()[i];
         if t.k == K::Conn && t.h.is_some() {
             let (a, p) = ep_parts(s(i).remote_endpoint());
-            crate::println!("net: fd={} {}.{}.{}.{}:{} state={:?} rx={} tx={} net{}", TCP_BASE + i as i64, a[0], a[1], a[2], a[3], p, s(i).state(), t.rx, t.tx, t.ifx);
+            crate::println!("net: fd={} {}.{}.{}.{}:{} state={:?} rx={} tx={} net{}", TCP_BASE + i as i64, a[0], a[1], a[2], a[3], p, s(i).state(), t.rx, t.tx,
+                t.ifx);
         } else if t.k == K::Listen { crate::println!("net: fd={} listen :{}", TCP_BASE + i as i64, t.port); }
     }
 }

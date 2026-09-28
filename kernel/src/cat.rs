@@ -276,7 +276,8 @@ pub fn apply(rules: &[(u64, u32)]) -> u32 {
         if mask_valid(rest, cbm_len()) && set_class(0, rest) {
             crate::println!("cat: the class 0 (everything else) has been narrowed to {:#x} — foreign shares are no longer visible to it", rest);
         } else {
-            crate::println!("cat: ATTENTION — the remainder {:#x} is not contiguous, the class 0 has been left at the whole cache (the isolation is one-sided)", rest);
+            crate::println!("cat: ATTENTION — the remainder {:#x} is not contiguous, the class 0 has been left at the whole cache (the isolation is one-sided)",
+                rest);
         }
     }
     done
@@ -313,9 +314,11 @@ pub fn report_footprint(what: &str, queues: u64, ring_bufs: u64, buf: u64, desc_
     crate::println!("cat: the footprint of the {} rings — {} queues, {} KB (the L3 {} KB)",
         what, queues, bytes / 1024, l3 / 1024);
     if !fits_l3 {
-        crate::println!("cat: ATTENTION — the rings are BIGGER THAN THE L3: a fresh DMA buffer will be evicted before it is read (leaky DMA, x5.6 by LLC misses in v0.15)");
+        crate::println!("cat: ATTENTION — the rings are BIGGER THAN THE L3: a fresh DMA buffer will be evicted before it is read (leaky DMA, x5.6 by LLC \
+            misses in v0.15)");
     } else if !fits_ddio {
-        crate::println!("cat: ATTENTION — the rings are bigger than a quarter of the L3: the share for I/O writes is smaller than the whole cache, the margin has been eaten up");
+        crate::println!("cat: ATTENTION — the rings are bigger than a quarter of the L3: the share for I/O writes is smaller than the whole cache, the margin \
+            has been eaten up");
     }
     fits_l3
 }

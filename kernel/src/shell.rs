@@ -350,7 +350,8 @@ pub fn cmd_head_tail(arg: &str, head: bool) {
     if !ensure_mounted() { return; }
     let mut p = [0u8; PATH];
     let n = resolve(path, &mut p);
-    let size = match finfo(&p[..n]) { Some((s, false, _, _)) => s, Some(_) => { crate::println!("{}: that is a directory", if head { "head" } else { "tail" }); return; }, None => { crate::println!("there is no such file: {}", path); return; } };
+    let size = match finfo(&p[..n]) { Some((s, false, _, _)) => s, Some(_) => { crate::println!("{}: that is a directory", if head { "head" } else { "tail" });
+        return; }, None => { crate::println!("there is no such file: {}", path); return; } };
     let mut f = match fopen(&p[..n]) { Some(f) => f, None => return };
     if head {
         let mut lines = 0usize;
@@ -455,7 +456,8 @@ pub fn cmd_mkdir(arg: &str) {
     let mut p = [0u8; PATH];
     let n = resolve(arg, &mut p);
     let r = ext2::mkdir(&p[..n], 0o755);
-    if r < 0 { crate::println!("mkdir: the error {}", r); } else { crate::println!("the directory {} has been created", core::str::from_utf8(&p[..n]).unwrap_or("?")); }
+    if r < 0 { crate::println!("mkdir: the error {}", r); } else { crate::println!("the directory {} has been created",
+        core::str::from_utf8(&p[..n]).unwrap_or("?")); }
 }
 
 pub fn cmd_rm(arg: &str) {
@@ -696,7 +698,8 @@ pub fn complete_path(token: &str, add: &mut [u8; 96]) -> (usize, usize) {
 /// read-only FS.
 pub fn selftest() -> bool {
     let mut ok = true;
-    let mut check = |c: bool, what: &str| { if !c { crate::println!("shell-test: FAIL {}", what); ok = false; } else { crate::println!("shell-test: ok {}", what); } };
+    let mut check = |c: bool, what: &str| { if !c { crate::println!("shell-test: FAIL {}", what); ok = false; } else { crate::println!("shell-test: ok {}",
+        what); } };
     let mut p = [0u8; PATH];
     // the parsing of paths
     let n = resolve("/a/b/../c", &mut p);

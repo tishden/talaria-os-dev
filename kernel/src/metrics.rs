@@ -79,7 +79,8 @@ pub fn dump() {
             // applicable). A repeat of the same one and the overwriting of a stale one stand next to it
             // as separate numbers: previously all three were added into one, and it
             // showed 85 % where the losses were single percent.
-            crate::println!("stat: hints to the scheduler {}: overwritten by A LIVE FOREIGN one {} ({}%), by the same one {} ({}%), stale {} ({}%); applied by the scheduler {}, by the pickup loop {}",
+            crate::println!("stat: hints to the scheduler {}: overwritten by A LIVE FOREIGN one {} ({}%), by the same one {} ({}%), stale {} ({}%); applied by \
+                the scheduler {}, by the pickup loop {}",
                 st, cl, cl * 100 / st.max(1), sa, sa * 100 / st.max(1), sl, sl * 100 / st.max(1), us, pk);
         }
     }
@@ -109,7 +110,8 @@ pub fn dump() {
             let ctx = crate::sched::RQ_MAX_CTX.load(Relaxed);
             // The worst one is SINCE THE PREVIOUS stat BLOCK (session 32): the start of mongod gives
             // 17 ms on the fifth second and covered up the worst one under load.
-            crate::println!("stat:   {} intervals in total, {} ms altogether, {} us on average, the worst since the previous block {} us (task {} on core {}, it ended at {} ms; at the moment of readiness the core was executing {}{}, core switches during the wait {})",
+            crate::println!("stat:   {} intervals in total, {} ms altogether, {} us on average, the worst since the previous block {} us (task {} on core {}, \
+                it ended at {} ms; at the moment of readiness the core was executing {}{}, core switches during the wait {})",
                 n, crate::sched::RQ_SUM_US.load(Relaxed) / 1000, crate::sched::RQ_SUM_US.load(Relaxed) / n, crate::sched::RQ_MAX_US.load(Relaxed),
                 w as u32, w >> 32, crate::sched::RQ_MAX_AT_MS.load(Relaxed),
                 if ctx & 0xFFFF == 0xFFFF { "nobody (hlt)" } else { "t" }, TaskNo(ctx & 0xFFFF), ctx >> 16);
@@ -124,7 +126,8 @@ pub fn dump() {
                 for j in 0..n_ev.min(crate::sched::RQ_MAX_EV_N) {
                     let e = unsafe { crate::sched::RQ_MAX_EV[j] };
                     let us = t_end.wrapping_sub(e.tsc).saturating_mul(1_000_000) / hz;
-                    let why = match e.why & 0x7f { 1 => "hint", 2 => "a foreign hint->rotation", 3 => "rotation", 4 => "stay:lock", 5 => "stay:nobody", 6 => "stay:interception", 7 => "steal", 8 => "stay:it ran little", 9 => "stay:a request in progress", _ => "?" };
+                    let why = match e.why & 0x7f { 1 => "hint", 2 => "a foreign hint->rotation", 3 => "rotation", 4 => "stay:lock", 5 => "stay:nobody",
+                        6 => "stay:interception", 7 => "steal", 8 => "stay:it ran little", 9 => "stay:a request in progress", _ => "?" };
                     crate::print!(" [-{} {} t{}->t{} {}", us, if e.why & 0x80 != 0 { "tick" } else { "yield" }, e.from, e.to, why);
                     if e.hint != 255 { crate::print!(" h:t{}", e.hint); }
                     if e.why & 0x80 != 0 { if e.rip == 3 { crate::print!(" @r3"); } else if e.rip != 0 { crate::print!(" @{:#x}", e.rip); } }
@@ -183,10 +186,12 @@ pub fn dump() {
         crate::println!("stat: a bad layout: ticks {} (2+ ready on a core while a neighbour is empty), extra ready {}, of them pinned {}",
             m(0), m(1), m(2));
         let w = |i: usize| crate::sched::MIS_WHY[i].load(core::sync::atomic::Ordering::Relaxed);
-        crate::println!("stat:   an extra ready one for an empty neighbour: pinned {}, executing {}, asleep {}, the mask {}, the balance of the assigned {}, hot {}, would have stolen {}",
+        crate::println!("stat:   an extra ready one for an empty neighbour: pinned {}, executing {}, asleep {}, the mask {}, the balance of the assigned {}, \
+            hot {}, would have stolen {}",
             w(0), w(1), w(2), w(3), w(4), w(5), w(6));
         let v = |i: usize| crate::affinity::STEAL_MIS[i].load(core::sync::atomic::Ordering::Relaxed);
-        crate::println!("stat:   steal attempts under a bad layout {}: pinned {}, asleep {}, the mask {}, the balance of the assigned {}, hot {}, would have stolen {}",
+        crate::println!("stat:   steal attempts under a bad layout {}: pinned {}, asleep {}, the mask {}, the balance of the assigned {}, hot {}, would have \
+            stolen {}",
             v(0), v(1), v(2), v(3), v(4), v(5), v(6));
     }
     if crate::sched::STEAL_PUSH.load(core::sync::atomic::Ordering::Relaxed) {
@@ -201,7 +206,8 @@ pub fn dump() {
         crate::affinity::STEAL_HOT.load(core::sync::atomic::Ordering::Relaxed));
     {
         let sk = |i: usize| crate::affinity::STEAL_SKIP[i].load(core::sync::atomic::Ordering::Relaxed);
-        crate::println!("stat: stealing, the rejection of candidates: executing {}, asleep {}, the mask {}, the donor has no queue {}, pinned {} (threads that pinned themselves with a mask: {})",
+        crate::println!("stat: stealing, the rejection of candidates: executing {}, asleep {}, the mask {}, the donor has no queue {}, pinned {} (threads that \
+            pinned themselves with a mask: {})",
             sk(0), sk(1), sk(2), sk(3), sk(4), crate::affinity::SELFPIN.load(core::sync::atomic::Ordering::Relaxed));
     }
     crate::println!("stat: work steals={}, transplants at a wakeup={}",
@@ -241,7 +247,9 @@ pub fn dump() {
                 us(crate::paging::SHOOT_MAX_TSC.load(R)),
                 crate::paging::SHOOT_OVER[1].load(R), crate::paging::SHOOT_OVER[2].load(R),
                 crate::paging::SHOOT_TIMEOUT.load(R));
-            crate::println!("stat: calls not made (the neighbour is in a foreign AS) {}, (the neighbour is in hlt, it will flush by itself) {}, flushes by the mark at a wakeup {}; acknowledgements were not waited for (the neighbour was TAKEN OFF THE CORE by the host) {}, (the neighbour STANDS IN hlt) {}",
+            crate::println!("stat: calls not made (the neighbour is in a foreign AS) {}, (the neighbour is in hlt, it will flush by itself) {}, flushes by the \
+                mark at a wakeup {}; acknowledgements were not waited for (the neighbour was TAKEN OFF THE CORE by the host) {}, (the neighbour STANDS IN hlt) \
+                {}",
                 crate::paging::SHOOT_SKIPPED.load(R), crate::paging::SHOOT_LAZY.load(R), crate::paging::LAZY_FLUSHES.load(R),
                 crate::paging::SHOOT_HOSTFLUSH.load(R), crate::paging::SHOOT_HALTED.load(R));
         }
@@ -253,7 +261,8 @@ pub fn dump() {
             let hz = crate::tsc::calibrate_cached().max(1);
             let ns = |c: u64| c.saturating_mul(1_000_000_000 / 1000) / (hz / 1000).max(1);
             let hit = crate::paging::UNMAP_HIT.load(R).max(1);
-            crate::println!("stat: unmap: calls {} ({} with a removal), pages {} ({} per call); the walk {} ns/call, the flush {} ns, the acknowledgements {} ns (per removal)",
+            crate::println!("stat: unmap: calls {} ({} with a removal), pages {} ({} per call); the walk {} ns/call, the flush {} ns, the acknowledgements {} \
+                ns (per removal)",
                 n, crate::paging::UNMAP_HIT.load(R), crate::paging::UNMAP_PAGES.load(R),
                 crate::paging::UNMAP_PAGES.load(R) / n,
                 ns(crate::paging::UNMAP_WALK_TSC.load(R) / n),
@@ -274,7 +283,8 @@ pub fn dump() {
             // the layout NOW answers "what is it busy with". Without this line a refusal to accept
             // after an overload on the stand was indistinguishable from a refusal of the network.
             let (used, lis, bl, conn, cl, unb) = crate::netsys::census();
-            crate::println!("stat: tcp slots: now {} of {} (listeners {}, backlog {}, connections {}, closed but not untied {}, created but not tied {}), the high-water mark {}, slot refusals {}",
+            crate::println!("stat: tcp slots: now {} of {} (listeners {}, backlog {}, connections {}, closed but not untied {}, created but not tied {}), the \
+                high-water mark {}, slot refusals {}",
                 used, crate::netsys::NS, lis, bl, conn, cl, unb, hi, no);
         }
     }
@@ -283,7 +293,8 @@ pub fn dump() {
         let (a, b, c, d) = (crate::netsys::DELIV_NOOWNER.load(R), crate::netsys::DELIV_SELF.load(R),
                             crate::netsys::DELIV_SAMECPU.load(R), crate::netsys::DELIV_OTHERCPU.load(R));
         if a + b + c + d != 0 {
-            crate::println!("stat: the socket's delivery: without an owner {}, already mine {}, to a neighbour on this core {}, on a foreign core {}", a, b, c, d);
+            crate::println!("stat: the socket's delivery: without an owner {}, already mine {}, to a neighbour on this core {}, on a foreign core {}", a, b, c,
+                d);
         }
     }
     // DELIVERY -> THE READER BY THE READER'S STATE (session 32): in what state the socket's
@@ -293,7 +304,8 @@ pub fn dump() {
         let ba: [u64; 8] = core::array::from_fn(|i| crate::netsys::DLA_HIST[i].load(R));
         let na: u64 = ba.iter().sum();
         if na != 0 {
-            crate::println!("stat: the ring->the pass (an upper estimate, passes with frames {}), us: <5:{} <10:{} <20:{} <50:{} <100:{} <200:{} <500:{} 500+:{} the worst {}",
+            crate::println!("stat: the ring->the pass (an upper estimate, passes with frames {}), us: <5:{} <10:{} <20:{} <50:{} <100:{} <200:{} <500:{} \
+                500+:{} the worst {}",
                 na, ba[0], ba[1], ba[2], ba[3], ba[4], ba[5], ba[6], ba[7], crate::netsys::DLA_MAX_US.load(R));
         }
         {   // session 32: the gap between passes with frames and the latency of completing a transmission
@@ -301,16 +313,20 @@ pub fn dump() {
             let g1: [u64; 8] = core::array::from_fn(|i| crate::netsys::RXGAP_HIST[1][i].load(R));
             let fr: [u64; 3] = core::array::from_fn(|i| crate::netsys::RXGAP_FRAMES[i].load(R));
             if g0.iter().sum::<u64>() + g1.iter().sum::<u64>() != 0 {
-                crate::println!("stat: the gap between passes with frames, us: <50:{} <100:{} <150:{} <200:{} <250:{} <300:{} <500:{} 500+:{}; frames per pass 1:{} 2:{} 3+:{}",
-                    g0[0] + g1[0], g0[1] + g1[1], g0[2] + g1[2], g0[3] + g1[3], g0[4] + g1[4], g0[5] + g1[5], g0[6] + g1[6], g0[7] + g1[7], fr[0], fr[1], fr[2]);
+                crate::println!("stat: the gap between passes with frames, us: <50:{} <100:{} <150:{} <200:{} <250:{} <300:{} <500:{} 500+:{}; frames per pass \
+                    1:{} 2:{} 3+:{}",
+                    g0[0] + g1[0], g0[1] + g1[1], g0[2] + g1[2], g0[3] + g1[3], g0[4] + g1[4], g0[5] + g1[5], g0[6] + g1[6], g0[7] + g1[7], fr[0], fr[1],
+                        fr[2]);
                 crate::println!("stat:   of them a pass by the timers' debt: <50:{} <100:{} <150:{} <200:{} <250:{} <300:{} <500:{} 500+:{}",
                     g1[0], g1[1], g1[2], g1[3], g1[4], g1[5], g1[6], g1[7]);
             }
             let tc: [u64; 8] = core::array::from_fn(|i| crate::ena::TXC_HIST[i].load(R));
             if tc.iter().sum::<u64>() != 0 {
-                crate::println!("stat: the completion of a transmission (the posting -> the completion), us: <5:{} <10:{} <20:{} <50:{} <100:{} <150:{} <200:{} 200+:{} the worst {}",
+                crate::println!("stat: the completion of a transmission (the posting -> the completion), us: <5:{} <10:{} <20:{} <50:{} <100:{} <150:{} \
+                    <200:{} 200+:{} the worst {}",
                     tc[0], tc[1], tc[2], tc[3], tc[4], tc[5], tc[6], tc[7], crate::ena::TXC_MAX_US.load(R));
-                crate::println!("stat: the card under a pass (session 32): a call waited for the holder {} times, gave up {}; the receive waited {} times, gave up {}",
+                crate::println!("stat: the card under a pass (session 32): a call waited for the holder {} times, gave up {}; the receive waited {} times, \
+                    gave up {}",
                     crate::l1::FLUSH_WAITED.load(R), crate::l1::FLUSH_GAVEUP.load(R), crate::l1::RX_TAKE_WAITED.load(R), crate::l1::RX_TAKE_GAVEUP.load(R));
             }
         }
@@ -321,7 +337,8 @@ pub fn dump() {
             if n == 0 { continue; }
             if !hdr { crate::println!("stat: delivery->the reader by the reader's state at the delivery, us: <5 <10 <20 <50 <100 <200 <500 500+"); hdr = true; }
             let ctx = crate::netsys::DL_MAX_CTX[c].load(R);
-            crate::println!("stat:   {:<22} {:>8}: {} {} {} {} {} {} {} {}  avg {} the worst {} (on the reader's core {}{}, switches {}), the reader's core stood empty {}",
+            crate::println!("stat:   {:<22} {:>8}: {} {} {} {} {} {} {} {}  avg {} the worst {} (on the reader's core {}{}, switches {}), the reader's core \
+                stood empty {}",
                 crate::netsys::DLC_NAMES[c], n, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
                 crate::netsys::DL_SUM_US[c].load(R) / n, crate::netsys::DL_MAX_US[c].load(R),
                 if ctx & 0xFFFF == 0xFFFF { "hlt" } else { "t" }, TaskNo(ctx & 0xFFFF), ctx >> 16,
@@ -330,13 +347,15 @@ pub fn dump() {
             let sw: [u64; 4] = core::array::from_fn(|i| crate::netsys::DLS_SW[c][i].load(R));
             let ns: u64 = occ.iter().sum();
             if ns != 0 {
-                crate::println!("stat:     slow ones (>={} us) {}: on the reader's core hlt {} / a network waiter {} / other {}; core switches during the wait 0:{} 1:{} 2:{} 3+:{}; the reader is invisible to the scheduler {}",
+                crate::println!("stat:     slow ones (>={} us) {}: on the reader's core hlt {} / a network waiter {} / other {}; core switches during the wait \
+                    0:{} 1:{} 2:{} 3+:{}; the reader is invisible to the scheduler {}",
                     crate::netsys::DL_SLOW_US, ns, occ[0], occ[1], occ[2], sw[0], sw[1], sw[2], sw[3],
                     crate::netsys::DLS_HIDDEN[c].load(R));
                 let ran: [u64; 4] = core::array::from_fn(|i| crate::netsys::DLS_RAN[c][i].load(R));
                 let osw: [u64; 4] = core::array::from_fn(|i| crate::netsys::DLS_OWNSW[c][i].load(R));
                 let np: [u64; 4] = core::array::from_fn(|i| crate::netsys::DLS_PASS[c][i].load(R));
-                crate::println!("stat:       the reader during the wait: ran <10%:{} <50%:{} <90%:{} >=90%:{}; taken off the core 0:{} 1:{} 2:{} 3+:{}; passes from read in vain 0:{} 1-2:{} 3-10:{} 11+:{}",
+                crate::println!("stat:       the reader during the wait: ran <10%:{} <50%:{} <90%:{} >=90%:{}; taken off the core 0:{} 1:{} 2:{} 3+:{}; passes \
+                    from read in vain 0:{} 1-2:{} 3-10:{} 11+:{}",
                     ran[0], ran[1], ran[2], ran[3], osw[0], osw[1], osw[2], osw[3], np[0], np[1], np[2], np[3]);
             }
         }
@@ -352,11 +371,13 @@ pub fn dump() {
             if any { crate::println!(); }
             // THE SERVER'S TURNAROUND ON A SOCKET (see `netsys::tr_close`).
             {
-                use crate::netsys::{TR_HIST, TR_N, TR_ST, TR_ST_NAMES, TR_SUM, TR_SLOW_SUM, TR_SLOW_N, TR_SLOW_TOP, TR_EX, TR_EX_N, TR_MID_SUM, TR_MID_N, TR_MID_TOP};
+                use crate::netsys::{TR_HIST, TR_N, TR_ST, TR_ST_NAMES, TR_SUM, TR_SLOW_SUM, TR_SLOW_N, TR_SLOW_TOP, TR_EX, TR_EX_N, TR_MID_SUM, TR_MID_N,
+                    TR_MID_TOP};
                 let h: [u64; TR_N] = core::array::from_fn(|i| TR_HIST[i].load(R));
                 let n: u64 = h.iter().sum();
                 if n != 0 {
-                    crate::println!("stat:   the server's turnaround on a socket (the delivery -> the answer handed to the card) {}, us: <20:{} <40:{} <60:{} <80:{} <100:{} <150:{} <200:{} 200+:{}",
+                    crate::println!("stat:   the server's turnaround on a socket (the delivery -> the answer handed to the card) {}, us: <20:{} <40:{} <60:{} \
+                        <80:{} <100:{} <150:{} <200:{} 200+:{}",
                         n, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
                     crate::print!("stat:     the average intervals, us:");
                     for k in 0..TR_ST { crate::print!(" {} {}", TR_ST_NAMES[k], TR_SUM[k].load(R) / n); }
@@ -379,7 +400,8 @@ pub fn dump() {
                         for k in 0..TR_EX_N {
                             let e = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(TR_EX[k])) };
                             if e.us == 0 { continue; }
-                            crate::println!("stat:     the worst turnaround {} us: the reader t{} ({}), core {}, delivered by core {}, on the reader's core there was t{}; the intervals {} {} / {} {} / {} {} / {} {} / {} {}",
+                            crate::println!("stat:     the worst turnaround {} us: the reader t{} ({}), core {}, delivered by core {}, on the reader's core \
+                                there was t{}; the intervals {} {} / {} {} / {} {} / {} {} / {} {}",
                                 e.us, e.t, crate::netsys::DLC_NAMES[(e.c as usize).min(crate::netsys::DLC_N - 1)], e.cpu, e.by, e.ot,
                                 TR_ST_NAMES[0], e.st[0], TR_ST_NAMES[1], e.st[1], TR_ST_NAMES[2], e.st[2], TR_ST_NAMES[3], e.st[3], TR_ST_NAMES[4], e.st[4]);
                         }
@@ -400,15 +422,19 @@ pub fn dump() {
             for k in 0..crate::netsys::DL_DUMP_N {
                 let d = unsafe { &mut *core::ptr::addr_of_mut!(crate::netsys::DL_DUMP[k]) };
                 if !d.used.load(core::sync::atomic::Ordering::Acquire) { continue; }
-                crate::println!("stat:   the analysis: the reader t{} ({}), {} us, core {}, delivered by core {}, on the reader's core there was t{} ({}){}, the reader ran {} us, the core switched {} times; the core's decisions {}:",
+                crate::println!("stat:   the analysis: the reader t{} ({}), {} us, core {}, delivered by core {}, on the reader's core there was t{} ({}){}, \
+                    the reader ran {} us, the core switched {} times; the core's decisions {}:",
                     d.t, crate::netsys::DLC_NAMES[(d.c as usize).min(crate::netsys::DLC_N - 1)], d.us, d.cpu, d.by,
-                    d.ot, match d.occ & 3 { 0 => "hlt", 1 => "a network waiter", _ => "other" }, if d.occ & 4 != 0 { " (the reader is invisible)" } else { "" }, d.ran_us, d.sw, d.cpu);
+                    d.ot, match d.occ & 3 { 0 => "hlt", 1 => "a network waiter", _ => "other" }, if d.occ & 4 != 0 { " (the reader is invisible)" } else { "" },
+                        d.ran_us, d.sw, d.cpu);
                 crate::print!("stat:     ");
                 for j in 0..(d.n as usize).min(crate::netsys::DL_DUMP_EV) {
                     let e = d.ev[j];
                     let dt = e.tsc.wrapping_sub(d.dl);
-                    let (sg, us) = if dt < (1u64 << 62) { ("+", dt.saturating_mul(1_000_000) / hz) } else { ("-", d.dl.wrapping_sub(e.tsc).saturating_mul(1_000_000) / hz) };
-                    let why = match e.why & 0x7f { 1 => "hint", 2 => "a foreign hint->rotation", 3 => "rotation", 4 => "stay:lock", 5 => "stay:nobody", 6 => "stay:interception", 7 => "steal", 8 => "stay:it ran little", 9 => "stay:a request in progress", _ => "?" };
+                    let (sg, us) = if dt < (1u64 << 62) { ("+", dt.saturating_mul(1_000_000) / hz) } else { ("-",
+                        d.dl.wrapping_sub(e.tsc).saturating_mul(1_000_000) / hz) };
+                    let why = match e.why & 0x7f { 1 => "hint", 2 => "a foreign hint->rotation", 3 => "rotation", 4 => "stay:lock", 5 => "stay:nobody",
+                        6 => "stay:interception", 7 => "steal", 8 => "stay:it ran little", 9 => "stay:a request in progress", _ => "?" };
                     crate::print!("[{}{} {} t{}->t{} {}", sg, us, if e.why & 0x80 != 0 { "tick" } else { "yield" }, e.from, e.to, why);
                     if e.hint != 255 { crate::print!(" h:t{}", e.hint); }
                     // Where the tick caught the interrupted task: ring 3 or an address in the kernel.
@@ -424,7 +450,8 @@ pub fn dump() {
                     for j in 0..n.min(crate::netsys::DL_DUMP_PH) {
                         let e = ev[j];
                         let dt = e.tsc.wrapping_sub(d.dl);
-                        let (sg, us) = if dt < (1u64 << 62) { ("+", dt.saturating_mul(1_000_000) / hz) } else { ("-", d.dl.wrapping_sub(e.tsc).saturating_mul(1_000_000) / hz) };
+                        let (sg, us) = if dt < (1u64 << 62) { ("+", dt.saturating_mul(1_000_000) / hz) } else { ("-",
+                            d.dl.wrapping_sub(e.tsc).saturating_mul(1_000_000) / hz) };
                         crate::print!(" [{}{} {}", sg, us, crate::netsys::PH_NAMES[(e.ph as usize).min(crate::netsys::PH_NAMES.len() - 1)]);
                         if e.n > 1 { crate::print!("x{}", e.n); }
                         crate::print!("]");
@@ -472,7 +499,8 @@ pub fn dump() {
             let us = |c: u64| c.saturating_mul(1_000_000) / hz;
             let c = crate::netsys::NET_CONT.load(R);
             let h = &crate::netsys::NET_HELD_HIST;
-            crate::println!("stat: the stack's lock: takes {}, with a wait {} ({}%), we waited {} ms, we held {} ms (the worst {} us); holds <10 us {}, <100 us {}, <1 ms {}, >=1 ms {}",
+            crate::println!("stat: the stack's lock: takes {}, with a wait {} ({}%), we waited {} ms, we held {} ms (the worst {} us); holds <10 us {}, <100 \
+                us {}, <1 ms {}, >=1 ms {}",
                 t, c, c * 100 / t, ms(crate::netsys::NET_WAIT_TSC.load(R)),
                 ms(crate::netsys::NET_HELD_TSC.load(R)), us(crate::netsys::NET_HELD_MAX.load(R)),
                 h[0].load(R), h[1].load(R), h[2].load(R), h[3].load(R));
@@ -524,7 +552,8 @@ pub fn dump() {
         let (ok, lost, w, pin, run) = (crate::netsys::PULL_OK.load(R), crate::netsys::PULL_LOST.load(R),
             crate::netsys::PULL_SKIP_WAITER.load(R), crate::netsys::PULL_SKIP_PIN.load(R), crate::netsys::PULL_SKIP_RUN.load(R));
         if crate::netsys::WAKEPULL.load(R) || ok + lost + w + pin + run != 0 {
-            crate::println!("stat: the pull of a ready thread by a waiter: took {} (of them for the sake of the balance {}), backed off {} (the scheduler had already entered), did not take: on its core there is a network waiter {}, the affinity {}, already executing {}",
+            crate::println!("stat: the pull of a ready thread by a waiter: took {} (of them for the sake of the balance {}), backed off {} (the scheduler had \
+                already entered), did not take: on its core there is a network waiter {}, the affinity {}, already executing {}",
                 ok, crate::netsys::PULL_BAL.load(R), lost, w, pin, run);
         }
     }
@@ -567,7 +596,8 @@ pub fn dump() {
             if dt != 0 {
                 // Waiting for THE DEVICE is separated from waiting for a state: what used to stand
                 // on the FS lock has moved here (see ext2::dev_barrier).
-                crate::println!("stat: the device's lock: takes {}, with a wait {} ({}%), we waited {} ms, longer than a second {}, bypasses from a panic {}, foreign ones on the owner's core {}, the owner moved {}, the waiter gave up the core {}; the FS lock was released to the disk {} times",
+                crate::println!("stat: the device's lock: takes {}, with a wait {} ({}%), we waited {} ms, longer than a second {}, bypasses from a panic {}, \
+                    foreign ones on the owner's core {}, the owner moved {}, the waiter gave up the core {}; the FS lock was released to the disk {} times",
                     dt, crate::fs::DEV_CONT.load(R), crate::fs::DEV_CONT.load(R) * 100 / dt,
                     ms(crate::fs::DEV_WAIT_TSC.load(R)),
                     crate::fs::DEV_TIMEOUT.load(R), crate::fs::DEV_BYPASS.load(R),
@@ -581,7 +611,8 @@ pub fn dump() {
                     crate::fs::IO_LOST.load(R), crate::fs::FLUSH_LOST.load(R));
                 let wf = crate::fs::WRITE_FAILED.load(R);
                 if rt | rb | ft | fb | lost | fl | wf != 0 {
-                    crate::println!("stat: A DISK DEFECT: the ring's lock longer than a second {} (bypasses {}), a barrier longer than 30 s {} (bypasses {}), commands lost {}, of them barriers {}, refusals of a write/barrier {} (the FS is read-only)",
+                    crate::println!("stat: A DISK DEFECT: the ring's lock longer than a second {} (bypasses {}), a barrier longer than 30 s {} (bypasses {}), \
+                        commands lost {}, of them barriers {}, refusals of a write/barrier {} (the FS is read-only)",
                         rt, rb, ft, fb, lost, fl, wf);
                 }
             }
@@ -598,7 +629,8 @@ pub fn dump() {
                 // there are still two barriers per transaction.
                 let fua = crate::fs::DEV_FUA_N.load(R);
                 let nc = crate::fs::DEV_FL_NOCACHE.load(R);
-                if fua != 0 { crate::println!("stat: the disk: durable FUA writes {} (instead of the transaction's second barrier; {} us each, the worst {} us)", fua,
+                if fua != 0 { crate::println!("stat: the disk: durable FUA writes {} (instead of the transaction's second barrier; {} us each, the worst {} \
+                    us)", fua,
                     us(crate::fs::DEV_FUA_TSC.load(R)) / fua, us(crate::fs::DEV_FUA_MAX.load(R))); }
                 let plain = crate::fs::DEV_DUR_PLAIN_N.load(R);
                 if plain != 0 { crate::println!("stat: the disk: durable writes by an ORDINARY write {} (VWC=0 — FUA is superfluous)", plain); }
@@ -620,9 +652,11 @@ pub fn dump() {
             // blocks, a barrier's is in the disk's round-trip latency, and one cannot be seen through
             // the other by the number of blocks.
             let (ra_n, ra_extra) = crate::ext2::ra_stats();
-            crate::println!("stat: the FS: {} blocks read, {} written ({} ranges), device barriers {}, readaheads {} (+{} blocks); reads from a hole (as zeroes) {}, shortened by the end of the file {}, past the end {}",
+            crate::println!("stat: the FS: {} blocks read, {} written ({} ranges), device barriers {}, readaheads {} (+{} blocks); reads from a hole (as \
+                zeroes) {}, shortened by the end of the file {}, past the end {}",
                 rd, wr, runs, flush, ra_n, ra_extra,
-                crate::ext2::RD_HOLE.load(core::sync::atomic::Ordering::Relaxed), crate::ext2::RD_SHORT.load(core::sync::atomic::Ordering::Relaxed), crate::ext2::RD_PAST_EOF.load(core::sync::atomic::Ordering::Relaxed));
+                crate::ext2::RD_HOLE.load(core::sync::atomic::Ordering::Relaxed), crate::ext2::RD_SHORT.load(core::sync::atomic::Ordering::Relaxed),
+                    crate::ext2::RD_PAST_EOF.load(core::sync::atomic::Ordering::Relaxed));
         }
     }
     {   let (takes, cont, wait_us, held_us, to, alien, yields) = crate::ext2::lock_stats();
@@ -632,7 +666,8 @@ pub fn dump() {
             // section WAS PREEMPTED and the owner was carried to another core. While the
             // recursion was recognised by the core number, the first one was an entry into ext2
             // WITHOUT the lock, and the second one an eternal wait for oneself (see `fs_lock`).
-            crate::println!("stat: the FS lock: takes {}, with a wait {} ({}%), we waited {} ms, we held {} ms; longer than a second {}, foreign entries {}, moves of the owner {}, gave up the core {}",
+            crate::println!("stat: the FS lock: takes {}, with a wait {} ({}%), we waited {} ms, we held {} ms; longer than a second {}, foreign entries {}, \
+                moves of the owner {}, gave up the core {}",
                 takes, cont, cont * 100 / takes, wait_us / 1000, held_us / 1000, to, alien,
                 crate::ext2::FS_RECUR_MIGRATED.load(core::sync::atomic::Ordering::Relaxed), yields);
             // The flush of dirty blocks WITHOUT the FS lock (§8.6-8.7): portions are the departures to
@@ -640,7 +675,8 @@ pub fn dump() {
             // flushed by itself (more than a quarter of the cache is dirty), we waited for the device is
             // how many times the device was busy with a foreign core at the moment of the flush.
             let (chunks, bal, devwait) = crate::ext2::wb_stats();
-            crate::println!("stat: the flush without the lock: portions {}, the balance {}, we waited for the device {}, handoffs {}", chunks, bal, devwait, crate::fs::dev_handoffs());
+            crate::println!("stat: the flush without the lock: portions {}, the balance {}, we waited for the device {}, handoffs {}", chunks, bal, devwait,
+                crate::fs::dev_handoffs());
             // §8.14 THE EVICTION OF A DIRTY SLOT. A miss whose candidate is dirty
             // costs a synchronous write under the FS lock — that is the half-millisecond
             // scale on which `insert` loses (class B of scoreboard 35).
@@ -654,14 +690,18 @@ pub fn dump() {
                 if runs > 0 || meta > 0 {
                     let hz = crate::tsc::calibrate_cached().max(1);
                     let us = |c: u64| c.saturating_mul(1_000_000) / hz;
-                    crate::println!("stat: the eviction of slots: blocks {} over {} requests ({} blocks per request), {} us in total ({} us per request, the worst {}); commits for the metadata {}",
+                    crate::println!("stat: the eviction of slots: blocks {} over {} requests ({} blocks per request), {} us in total ({} us per request, the \
+                        worst {}); commits for the metadata {}",
                         blk, runs, if runs > 0 { blk / runs } else { 0 }, us(tsc),
                         if runs > 0 { us(tsc) / runs } else { 0 }, us(mx), meta);
                 }
             }
             let (tx, ck, b) = crate::ext2::barrier_stats();
-            crate::println!("stat: the journal: transactions {}, checkpoints {} (copies from the journal {}); barriers: the data {}, the transaction {}, the checkpoint {}, the journal's superblock {}, the recover flag {}, others {}; journal bypasses {}, we waited for a foreign transaction longer than the diagnosis threshold {}",
-                tx, ck, crate::ext2::ckpt_old(), b[0], b[1], b[2], b[3], b[4], b[5], crate::ext2::JRN_BYPASS.load(core::sync::atomic::Ordering::Relaxed), crate::ext2::JRN_LONGWAIT.load(core::sync::atomic::Ordering::Relaxed));
+            crate::println!("stat: the journal: transactions {}, checkpoints {} (copies from the journal {}); barriers: the data {}, the transaction {}, the \
+                checkpoint {}, the journal's superblock {}, the recover flag {}, others {}; journal bypasses {}, we waited for a foreign transaction longer \
+                than the diagnosis threshold {}",
+                tx, ck, crate::ext2::ckpt_old(), b[0], b[1], b[2], b[3], b[4], b[5], crate::ext2::JRN_BYPASS.load(core::sync::atomic::Ordering::Relaxed),
+                    crate::ext2::JRN_LONGWAIT.load(core::sync::atomic::Ordering::Relaxed));
             // STEP 2 OF SESSION 39: THE INSTRUMENT BEFORE THE KNOB. Before introducing a pre-emptive
             // flush BY THE AGE of the dirty data (like `dirty_expire_centisecs`), one must
             // know two numbers: how many data blocks there are per fsync call
@@ -684,14 +724,16 @@ pub fn dump() {
                 for i in 0..crate::ext2::WBC_N {
                     let (an, ab, asum, amax) = crate::ext2::wbage_stats_of(i);
                     if ab == 0 { continue; }
-                    crate::println!("stat: the age of the dirty data at the flush, the population {}: portions {}, blocks {}, the average {} us, the worst {} us",
+                    crate::println!("stat: the age of the dirty data at the flush, the population {}: portions {}, blocks {}, the average {} us, the worst {} \
+                        us",
                         crate::ext2::WBC_NAMES[i], an, ab, asum / ab, amax);
                 }
                 // STEP 1 OF SESSION 41: the smearing must be judged by the WORST flush rather
                 // than by the average one: the price is paid by the thread that got under the kick.
                 let (af, ablk, amx, ask) = crate::ext2::age_stats();
                 if af > 0 || ask > 0 {
-                    crate::println!("stat: the pre-emptive flush by age: {} times, {} blocks ({} per time, THE WORST {}), kicks without a pass over the cache {}",
+                    crate::println!("stat: the pre-emptive flush by age: {} times, {} blocks ({} per time, THE WORST {}), kicks without a pass over the cache \
+                        {}",
                         af, ablk, ablk / af.max(1), amx, ask);
                 }
                 let (an, ab, asum, amax) = crate::ext2::wbage_stats();
@@ -728,7 +770,8 @@ pub fn dump() {
                     let n = ph.n.load(Relaxed);
                     if n == 0 { continue; }
                     if !any { crate::print!("stat: fsync by phases:"); any = true; }
-                    crate::print!(" {} {} ({} us each, the worst {});", crate::ext2::FSYNC_PH_NAMES[i], n, us(ph.tsc.load(Relaxed)) / n, us(ph.max.load(Relaxed)));
+                    crate::print!(" {} {} ({} us each, the worst {});", crate::ext2::FSYNC_PH_NAMES[i], n, us(ph.tsc.load(Relaxed)) / n,
+                        us(ph.max.load(Relaxed)));
                 }
                 if any { crate::println!(""); }
                 // WHO IS THE CRITICAL PATH IN THE JOURNAL'S BATCH — THE DATA OR THE COPIES.
@@ -739,7 +782,8 @@ pub fn dump() {
                 let aw = crate::fs::ABSW_N.load(Relaxed);
                 if aw > 0 {
                     let (dt, ot) = (crate::fs::ABSW_DATA_TSC.load(Relaxed), crate::fs::ABSW_OWN_TSC.load(Relaxed));
-                    crate::println!("stat: the journal's batch waited for two {} times: the deferred DATA {} us (the worst {}), its own COPIES {} us (the worst {}) — the critical path is {}",
+                    crate::println!("stat: the journal's batch waited for two {} times: the deferred DATA {} us (the worst {}), its own COPIES {} us (the \
+                        worst {}) — the critical path is {}",
                         aw, us(dt) / aw, us(crate::fs::ABSW_DATA_MAX.load(Relaxed)),
                         us(ot) / aw, us(crate::fs::ABSW_OWN_MAX.load(Relaxed)),
                         if dt > ot { "THE DATA (an async commit will not help)" } else { "the copies (an async commit will take them off the chain)" });
@@ -752,7 +796,8 @@ pub fn dump() {
                 }
                 let fw = crate::ext2::FALLOC_WIN.load(Relaxed);
                 if fw > 0 {
-                    crate::println!("stat: a long write: preemption windows {}, of them the core was given to a ready thread {}", fw, crate::ext2::FALLOC_YIELD.load(Relaxed));
+                    crate::println!("stat: a long write: preemption windows {}, of them the core was given to a ready thread {}", fw,
+                        crate::ext2::FALLOC_YIELD.load(Relaxed));
                 }
                 // The interrupt window while waiting for the device (`talaria.iowin=`): how many
                 // times a tick managed to arrive instead of a spin with IF=0 and how many times the window was
@@ -781,10 +826,12 @@ pub fn dump() {
             crate::println!("stat:   exits {}, of them having slept {}, by \"the task is dead\" {}; an exact deadline: under a tick {}, an LVT loan {}",
                 crate::sync::W_EXIT.load(Relaxed), crate::sync::W_SLEPT.load(Relaxed), crate::sync::W_DEAD.load(Relaxed),
                 crate::sync::W_DL_TICK.load(Relaxed), crate::sync::W_DL_BORROW.load(Relaxed));
-            crate::println!("stat:   the delivery of wakeups: by a write {}, its own core {}, an IPI reschedule (a sleeping one {}, the threshold {}, a long tick {}), a kick {}, the BSP {}, by a call {}",
+            crate::println!("stat:   the delivery of wakeups: by a write {}, its own core {}, an IPI reschedule (a sleeping one {}, the threshold {}, a long \
+                tick {}), a kick {}, the BSP {}, by a call {}",
                 crate::sync::WK_STORE.load(Relaxed), crate::sync::WK_SAME.load(Relaxed),
                 crate::sync::WK_RESCHED_IDLE.load(Relaxed), crate::sync::WK_RESCHED_BUSY.load(Relaxed),
-                crate::sync::WK_RESCHED_LONG.load(Relaxed), crate::sync::WK_KICK.load(Relaxed), crate::sync::WK_BSP.load(Relaxed), crate::sync::WK_BELL.load(Relaxed));
+                crate::sync::WK_RESCHED_LONG.load(Relaxed), crate::sync::WK_KICK.load(Relaxed), crate::sync::WK_BSP.load(Relaxed),
+                    crate::sync::WK_BELL.load(Relaxed));
         }
         let names = ["WAIT", "WAKE", "FD", "REQUEUE", "CMP_REQUEUE", "WAKE_OP", "LOCK_PI",
                      "UNLOCK_PI", "TRYLOCK_PI", "WAIT_BITSET", "WAKE_BITSET", "?11", "?12", "?13", "?14", "?15"];
@@ -882,12 +929,14 @@ pub fn top_tasks() {
             if ns == 0 { continue; }
             crate::sched::tick_gap_reset(c);
             let n = &crate::sched::GAP_N[c];
-            crate::println!("stat:   the tick's gap on core {} since the previous block: the worst {} us (it ended at {} ms, on the core t{} \"{}\", the tick's rip {:#x} ring{}); gaps in total >=1 ms {}, >=4 ms {}, >=16 ms {}",
+            crate::println!("stat:   the tick's gap on core {} since the previous block: the worst {} us (it ended at {} ms, on the core t{} \"{}\", the \
+                tick's rip {:#x} ring{}); gaps in total >=1 ms {}, >=4 ms {}, >=16 ms {}",
                 c, ns / 1000, end_ms, t, crate::obs::comm(t as usize).as_str(),
                 rip & 0x7FFF_FFFF_FFFF_FFFF, if rip >> 63 != 0 { 3 } else { 0 },
                 n[0].load(Relaxed), n[1].load(Relaxed), n[2].load(Relaxed));
             let ago = |x: u64| -> i64 { if x == u64::MAX { -1 } else { (x / 1000) as i64 } };
-            crate::println!("stat:     the task's last syscall: #{} from rip {:#x} arg0={:#x}; it entered {} us before the end of the gap, it left {} us before the end (-1 — there is no stamp){}",
+            crate::println!("stat:     the task's last syscall: #{} from rip {:#x} arg0={:#x}; it entered {} us before the end of the gap, it left {} us \
+                before the end (-1 — there is no stamp){}",
                 sys >> 48, sys & 0xFFFF_FFFF_FFFF, a0, ago(sin), ago(sout),
                 if sin != u64::MAX && sin >= ns { " — THE SYSCALL COVERED THE GAP ENTIRELY (the kernel under IF=0)" } else { "" });
             // WHOSE GAP IT IS. "The syscall covered the gap entirely" is written even when
@@ -895,7 +944,8 @@ pub fn top_tasks() {
             // the syscall was going on all right. Only steal tells them apart (see `tick_gap_host`).
             if crate::smp::steal_on() {
                 let (hns, hn, hsum) = crate::sched::tick_gap_host(c);
-                crate::println!("stat:     of it the host took {} us ({}% of the gap); gaps >=1 ms where it took more than half: {}, taken in the gaps in total {} ms",
+                crate::println!("stat:     of it the host took {} us ({}% of the gap); gaps >=1 ms where it took more than half: {}, taken in the gaps in \
+                    total {} ms",
                     hns / 1000, hns.saturating_mul(100) / ns.max(1), hn, hsum / 1_000_000);
             }
         }

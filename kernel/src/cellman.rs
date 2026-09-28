@@ -612,7 +612,8 @@ pub fn apply_tuning(m: &CellManifest) {
     }
     if m.stealpush >= 0 {
         crate::sched::STEAL_PUSH.store(m.stealpush != 0, SeqCst);
-        crate::println!("manifest: the stealing push is {}", if m.stealpush != 0 { "on: a donor at the tick gives a spare ready task to an empty neighbour" } else { "off" });
+        crate::println!("manifest: the stealing push is {}", if m.stealpush != 0 { "on: a donor at the tick gives a spare ready task to an empty neighbour" }
+            else { "off" });
     }
     // The block cache comes last: it is the only one that REALLOCATES memory, and that
     // can be done only from scratch (see ext2::cache_resize). A refusal is printed there too.
@@ -695,7 +696,9 @@ b"# cell manifest\nbinary=/mdpipe\nargs=mdpipe --replay /feed.bin\nrestart=5\nco
     // and the target is a core number / dedicated / the shared pool. Plus a deliberately broken line:
     // it must be counted rather than swallowed.
     const SAMPLE2: &[u8] =
-b"binary=/app\npin=main:dedicated\npin=rx*:dedicated\npin=*worker*:shared\npin=logger:3\npin=broken\nspread=off\nnuma=off\nhuge=2\nslice=300000\nidleslice=700\nnetslice=50\nwakepreempt=90000\nfscache=48\nreadahead=16\nnetyield=off\nstealpush=on\n";
+b"binary=/app\npin=main:dedicated\npin=rx*:dedicated\npin=*worker*:shared\npin=logger:3\npin=broken\n\
+  spread=off\nnuma=off\nhuge=2\nslice=300000\nidleslice=700\nnetslice=50\n\
+  wakepreempt=90000\nfscache=48\nreadahead=16\nnetyield=off\nstealpush=on\n";
     fn puts(s: &[u8]) { for &b in s { crate::serial::putb(b); } }
     let m = parse(SAMPLE);
     puts(b"manifest: binary=");

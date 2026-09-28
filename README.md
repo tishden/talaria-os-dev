@@ -61,6 +61,8 @@ Requirements: Linux with `/dev/kvm`, docker, rustup (the kernel toolchain is
 pinned in `kernel/rust-toolchain.toml` and installs itself).
 
 ```sh
+# the sources
+git clone https://github.com/tishden/talaria-os-dev.git && cd talaria-os-dev
 # 0) toolchain images (docker): QEMU stand, musl, Alpine build
 services/docker/build-images.sh
 # 1) ring-3 test binaries and the regression disk
@@ -96,14 +98,14 @@ qemu ... -append "console=ttyS0 talaria.mode=cell" -drive file=disk.img,...
 | `docs/BARE-METAL.md` | what QEMU hides: pitfalls of real machines and how to diagnose them |
 | `docs/talaria-os.html` | design document TAL-RFC-001 (motivation, prior art, architecture) |
 | `docs/GLOSSARY.md` | the words this repository uses in one fixed sense (cell, gate, stand, knob, scoreboard, rise, band) |
-| `CHANGELOG.md` | release history |
+| `CHANGELOG.md` | release history (in Russian — it is a working journal too) |
 
 Everything else under `docs/` is the WORKING JOURNAL of the sessions this system
 was built in — the measurements, the dead ends and the reasons
-(`POC-RESULTS`, `PLAN-*`, `TABLO-*`, `FSYNC-*`, `SCHED-*`, `TODO.md`). It is
-published as it was written, in Russian: its value is in the detail, and a
-translation would cost exactly that. The documents in the table above are the
-ones a user needs, and they are in English.
+(`POC-RESULTS`, `PLAN-*`, `TABLO-*`, `FSYNC-*`, `SCHED-*`, `TODO.md`), and so is
+`CHANGELOG.md`. They are published as they were written, in Russian: their value
+is in the detail, and a translation would cost exactly that. The guides in the
+table above are the ones a user needs, and they are in English.
 
 ## Repository layout
 
@@ -124,8 +126,10 @@ ones a user needs, and they are in English.
 
 ## Contributing, security, support
 
-See `CONTRIBUTING.md` (contributions require a CLA), `SECURITY.md` and
-`SUPPORT.md`. Commercial support is available by separate agreement.
+The repository is <https://github.com/tishden/talaria-os-dev>: issues and pull
+requests go there. See `CONTRIBUTING.md` (contributions require a CLA),
+`SECURITY.md` and `SUPPORT.md`. Commercial support is available by separate
+agreement.
 
 ## License
 

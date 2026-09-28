@@ -134,7 +134,8 @@ fn save(path: &[u8]) -> bool {
     let n = nl();
     for i in 0..n {
         let l = llen(i);
-        if l > 0 { let w = crate::ext2::write(h, line(i).as_ptr(), l); if w < 0 { crate::ext2::close(h); msg("a write error"); return false; } total += w as usize; }
+        if l > 0 { let w = crate::ext2::write(h, line(i).as_ptr(), l); if w < 0 { crate::ext2::close(h); msg("a write error"); return false; }
+            total += w as usize; }
         let last = i + 1 == n;
         if !last || unsafe { FINAL_NL } {
             let nlb = b'\n';
@@ -502,7 +503,8 @@ fn leave() {
 /// the operator feeds them by — through the handlers rather than past them.
 pub fn selftest() -> bool {
     let mut ok = true;
-    let mut check = |c: bool, what: &str| { if !c { crate::println!("edit-test: FAIL {}", what); ok = false; } else { crate::println!("edit-test: ok {}", what); } };
+    let mut check = |c: bool, what: &str| { if !c { crate::println!("edit-test: FAIL {}", what); ok = false; } else { crate::println!("edit-test: ok {}", what);
+        } };
     // prepare the file
     const O_WRONLY: u64 = 1; const O_CREAT: u64 = 0o100; const O_TRUNC: u64 = 0o1000;
     let h = crate::ext2::open(b"/edit.txt", O_CREAT | O_TRUNC | O_WRONLY, 0o644);

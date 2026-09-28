@@ -449,8 +449,10 @@ pub fn sync_fs() {
     let ms = crate::tsc::rdtsc().wrapping_sub(t0) / (crate::tsc::hz().max(1) / 1000).max(1);
     use core::sync::atomic::Ordering::Relaxed as R;
     let us = |t: u64| t / (crate::tsc::hz().max(1) / 1_000_000).max(1);
-    crate::println!("acpi: the FS has been synchronised (there were {} dirty blocks, {} ms; writes {} — {} us, barriers {} — {} us, the worst {} us)", dirty, ms,
-        crate::fs::DEV_WR_N.load(R), us(crate::fs::DEV_WR_TSC.load(R)), crate::fs::DEV_FL_N.load(R), us(crate::fs::DEV_FL_TSC.load(R)), us(crate::fs::DEV_FL_MAX.load(R)));
+    crate::println!("acpi: the FS has been synchronised (there were {} dirty blocks, {} ms; writes {} — {} us, barriers {} — {} us, the worst {} us)", dirty,
+        ms,
+        crate::fs::DEV_WR_N.load(R), us(crate::fs::DEV_WR_TSC.load(R)), crate::fs::DEV_FL_N.load(R), us(crate::fs::DEV_FL_TSC.load(R)),
+            us(crate::fs::DEV_FL_MAX.load(R)));
 }
 
 /// The entry point: rsdp_paddr from the start_info (0 — silently nothing).

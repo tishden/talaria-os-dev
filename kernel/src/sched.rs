@@ -149,7 +149,8 @@ static STOP_SENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBoo
 /// Put a process's AS into the queue for freeing (all its tasks are already DEAD).
 // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it touches,
 // and what crosses cores is atomic (see the module's note).
-pub fn queue_dead_space(cr3: u64) { if cr3 == 0 { return; } unsafe { for i in 0..NTASKS { if DEAD_AS[i] == cr3 { return; } } for i in 0..NTASKS { if DEAD_AS[i] == 0 { DEAD_AS[i] = cr3; return; } } } }
+pub fn queue_dead_space(cr3: u64) { if cr3 == 0 { return; } unsafe { for i in 0..NTASKS { if DEAD_AS[i] == cr3 { return; } } for i in 0..NTASKS {
+    if DEAD_AS[i] == 0 { DEAD_AS[i] = cr3; return; } } } }
 /// The CR3 loaded on an AP — as the core itself publishes it. The second value is
 /// the former CR3 while the switch has not certainly finished (the stub changes CR3
 /// AFTER the scheduler has chosen the target): it is removed at the next entry into
@@ -201,7 +202,8 @@ unsafe fn reap_dead_spaces(active_cr3: u64) {
             // The first cases go out loud: otherwise by the log one cannot tell "the protection is not needed"
             // from "the protection did not work".
             let k = AS_AP_DEFER.fetch_add(1, Ordering::Relaxed);
-            if k < 3 { crate::println!("sched: the freeing of the AS {:#x} is deferred — its tables are held by an AP (the idling one has been taken onto the kernel's CR3)", cr3); }
+            if k < 3 { crate::println!("sched: the freeing of the AS {:#x} is deferred — its tables are held by an AP (the idling one has been taken onto the \
+                kernel's CR3)", cr3); }
             continue;
         }
         // not a single live task must use this CR3
@@ -744,7 +746,8 @@ pub fn ctx_enter(t: usize, cpu: usize, sp: u64) {
     if !CTX_FRESH[t].swap(false, Ordering::SeqCst) {
         let n = CTX_STALE.fetch_add(1, Ordering::Relaxed);
         if n < 4 {
-            crate::println!("sched: AN ENTRY INTO A USED FRAME t{} by core {} (the previous entry was by core {}): rsp={:#x} rip={:#x} cs={:#x} rflags={:#x} CPU_OF={} AP_TAKEN={} CURRENT={} syscall #{}",
+            crate::println!("sched: AN ENTRY INTO A USED FRAME t{} by core {} (the previous entry was by core {}): rsp={:#x} rip={:#x} cs={:#x} rflags={:#x} \
+                CPU_OF={} AP_TAKEN={} CURRENT={} syscall #{}",
                 t, cpu, prev, sp, rip, cs, rfl, CPU_OF[t].load(Ordering::Relaxed), AP_TAKEN[t].load(Ordering::Relaxed),
                 CURRENT.load(Ordering::Relaxed), crate::syscall::LAST_SYS[t].load(Ordering::Relaxed) >> 48);
         }
@@ -752,7 +755,8 @@ pub fn ctx_enter(t: usize, cpu: usize, sp: u64) {
     if (cs != 0x8 && cs != 0x2B) || rfl & 2 == 0 || rfl >> 22 != 0 {
         let n = CTX_BAD.fetch_add(1, Ordering::Relaxed);
         if n < 4 {
-            crate::println!("sched: AT THE ADDRESS RSP[t{}] THERE IS NO FRAME (the entry is by core {}, the previous entry was by core {}): rsp={:#x} rip={:#x} cs={:#x} rflags={:#x} kstack={:#x} syscall #{}",
+            crate::println!("sched: AT THE ADDRESS RSP[t{}] THERE IS NO FRAME (the entry is by core {}, the previous entry was by core {}): rsp={:#x} \
+                rip={:#x} cs={:#x} rflags={:#x} kstack={:#x} syscall #{}",
                 // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose
                 // row it touches, and what crosses cores is atomic (see the module's note).
                 t, cpu, prev, sp, rip, cs, rfl, unsafe { KSTACK[t] }, crate::syscall::LAST_SYS[t].load(Ordering::Relaxed) >> 48);
@@ -1266,7 +1270,8 @@ static GAP_RIP: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU];   /
 static GAP_SYS: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU];   // the task's LAST_SYS (nr<<48|rip)
 static GAP_ARG0: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU];
 static GAP_SYS_IN: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU];  // the syscall's entry: ns before the end of the gap
-static GAP_SYS_OUT: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU]; // the syscall's exit: ns before the end of the gap (u64::MAX — it has not left yet)
+// the syscall's exit: ns before the end of the gap (u64::MAX — it has not left yet)
+static GAP_SYS_OUT: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU];
 /// The gaps longer than 1 / 4 / 16 ms on a busy core (idling does not count: there the tick
 /// is lengthened on purpose, see `IDLESLICE_NS`).
 pub static GAP_N: [[AtomicU64; 3]; MAXCPU] = [const { [const { AtomicU64::new(0) }; 3] }; MAXCPU];
@@ -1493,6 +1498,8 @@ pub static RQ_MAX_TASK: AtomicU64 = AtomicU64::new(u64::MAX);
 /// nobody: the core stood in a hlt, the wakeup was lost) and how many switches
 /// that core made during the wait (zero — the core did not switch at all).
 pub static RQ_MAX_AT_MS: AtomicU64 = AtomicU64::new(0);
+// the low 16 bits — the task on the core at the moment of readiness (0xFFFF —
+// idle), the higher ones — the core's switches during the wait
 pub static RQ_MAX_CTX: AtomicU64 = AtomicU64::new(0);
 /// THE LATEST DECISIONS OF THE WAITER'S CORE before the worst interval ended
 /// (session 32, goal 2). The line `at the moment of readiness the core was executing t10, 4 switches`
@@ -1504,7 +1511,7 @@ pub static RQ_MAX_CTX: AtomicU64 = AtomicU64::new(0);
 pub const RQ_MAX_EV_US: u64 = 10_000;
 pub const RQ_MAX_EV_N: usize = 8;
 pub static mut RQ_MAX_EV: [SchedEv; RQ_MAX_EV_N] = [SEV0; RQ_MAX_EV_N];
-pub static RQ_MAX_EV_N_GOT: AtomicU64 = AtomicU64::new(0);      // the low 16 bits — the task on the core at the moment of readiness (0xFFFF — idle), the higher ones — the core's switches during the wait
+pub static RQ_MAX_EV_N_GOT: AtomicU64 = AtomicU64::new(0);
 /// A snapshot at the moment of readiness: the task on the waiter's core | (the core's switch counter << 16).
 static READY_CTX: [AtomicU64; NTASKS] = [const { AtomicU64::new(0) }; NTASKS];
 #[inline]
@@ -1613,8 +1620,10 @@ fn note_run_start(t: usize) {
 /// everything by which the scheduler decides whether to take it or not.
 /// A SNAPSHOT OF A CORE BY AN NMI (see `dump_cores`): the NMI handler only writes here,
 /// the printing is done by the core that asked. `seq` grows at every snapshot.
-pub struct NmiSnap { pub seq: AtomicU64, pub rip: AtomicU64, pub cs: AtomicU64, pub rflags: AtomicU64, pub rsp: AtomicU64, pub task: AtomicU64, pub stack: [AtomicU64; 12] }
-pub static NMI_SNAP: [NmiSnap; MAXCPU] = [const { NmiSnap { seq: AtomicU64::new(0), rip: AtomicU64::new(0), cs: AtomicU64::new(0), rflags: AtomicU64::new(0), rsp: AtomicU64::new(0), task: AtomicU64::new(0), stack: [const { AtomicU64::new(0) }; 12] } }; MAXCPU];
+pub struct NmiSnap { pub seq: AtomicU64, pub rip: AtomicU64, pub cs: AtomicU64, pub rflags: AtomicU64, pub rsp: AtomicU64, pub task: AtomicU64,
+    pub stack: [AtomicU64; 12] }
+pub static NMI_SNAP: [NmiSnap; MAXCPU] = [const { NmiSnap { seq: AtomicU64::new(0), rip: AtomicU64::new(0), cs: AtomicU64::new(0), rflags: AtomicU64::new(0),
+    rsp: AtomicU64::new(0), task: AtomicU64::new(0), stack: [const { AtomicU64::new(0) }; 12] } }; MAXCPU];
 /// From the NMI handler: remember where the core is (without printing and without locks).
 pub fn nmi_note(rip: u64, cs: u64, rflags: u64, rsp: u64) {
     let cpu = crate::percpu::cpu_id();
@@ -1635,10 +1644,12 @@ pub fn nmi_note(rip: u64, cs: u64, rflags: u64, rsp: u64) {
 pub fn dump_cores() {
     const STUCK_MS: u64 = 200;
     let hz = crate::tsc::calibrate_cached().max(1);
-    crate::println!("stat: a foreign stack at the entry into a task: we waited {} times, the worst {} ns, longer than 10 ms {}; the BSP's ticks in the move's window (a foreign CPU_OF with a live task) {}",
+    crate::println!("stat: a foreign stack at the entry into a task: we waited {} times, the worst {} ns, longer than 10 ms {}; the BSP's ticks in the move's \
+        window (a foreign CPU_OF with a live task) {}",
         STACK_WAITS.load(Ordering::Relaxed), STACK_WAIT_MAX_NS.load(Ordering::Relaxed), STACK_WAIT_LONG.load(Ordering::Relaxed),
         BSP_SAVE_FOREIGN.load(Ordering::Relaxed));
-    crate::println!("stat: the tasks' frames: entries into a used frame {}, non-frames at RSP[t] {}, ticks on the pickup loop's stack with a task {}; the mark was removed (the task moved away between the check and the swap) {}, a steal backed off before the BSP {}",
+    crate::println!("stat: the tasks' frames: entries into a used frame {}, non-frames at RSP[t] {}, ticks on the pickup loop's stack with a task {}; the mark \
+        was removed (the task moved away between the check and the swap) {}, a steal backed off before the BSP {}",
         CTX_STALE.load(Ordering::Relaxed), CTX_BAD.load(Ordering::Relaxed), LOOP_TICKS.load(Ordering::Relaxed),
         CLAIM_MOVED.load(Ordering::Relaxed), STEAL_BSP_BUSY.load(Ordering::Relaxed));
     let now = crate::tsc::rdtsc();
@@ -1670,7 +1681,8 @@ pub fn dump_cores() {
         let n = strace_take(c, now, 1, &mut ev);
         if n != 0 {
             let e = ev[0];
-            let why = match e.why & 0x7f { 1 => "hint", 2 => "a foreign hint->rotation", 3 => "rotation", 4 => "stay:lock", 5 => "stay:nobody", 6 => "stay:interception", 7 => "steal", 8 => "stay:it ran little", 9 => "stay:a request in progress", _ => "?" };
+            let why = match e.why & 0x7f { 1 => "hint", 2 => "a foreign hint->rotation", 3 => "rotation", 4 => "stay:lock", 5 => "stay:nobody",
+                6 => "stay:interception", 7 => "steal", 8 => "stay:it ran little", 9 => "stay:a request in progress", _ => "?" };
             crate::print!(", the decision {} us ago: {} t{}->t{} {}", us(now.wrapping_sub(e.tsc)),
                 if e.why & SW_TICK != 0 { "tick" } else { "yield" }, e.from, e.to, why);
             if e.why & SW_TICK != 0 { if e.rip == 3 { crate::print!(" @r3"); } else if e.rip != 0 { crate::print!(" @{:#x}", e.rip); } }
@@ -1705,7 +1717,8 @@ pub fn dump_cores() {
         if r == 0 || !task_alive(t) || running_on(t).is_some() { continue; }
         let ms = us(now.wrapping_sub(r)) / 1000;
         if ms < STUCK_MS { continue; }
-        crate::println!("stat: t{} \"{}\" is starving: it has been ready for {} ms, the core {}, AP_TAKEN={}, not_ready={}, runnable={}, the word={:#x}, IO_YIELD={}, PENDING={}",
+        crate::println!("stat: t{} \"{}\" is starving: it has been ready for {} ms, the core {}, AP_TAKEN={}, not_ready={}, runnable={}, the word={:#x}, \
+            IO_YIELD={}, PENDING={}",
             t, crate::obs::comm(t).as_str(), ms, cpu_of(t), AP_TAKEN[t].load(Ordering::Relaxed), not_ready(t),
             crate::sync::runnable_peek(t), crate::sync::waiting_on(t), IO_YIELD[t].load(Ordering::Relaxed), PENDING[t].load(Ordering::Relaxed));
     }
@@ -1908,7 +1921,8 @@ pub fn set_ppid(p: usize, pp: i32) { unsafe { PPID[p] = pp; } }
 /// The number of live tasks of the process p (the leader + the threads).
 // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it touches,
 // and what crosses cores is atomic (see the module's note).
-pub fn proc_task_count(p: usize) -> usize { let n = NREADY.load(Ordering::SeqCst); let mut c = 0; for i in 0..n { if unsafe { PROC[i] as usize == p && !DEAD[i] } { c += 1; } } c }
+pub fn proc_task_count(p: usize) -> usize { let n = NREADY.load(Ordering::SeqCst); let mut c = 0; for i in 0..n { if unsafe {
+    PROC[i] as usize == p && !DEAD[i] } { c += 1; } } c }
 
 /// wait4: find a finished (DEAD) unreaped task. want<0 — any; otherwise tid=want-1.
 /// It returns (tid, code) or None. It marks REAPED.
@@ -1990,7 +2004,8 @@ pub fn warn_no_tasks() {
     // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
     // touches, and what crosses cores is atomic (see the module's note).
     for t in 0..n { if unsafe { core::ptr::read_volatile(core::ptr::addr_of!(DEAD[t])) } { dead += 1; } else { live += 1; } }
-    crate::println!("sched: ATTENTION: the task table has run out ({} out of {}: live {}, dead-unreaped {}); fork/clone answer EAGAIN, refusals {}. The usual reason is that a process does not reap its children (wait/waitpid).",
+    crate::println!("sched: ATTENTION: the task table has run out ({} out of {}: live {}, dead-unreaped {}); fork/clone answer EAGAIN, refusals {}. The usual \
+        reason is that a process does not reap its children (wait/waitpid).",
         n, NTASKS, live, dead, TASKS_NONE.load(Ordering::Relaxed));
 }
 
@@ -2379,7 +2394,9 @@ pub fn reset() {
             // the kernel stacks of the crashed instance's tasks go into the free list (nobody executes on them:
             // reset is called by the supervisor after a longjmp, a cli, the timer is stopped)
             if KSTACK[i] != 0 && KSZ[i] != 0 { crate::mem::free_contig(KSTACK[i] - KSZ[i] * 4096, KSZ[i]); }
-            DEAD[i] = false; GONE[i] = false; EXITREG_OK[i] = false; REAPED[i] = false; CTID[i] = 0; CR3[i] = 0; HEAP_B[i] = 0; HEAP_BR[i] = 0; HEAP_TP[i] = 0; EXITCODE[i] = 0; KSTACK[i] = 0; KSZ[i] = 0; FSBASE[i] = 0; PROC[i] = i as u8; PPID[i] = -1; FPU_VALID[i] = false; DEAD_AS[i] = 0; CPU_OF[i].store(0, Ordering::SeqCst); AP_TAKEN[i].store(false, Ordering::SeqCst); COMM[i] = [0; 16]; }
+            DEAD[i] = false; GONE[i] = false; EXITREG_OK[i] = false; REAPED[i] = false; CTID[i] = 0; CR3[i] = 0; HEAP_B[i] = 0; HEAP_BR[i] = 0; HEAP_TP[i] = 0;
+                EXITCODE[i] = 0; KSTACK[i] = 0; KSZ[i] = 0; FSBASE[i] = 0; PROC[i] = i as u8; PPID[i] = -1; FPU_VALID[i] = false; DEAD_AS[i] = 0;
+                CPU_OF[i].store(0, Ordering::SeqCst); AP_TAKEN[i].store(false, Ordering::SeqCst); COMM[i] = [0; 16]; }
     }
     crate::percpu::set_sched_cr3(0);
     BSP_IDLE.store(false, Ordering::SeqCst);
@@ -2792,7 +2809,8 @@ fn rust_schedule_inner(cur_rsp: u64) -> u64 {
         let cs = unsafe { core::ptr::read_volatile((cur_rsp + 16 * 8) as *const u64) };
         // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
         // touches, and what crosses cores is atomic (see the module's note).
-        crate::println!("[sched] the tick {}: t{} rip={:#x} cs={:#x} live={}", tk + 1, cur0, rip, cs, { let mut c = 0; for i in 0..NREADY.load(Ordering::Relaxed) { if unsafe { !DEAD[i] } { c += 1; } } c });
+        crate::println!("[sched] the tick {}: t{} rip={:#x} cs={:#x} live={}", tk + 1, cur0, rip, cs, { let mut c = 0;
+            for i in 0..NREADY.load(Ordering::Relaxed) { if unsafe { !DEAD[i] } { c += 1; } } c });
         crate::sync::dump_waiters();
     }
     // The wall-clock discipline by an external clock. BEFORE the early return "there are no tasks":
@@ -3404,7 +3422,8 @@ fn ap_schedule(cpu: usize, cur_rsp: u64) -> u64 {
         crate::smp::retune_timer(crate::smp::want_period_ns(cpu, solo));
         if !solo { push_steal(cpu); }
     }
-    if hw_tick && cur != u64::MAX && (cur as usize) < NTASKS { TICKS_ON[cur as usize].fetch_add(1, Ordering::Relaxed); prof_note(cur_rsp); stuck_note(cpu, cur as usize, cur_rsp); }
+    if hw_tick && cur != u64::MAX && (cur as usize) < NTASKS { TICKS_ON[cur as usize].fetch_add(1, Ordering::Relaxed); prof_note(cur_rsp); stuck_note(cpu,
+        cur as usize, cur_rsp); }
     let n = NREADY.load(Ordering::SeqCst);
     // The core is idling in the pickup loop — there is nothing to switch (and it is NOT ALLOWED: cur_rsp
     // points at the loop's own stack rather than at a task's frame).

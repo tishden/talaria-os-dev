@@ -297,8 +297,10 @@ pub fn configure(m: &CellManifest) {
         if got != want {
             let lost = want & !cpus;
             let clash = want & taken;
-            if lost != 0 { crate::println!("sched-plan: ATTENTION — the pool has cores the machine does not have (the mask {:#x}) — they are discarded", lost); }
-            if clash != 0 { crate::println!("sched-plan: ATTENTION — the cores {:#x} are already given to another pool — they are discarded (the pools do not intersect)", clash); }
+            if lost != 0 { crate::println!("sched-plan: ATTENTION — the pool has cores the machine does not have (the mask {:#x}) — they are discarded", lost);
+                }
+            if clash != 0 { crate::println!("sched-plan: ATTENTION — the cores {:#x} are already given to another pool — they are discarded (the pools do not \
+                intersect)", clash); }
         }
         if got == 0 { crate::println!("sched-plan: ATTENTION — the pool has stayed EMPTY, its threads will go into the common pool"); got = 0; }
         taken |= got;
@@ -327,7 +329,8 @@ pub fn configure(m: &CellManifest) {
     CONFIGURED.store(true, Ordering::SeqCst);
     numa_init();
     if m.pin_bad != 0 {
-        crate::println!("sched-plan: ATTENTION — {} lines of pin= were not parsed and are NOT APPLIED (we expect <pattern>:<number|dedicated|shared>)", m.pin_bad);
+        crate::println!("sched-plan: ATTENTION — {} lines of pin= were not parsed and are NOT APPLIED (we expect <pattern>:<number|dedicated|shared>)",
+            m.pin_bad);
     }
     crate::println!("sched-plan: rules {}, spreading={} balancing={} numa={}, the interrupts per core {}, the scheduler's cores {:#x}",
         m.pinc, onoff(m.spread), onoff(m.balance), onoff(m.numa), irq_core(), crate::sched::sched_cpus());
@@ -666,7 +669,8 @@ pub fn irq_core() -> usize {
     let want = IRQ_CORE.load(Ordering::SeqCst) as usize;
     if want == 255 || !crate::sched::sched_cpu(want) { return 0; }
     if DEDICATED[want].load(Ordering::SeqCst) != 0 {
-        crate::println!("sched-plan: ATTENTION — the core {} is dedicated to a thread, the devices' interrupts are NOT directed there (they stay on the control plane)", want);
+        crate::println!("sched-plan: ATTENTION — the core {} is dedicated to a thread, the devices' interrupts are NOT directed there (they stay on the \
+            control plane)", want);
         return 0;
     }
     want
@@ -694,13 +698,15 @@ pub fn route_device_irqs(d: &crate::pci::PciDev, what: &str) {
         let (addr, data, on) = crate::pci::msi_readback(d);
         let want = 0xFEE0_0000 | (crate::smp::apic_of(cpu) << 12);
         if !on || addr != want || data != crate::idt::MSI_VECTOR_BASE as u32 {
-            crate::println!("sched-plan: ATTENTION — the MSI of {} was not accepted by the device (the address {:#x}, we expected {:#x}, the data {:#x}, enabled {})",
+            crate::println!("sched-plan: ATTENTION — the MSI of {} was not accepted by the device (the address {:#x}, we expected {:#x}, the data {:#x}, \
+                enabled {})",
                 what, addr, want, data, on);
             return;
         }
         a
     } else {
-        crate::println!("sched-plan: ATTENTION — {} has only INTx: the kernel does not route it, there will be NO interrupts from the card (the datapath will stay polling)", what);
+        crate::println!("sched-plan: ATTENTION — {} has only INTx: the kernel does not route it, there will be NO interrupts from the card (the datapath will \
+            stay polling)", what);
         return;
     };
     if apic == u32::MAX { return; }
@@ -841,7 +847,8 @@ fn resolve(target: i32, t: usize, w: &World) -> usize {
         n if n >= 0 => {
             let c = n as usize;
             if !w.has(c) {
-                crate::println!("sched-plan: ATTENTION — the core {} is not among the scheduler's cores ({:#x}); the thread {} stays on the control plane", c, w.pool, t);
+                crate::println!("sched-plan: ATTENTION — the core {} is not among the scheduler's cores ({:#x}); the thread {} stays on the control plane", c,
+                    w.pool, t);
                 return 0;
             }
             c

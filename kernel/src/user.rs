@@ -176,7 +176,8 @@ unsafe fn build_stack_args_env(top: u64, entry: u64, phdr: u64, phent: u64, phnu
 /// As `build_stack_args_off`. Every store below is `wr(p)`, that is, inside the
 /// mapped stack: `p` only decreases from `top` and the vectors are bounded (argv
 /// 48, envp 16), so the writes stay within the region the caller mapped.
-unsafe fn build_stack_full(top: u64, entry: u64, phdr: u64, phent: u64, phnum: u64, args: &[&[u8]], envs: &[&[u8]], woff: u64, at_base: u64, at_entry: u64, execfn: &[u8], vdso: u64) -> u64 {
+unsafe fn build_stack_full(top: u64, entry: u64, phdr: u64, phent: u64, phnum: u64, args: &[&[u8]], envs: &[&[u8]], woff: u64, at_base: u64, at_entry: u64,
+    execfn: &[u8], vdso: u64) -> u64 {
     let wr = |v: u64| v.wrapping_add(woff); // vaddr -> the write address
     let mut p = top;
     p -= 16;
@@ -185,7 +186,8 @@ unsafe fn build_stack_full(top: u64, entry: u64, phdr: u64, phent: u64, phnum: u
     // the strings for auxv: AT_PLATFORM, AT_EXECFN
     p -= 8; core::ptr::copy_nonoverlapping(b"x86_64\0\0".as_ptr(), wr(p) as *mut u8, 8); let platform = p;
     let execfn_n = execfn.iter().position(|&c| c == 0).unwrap_or(execfn.len());
-    p -= (execfn_n + 1) as u64; core::ptr::copy_nonoverlapping(execfn.as_ptr(), wr(p) as *mut u8, execfn_n); *(wr(p) as *mut u8).add(execfn_n) = 0; let execfn_p = p;
+    p -= (execfn_n + 1) as u64; core::ptr::copy_nonoverlapping(execfn.as_ptr(), wr(p) as *mut u8, execfn_n); *(wr(p) as *mut u8).add(execfn_n) = 0;
+        let execfn_p = p;
     let _ = entry;
     let mut argp = [0u64; 48];
     let n = args.len().min(48);
@@ -430,7 +432,8 @@ pub unsafe fn run_process_disk(path: &[u8], args: &[&[u8]], envs: &[&[u8]]) -> !
     crate::proc::init_proc(tid);
     crate::fr::record(crate::fr::USER, entry);
     let _ = kern_cr3;
-    crate::println!("talaria: a process from the disk in its own AS (fork/COW, signals, fd tables), entry={:#x}, argc={}, envc={}", entry, args.len(), envs.len());
+    crate::println!("talaria: a process from the disk in its own AS (fork/COW, signals, fd tables), entry={:#x}, argc={}, envc={}", entry, args.len(),
+        envs.len());
     crate::smp::lapic_enable();
     crate::smp::lapic_timer_init(crate::smp::SLICE_NS);
     crate::sched::install();
@@ -1110,7 +1113,8 @@ pub unsafe fn execve_dyn(path: &[u8], argv: &[&[u8]], envp: &[&[u8]]) -> ! {
     }
     let vdso = crate::vdso::map_into(pml4);
     let (ustack_top, woff) = map_proc_stack(pml4, BIG_STACK_FRAMES);
-    let hb = match crate::mem::alloc_contig_node(BIG_HEAP_FRAMES, node) { Some(h) => h, None => { crate::println!("talaria: execve: no memory for the heap"); crate::sched::exit_current_code(127); } };
+    let hb = match crate::mem::alloc_contig_node(BIG_HEAP_FRAMES, node) { Some(h) => h, None => { crate::println!("talaria: execve: no memory for the heap");
+        crate::sched::exit_current_code(127); } };
     core::ptr::write_bytes(hb as *mut u8, 0, (BIG_HEAP_FRAMES * 4096) as usize);
     for p in 0..BIG_HEAP_FRAMES { crate::paging::map_leaf(pml4, PROC_HEAP_BASE + p * 4096, hb + p * 4096, true, true, false); }
     crate::proc::exec_reset(crate::sched::proc_of(tid));

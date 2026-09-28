@@ -36,9 +36,28 @@ IMAGE=${TAL_IMAGE:-talaria-qemu2}
 # whole UEFI block: OVMF, PCIe, NVMe, SMP4 under the MADT). The regression's counter
 # then fell from 155 to 149 and looked like "something has been broken". We rebuild it ourselves: it takes seconds.
 EFI_P="$REPO/kernel/uefi-stub/target/x86_64-unknown-uefi/release/talaria-uefi-stub.efi"
-if [ ! -f "$EFI_P" ] || [ "$REPO/$K" -nt "$EFI_P" ]; then
-  echo "the uefi-stub is stale (the kernel is newer) — rebuilding..."
-  "$REPO/kernel/uefi-stub/build.sh" >/dev/null 2>&1 || echo "  ATTENTION: the uefi-stub did not build — the UEFI block will be skipped"
+# Freshness is judged by the kernel's CONTENT, not by mtime: after a build with a
+# different feature set (say `--no-default-features` for clippy and back) cargo
+# restores the release binary from its own cache, so the file is NEWER than the
+# stub while holding different bytes — and a `-nt` rule then calls a stub that
+# carries the other kernel fresh. That cost two FAILs in the UEFI block
+# (a stub with a kernel built without `selftest`: "this mode runs an embedded
+# test binary, but the kernel was built without the selftest feature").
+# The stamp lives next to the .efi in target/ and holds the sha256 of the kernel
+# the stub was built around. The stub's own source is touched before the build:
+# for the same reason cargo calls the stub crate FRESH although the bytes behind
+# its `include_bytes!` changed, and then it only relinks the old .efi (MEASURED:
+# dropping `.fingerprint` was not enough, `touch src/main.rs` was).
+EFI_STAMP="$EFI_P.kernel-sha256"
+K_SHA=$(sha256sum "$REPO/$K" | cut -d' ' -f1)
+if [ ! -f "$EFI_P" ] || [ ! -f "$EFI_STAMP" ] || [ "$K_SHA" != "$(cat "$EFI_STAMP")" ]; then
+  echo "the uefi-stub carries another kernel — rebuilding..."
+  touch "$REPO/kernel/uefi-stub/src/main.rs"
+  if "$REPO/kernel/uefi-stub/build.sh" >/dev/null 2>&1; then
+    echo "$K_SHA" > "$EFI_STAMP"
+  else
+    echo "  ATTENTION: the uefi-stub did not build — the UEFI block will be skipped"
+  fi
 fi
 # The base TFS1 volume (hello.txt + mhello/epsrv/memhog) — the default disk for almost
 # every gate. It is built here rather than kept in the repository: it is just as much a

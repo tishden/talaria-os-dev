@@ -261,7 +261,8 @@ fn verdict() {
     if br_mpki > 500 || (d.has_br_ratio() && brm > 300) {
         crate::println!("perf:   frequent branch mispredictions ({}) — data-dependent branching in a hot loop.", super::miss_br(&d));
     }
-    if ipc >= 200 && llc_mpki <= 200 { crate::println!("perf:   counters are healthy — look for the bottleneck in wait time (`kstat sync`, `top`), not in the code."); }
+    if ipc >= 200 && llc_mpki <= 200 { crate::println!("perf:   counters are healthy — look for the bottleneck in wait time (`kstat sync`, `top`), not in the \
+        code."); }
 }
 
 pub fn cmd(arg: &str) {

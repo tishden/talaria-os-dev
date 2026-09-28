@@ -242,7 +242,8 @@ struct PvTime { version: u32, pad0: u32, tsc_timestamp: u64, system_time: u64, t
 static mut PV_WALL: PvWall = PvWall { version: 0, sec: 0, nsec: 0 };
 #[repr(align(64))]
 struct Aligned(PvTime);
-static mut PV_TIME: Aligned = Aligned(PvTime { version: 0, pad0: 0, tsc_timestamp: 0, system_time: 0, tsc_to_system_mul: 0, tsc_shift: 0, flags: 0, pad: [0; 2] });
+static mut PV_TIME: Aligned = Aligned(PvTime { version: 0, pad0: 0, tsc_timestamp: 0, system_time: 0, tsc_to_system_mul: 0, tsc_shift: 0, flags: 0, pad: [0;
+    2] });
 
 unsafe fn wrmsr(msr: u32, v: u64) {
     core::arch::asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32, options(nostack, preserves_flags));

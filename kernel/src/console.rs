@@ -46,8 +46,10 @@ static CMDS: &[Cmd] = &[
     Cmd { name: "uptime",  args: "",          help: "the time since boot", grp: G_SYS },
     Cmd { name: "clock",   args: "",          help: "the clock: the reference, the correction, the residual error, the backward steps", grp: G_SYS },
     Cmd { name: "mem",     args: "",          help: "the frame allocator: free/reclaim", grp: G_SYS },
-    Cmd { name: "ps",      args: "[-t] [-m]",  help: "processes and threads: the core, CPU%, RSS, allocations, syscalls (-t by thread, -m without walking the tables)", grp: G_SYS },
-    Cmd { name: "top",     args: "[-t] [-m] [-1] [ms]", help: "the same as a refreshing table (q — quit, t — threads/processes, -1 — one snapshot)", grp: G_SYS },
+    Cmd { name: "ps",      args: "[-t] [-m]",  help: "processes and threads: the core, CPU%, RSS, allocations, syscalls (-t by thread, -m without walking the \
+        tables)", grp: G_SYS },
+    Cmd { name: "top",     args: "[-t] [-m] [-1] [ms]", help: "the same as a refreshing table (q — quit, t — threads/processes, -1 — one snapshot)",
+        grp: G_SYS },
     Cmd { name: "cores",   args: "",          help: "the placement of threads on cores and the L3 shares (CAT)", grp: G_SYS },
     Cmd { name: "restart", args: "",          help: "restart the workload (through the supervisor)", grp: G_SYS },
     Cmd { name: "reset",   args: "",          help: "reboot the machine (port 0xCF9)", grp: G_SYS },
@@ -78,9 +80,11 @@ static CMDS: &[Cmd] = &[
     // network
     Cmd { name: "net",   args: "", help: "the live TCP connections and the total traffic", grp: G_NET },
     Cmd { name: "nics",  args: "", help: "the driver table and the matching PCI devices", grp: G_NET },
-    Cmd { name: "netstat", args: "[-i|-r|-s|-d]", help: "the whole network: the interfaces, the routes, the sockets with their owners, the datapath", grp: G_NET },
+    Cmd { name: "netstat", args: "[-i|-r|-s|-d]", help: "the whole network: the interfaces, the routes, the sockets with their owners, the datapath",
+        grp: G_NET },
     Cmd { name: "filed", args: "[on [port]|off|status]", help: "the file upload/download service over TCP (the client is tools/talaria-file)", grp: G_NET },
-    Cmd { name: "ip",    args: "[addr add|del <A.B.C.D/P> <if> | link up|down <if>]", help: "the interfaces and the addresses; without arguments, show them all", grp: G_NET },
+    Cmd { name: "ip",    args: "[addr add|del <A.B.C.D/P> <if> | link up|down <if>]", help: "the interfaces and the addresses; without arguments, show them \
+        all", grp: G_NET },
     Cmd { name: "route", args: "[add <net/len|default> via <gw> dev <if> | del <net/len>]", help: "the routing table; without arguments, show it", grp: G_NET },
     Cmd { name: "dhcp",  args: "<if> [on|off|renew]", help: "DHCP on an interface: enable, disable, renew the lease", grp: G_NET },
     Cmd { name: "dns",   args: "[A.B.C.D]", help: "the resolver (it regenerates /etc/resolv.conf for the workload)", grp: G_NET },
@@ -91,8 +95,10 @@ static CMDS: &[Cmd] = &[
     Cmd { name: "dump",  args: "<address>", help: "a hexadecimal dump of 64 bytes of memory", grp: G_DIAG },
     Cmd { name: "core",  args: "[tid]", help: "take a core dump of a live task (the main thread by default); needs talaria.core=<path>", grp: G_DIAG },
     Cmd { name: "kstat", args: "[section]", help: "the kernel's counters by section: sched/mem/paging/fs/net/sync/irq/cache/syscalls", grp: G_DIAG },
-    Cmd { name: "perf",  args: "[stat|poke N|on|off|top|record|code|gdb]", help: "the hardware counters (IPC, cache, branch predictor) and the sampling profile", grp: G_DIAG },
-    Cmd { name: "gdb",   args: "[on|break]", help: "the gdb stub on COM2: how to connect; `gdb on` — enable it, `gdb break` — stop the machine in the debugger now", grp: G_DIAG },
+    Cmd { name: "perf",  args: "[stat|poke N|on|off|top|record|code|gdb]", help: "the hardware counters (IPC, cache, branch predictor) and the sampling \
+        profile", grp: G_DIAG },
+    Cmd { name: "gdb",   args: "[on|break]", help: "the gdb stub on COM2: how to connect; `gdb on` — enable it, `gdb break` — stop the machine in the debugger \
+        now", grp: G_DIAG },
 ];
 
 fn help_all() {

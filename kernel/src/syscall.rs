@@ -148,7 +148,8 @@ pub fn nullfd_readiness(fd: i64) -> u32 {
 // cpuinfo, self/status, /sys/kernel/mm/transparent_hugepage/enabled and so on).
 const VIRT_FILES: [&[u8]; 18] = [b"/proc/meminfo", b"/proc/cpuinfo", b"/proc/stat", b"/proc/uptime", b"/proc/version", b"/proc/self/status", b"/proc/self/stat",
     b"/proc/self/maps", b"/proc/self/cmdline", b"/proc/self/mounts", b"/proc/mounts", b"/proc/sys/vm/max_map_count", b"/proc/sys/vm/overcommit_memory",
-    b"/proc/sys/kernel/pid_max", b"/proc/sys/kernel/osrelease", b"/sys/kernel/mm/transparent_hugepage/enabled", b"/sys/kernel/mm/transparent_hugepage/defrag", b"/proc/diskstats"];
+    b"/proc/sys/kernel/pid_max", b"/proc/sys/kernel/osrelease", b"/sys/kernel/mm/transparent_hugepage/enabled", b"/sys/kernel/mm/transparent_hugepage/defrag",
+        b"/proc/diskstats"];
 const VIRT_DIRS: [&[u8]; 8] = [b"/proc", b"/proc/self", b"/proc/sys", b"/proc/sys/vm", b"/proc/sys/kernel", b"/sys", b"/sys/block", b"/sys/kernel"];
 /// A virtual path: Some((the index, a directory?)).
 fn virt_lookup(path: &[u8]) -> Option<(usize, bool)> {
@@ -157,7 +158,12 @@ fn virt_lookup(path: &[u8]) -> Option<(usize, bool)> {
     for (i, d) in VIRT_DIRS.iter().enumerate() { if *d == p { return Some((i, true)); } }
     None
 }
-fn wr_dec(out: &mut [u8], n: &mut usize, v: u64) { let mut t = [0u8; 20]; let mut k = 0; let mut x = v; if x == 0 { t[0] = b'0'; k = 1; } while x > 0 { t[k] = b'0' + (x % 10) as u8; x /= 10; k += 1; } while k > 0 && *n < out.len() { k -= 1; out[*n] = t[k]; *n += 1; } }
+fn wr_dec(out: &mut [u8], n: &mut usize, v: u64) {
+    let mut t = [0u8; 20]; let mut k = 0; let mut x = v;
+    if x == 0 { t[0] = b'0'; k = 1; }
+    while x > 0 { t[k] = b'0' + (x % 10) as u8; x /= 10; k += 1; }
+    while k > 0 && *n < out.len() { k -= 1; out[*n] = t[k]; *n += 1; }
+}
 fn wr_s(out: &mut [u8], n: &mut usize, s: &[u8]) { let m = s.len().min(out.len() - *n); out[*n..*n + m].copy_from_slice(&s[..m]); *n += m; }
 /// A SELF-CHECK: a virtual file is not truncated on a multi-core machine.
 ///
@@ -254,14 +260,16 @@ HugePagesize:       2048 kB
             let mhz = crate::tsc::calibrate_cached() / 1_000_000;
             for c in 0..ncpu {
                 wr_s(out, &mut n, b"processor\t: "); wr_dec(out, &mut n, c as u64);
-                wr_s(out, &mut n, b"\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 85\nmodel name\t: Talaria vCPU (KVM)\nstepping\t: 4\ncpu MHz\t\t: ");
+                wr_s(out, &mut n, b"\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 85\nmodel name\t: Talaria vCPU (KVM)\nstepping\t: 4\ncpu MHz\t\t: \
+                    ");
                 wr_dec(out, &mut n, mhz);
                 wr_s(out, &mut n, b".000\ncache size\t: 16384 KB\nphysical id\t: 0\nsiblings\t: ");
                 wr_dec(out, &mut n, ncpu as u64);
                 wr_s(out, &mut n, b"\ncore id\t\t: "); wr_dec(out, &mut n, c as u64);
                 wr_s(out, &mut n, b"\ncpu cores\t: "); wr_dec(out, &mut n, ncpu as u64);
                 wr_s(out, &mut n, b"\napicid\t\t: "); wr_dec(out, &mut n, c as u64);
-                wr_s(out, &mut n, b"\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx lm constant_tsc nopl pni ssse3 cx16 sse4_1 sse4_2 popcnt aes xsave avx rdrand\nbogomips\t: 7200.00\n\n");
+                wr_s(out, &mut n, b"\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall \
+                    nx lm constant_tsc nopl pni ssse3 cx16 sse4_1 sse4_2 popcnt aes xsave avx rdrand\nbogomips\t: 7200.00\n\n");
             }
         }
         2 => { wr_s(out, &mut n, b"cpu  "); wr_dec(out, &mut n, up * 100); wr_s(out, &mut n, b" 0 0 0 0 0 0 0 0 0\n");
@@ -297,7 +305,8 @@ SigPnd:	0000000000000000
 Cpus_allowed:	1
 Cpus_allowed_list:	0
 "); }
-        6 => { wr_dec(out, &mut n, pid); wr_s(out, &mut n, b" (proc) R 0 1 1 0 -1 4194560 100 0 0 0 1 1 0 0 20 0 1 0 1 134217728 16384 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+        6 => { wr_dec(out, &mut n, pid); wr_s(out, &mut n, b" (proc) R 0 1 1 0 -1 4194560 100 0 0 0 1 1 0 0 20 0 1 0 1 134217728 16384 18446744073709551615 0 \
+            0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 "); }
         7 => { wr_s(out, &mut n, b"10000000-10100000 r-xp 00000000 00:00 0
 7fffeff00000-7ffff0000000 rw-p 00000000 00:00 0 [stack]
@@ -334,7 +343,10 @@ fn virt_stat(path: &[u8], st: *mut u8) -> Option<i64> {
     let n = if dir { 0 } else { with_virt_content(id, |c| c.len()) };
     // SAFETY: S1 — the caller hands in an address of the process's memory that `uaccess::gate` has
     // already validated.
-    unsafe { core::ptr::write_bytes(st, 0, 144); core::ptr::write_unaligned(st.add(24) as *mut u32, if dir { 0o40555 } else { 0o100444 }); core::ptr::write_unaligned(st.add(16) as *mut u64, 1); core::ptr::write_unaligned(st.add(48) as *mut i64, n as i64); core::ptr::write_unaligned(st.add(56) as *mut i64, 4096); core::ptr::write_unaligned(st.add(28) as *mut u32, 1000); core::ptr::write_unaligned(st.add(32) as *mut u32, 1000); }
+    unsafe { core::ptr::write_bytes(st, 0, 144); core::ptr::write_unaligned(st.add(24) as *mut u32, if dir { 0o40555 } else { 0o100444 });
+        core::ptr::write_unaligned(st.add(16) as *mut u64, 1); core::ptr::write_unaligned(st.add(48) as *mut i64, n as i64);
+        core::ptr::write_unaligned(st.add(56) as *mut i64, 4096); core::ptr::write_unaligned(st.add(28) as *mut u32, 1000);
+        core::ptr::write_unaligned(st.add(32) as *mut u32, 1000); }
     Some(0)
 }
 /// timerfd: how many firings have accumulated (and rearm a periodic one). 0 — there are none yet.
@@ -443,7 +455,8 @@ unsafe fn wrmsr(msr: u32, val: u64) {
 /// The frame lies on the task's KERNEL stack (the stub switches rsp away from the
 /// user stack); `ursp` is the user's rsp at the entry.
 #[repr(C)]
-pub struct Frame { pub nr: u64, pub a1: u64, pub a2: u64, pub a3: u64, pub a4: u64, pub a5: u64, pub a6: u64, pub rip: u64, pub rflags: u64, pub rbx: u64, pub rbp: u64, pub r12: u64, pub r13: u64, pub r14: u64, pub r15: u64, pub ursp: u64 }
+pub struct Frame { pub nr: u64, pub a1: u64, pub a2: u64, pub a3: u64, pub a4: u64, pub a5: u64, pub a6: u64, pub rip: u64, pub rflags: u64, pub rbx: u64,
+    pub rbp: u64, pub r12: u64, pub r13: u64, pub r14: u64, pub r15: u64, pub ursp: u64 }
 /// Set up SYSCALL: STAR (the selectors), LSTAR (the handler), FMASK, EFER.SCE.
 /// kcs/kss are the kernel CS/SS; STAR[63:48] sets the user selectors for sysret.
 pub fn init() {
@@ -611,7 +624,8 @@ fn write_timespec(p: u64, ns: u64) {
     if p == 0 { return; }
     // SAFETY: S1 — the caller hands in an address of the process's memory that `uaccess::gate` has
     // already validated.
-    unsafe { core::ptr::write_unaligned(p as *mut i64, (ns / 1_000_000_000) as i64); core::ptr::write_unaligned((p + 8) as *mut i64, (ns % 1_000_000_000) as i64); }
+    unsafe { core::ptr::write_unaligned(p as *mut i64, (ns / 1_000_000_000) as i64); core::ptr::write_unaligned((p + 8) as *mut i64,
+        (ns % 1_000_000_000) as i64); }
 }
 /// A stat buffer for a pseudo fd: st_mode (S_IFCHR for a null fd, S_IFSOCK for sockets).
 fn pseudo_fstat(fd: i64, statbuf: *mut u8) -> i64 {
@@ -626,7 +640,9 @@ fn pseudo_fstat(fd: i64, statbuf: *mut u8) -> i64 {
     } else if crate::netsys::is_sock(fd) { 0o140000 | 0o666 } else if fd <= 2 { 0o20000 | 0o620 } else { return -9 };
     // SAFETY: S1 — the caller hands in an address of the process's memory that `uaccess::gate` has
     // already validated.
-    unsafe { core::ptr::write_bytes(statbuf, 0, 144); core::ptr::write_unaligned(statbuf.add(24) as *mut u32, mode); core::ptr::write_unaligned(statbuf.add(48) as *mut i64, size); core::ptr::write_unaligned(statbuf.add(56) as *mut i64, 4096); core::ptr::write_unaligned(statbuf.add(16) as *mut u64, 1); }
+    unsafe { core::ptr::write_bytes(statbuf, 0, 144); core::ptr::write_unaligned(statbuf.add(24) as *mut u32, mode);
+        core::ptr::write_unaligned(statbuf.add(48) as *mut i64, size); core::ptr::write_unaligned(statbuf.add(56) as *mut i64, 4096);
+        core::ptr::write_unaligned(statbuf.add(16) as *mut u64, 1); }
     0
 }
 /// The read(2) semantics by the fd's type.
@@ -648,7 +664,8 @@ fn do_read(fd: i64, buf: *mut u8, len: usize, flags: u64) -> i64 {
                     // SAFETY: S2 — the pseudo-fd table (`NULL_*`): a row belongs to the descriptor's
                     // owner from the CAS in `null_alloc_kind` until `null_free`.
                     let c = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(NULL_CTR[i])) };
-                    if c > 0 { let v = if unsafe { NULL_FL[i] } & 2 != 0 { 1 } else { c }; unsafe { NULL_CTR[i] = c - v; core::ptr::write_unaligned(buf as *mut u64, v); } return 8; }
+                    if c > 0 { let v = if unsafe { NULL_FL[i] } & 2 != 0 { 1 } else { c }; unsafe { NULL_CTR[i] = c - v;
+                        core::ptr::write_unaligned(buf as *mut u64, v); } return 8; }
                     if unsafe { NULL_FL[i] } & 1 != 0 { return -11; }
                     if crate::proc::sig_pending() { return -4; }
                     wait_window();
@@ -662,7 +679,8 @@ fn do_read(fd: i64, buf: *mut u8, len: usize, flags: u64) -> i64 {
                     if let Some(sig) = crate::proc::take_pending_in(unsafe { NULL_CTR[i] }) {
                         // SAFETY: S1 — the caller hands in an address of the process's memory that
                         // `uaccess::gate` has already validated.
-                        unsafe { core::ptr::write_bytes(buf, 0, 128); core::ptr::write_unaligned(buf as *mut u32, sig as u32); core::ptr::write_unaligned(buf.add(12) as *mut u32, (crate::sched::proc_of(crate::sched::current_id()) + 1) as u32); }
+                        unsafe { core::ptr::write_bytes(buf, 0, 128); core::ptr::write_unaligned(buf as *mut u32, sig as u32);
+                            core::ptr::write_unaligned(buf.add(12) as *mut u32, (crate::sched::proc_of(crate::sched::current_id()) + 1) as u32); }
                         return 128;
                     }
                     // SAFETY: S2 — the pseudo-fd table (`NULL_*`): a row belongs to the descriptor's
@@ -721,7 +739,8 @@ fn do_write(fd: i64, buf: *const u8, len: usize, flags: u64) -> i64 {
         let i = (fd - NULL_BASE) as usize;
         // SAFETY: S2 — the pseudo-fd table (`NULL_*`): a row belongs to the descriptor's owner from
         // the CAS in `null_alloc_kind` until `null_free`.
-        if unsafe { NULL_KIND[i] } == 4 && len >= 8 { let v = unsafe { core::ptr::read_unaligned(buf as *const u64) }; unsafe { NULL_CTR[i] = NULL_CTR[i].saturating_add(v); NULL_GEN[i] += 1; } return 8; } // eventfd
+        if unsafe { NULL_KIND[i] } == 4 && len >= 8 { let v = unsafe { core::ptr::read_unaligned(buf as *const u64) }; unsafe {
+            NULL_CTR[i] = NULL_CTR[i].saturating_add(v); NULL_GEN[i] += 1; } return 8; } // eventfd
         len as i64
     }
     else if crate::proc::pipe_is(fd) { crate::proc::pipe_write(fd, buf, len) }
@@ -761,7 +780,8 @@ fn vfs_stat(ptr: u64, st: *mut u8) -> i64 {
         return match o { Some(o) => shm_stat(o, st), None => -2 };
     }
     if is_dev_null(ptr) || path_eq(ptr, b"/dev/urandom") { return pseudo_fstat(NULL_BASE, st); }
-    if crate::ext2::active() { let p = crate::proc::resolve(ptr); if let Some(r) = virt_stat(p, st) { return r; } crate::ext2::stat(p, st) } else { crate::fs::stat_path(ptr as *const u8, st) }
+    if crate::ext2::active() { let p = crate::proc::resolve(ptr); if let Some(r) = virt_stat(p, st) { return r; } crate::ext2::stat(p, st) } else {
+        crate::fs::stat_path(ptr as *const u8, st) }
 }
 fn vfs_stat_at(dirfd: i64, ptr: u64, st: *mut u8) -> i64 {
     if path_empty(ptr) { return -2; }
@@ -778,7 +798,8 @@ fn vfs_stat_at(dirfd: i64, ptr: u64, st: *mut u8) -> i64 {
 fn vfs_exists(ptr: u64) -> bool {
     if path_empty(ptr) { return false; }
     if is_dev_null(ptr) || path_eq(ptr, b"/dev/urandom") { return true; }
-    if crate::ext2::active() { let p = crate::proc::resolve(ptr); virt_lookup(p).is_some() || crate::ext2::exists(p) } else { crate::fs::exists(ptr as *const u8) }
+    if crate::ext2::active() { let p = crate::proc::resolve(ptr); virt_lookup(p).is_some() || crate::ext2::exists(p) } else {
+        crate::fs::exists(ptr as *const u8) }
 }
 /// An open by path (/dev/null, /dev/shm, ext2 with the cwd and the flags, TFS) -> a handle.
 /// AN EMPTY path is not "the current directory" but an error. Linux answers ENOENT to a `stat("")`,
@@ -818,7 +839,8 @@ fn fstat_any(fd: i64, st: *mut u8) -> i64 {
     else if shm_is(fd) { shm_stat(shm_obj(fd), st) }
     // SAFETY: S1 — the caller hands in an address of the process's memory that `uaccess::gate` has
     // already validated.
-    else if crate::proc::pipe_is(fd) { unsafe { core::ptr::write_bytes(st, 0, 144); core::ptr::write_unaligned(st.add(24) as *mut u32, 0o10000 | 0o600); core::ptr::write_unaligned(st.add(56) as *mut i64, 4096); } 0 }
+    else if crate::proc::pipe_is(fd) { unsafe { core::ptr::write_bytes(st, 0, 144); core::ptr::write_unaligned(st.add(24) as *mut u32, 0o10000 | 0o600);
+        core::ptr::write_unaligned(st.add(56) as *mut i64, 4096); } 0 }
     else { pseudo_fstat(fd, st) }
 }
 // ── /dev/shm/<name>: the shared memory objects (musl's POSIX shm_open semantics: an open("/dev/shm/..")
@@ -973,13 +995,15 @@ fn shm_region(obj: usize, need: u64) -> u64 {
             // ivshmem: user-accessible, CACHEABLE (protect removes PCD/PWT GB3), RW, NX
             crate::paging::protect(ib, isz, true, false);
             SHM_ADDR[obj] = ib; SHM_MAPSZ[obj] = isz; if SHM_SIZE[obj] == 0 { SHM_SIZE[obj] = isz; }
-            crate::println!("shm: the object '{}' -> ivshmem {:#x} ({} KB)", core::str::from_utf8(&SHM_NAME[obj][..SHM_NAME[obj].iter().position(|&c| c == 0).unwrap_or(0)]).unwrap_or("?"), ib, isz / 1024);
+            crate::println!("shm: the object '{}' -> ivshmem {:#x} ({} KB)",
+                core::str::from_utf8(&SHM_NAME[obj][..SHM_NAME[obj].iter().position(|&c| c == 0).unwrap_or(0)]).unwrap_or("?"), ib, isz / 1024);
             return ib;
         }
         let sz = need.max(SHM_SIZE[obj]).max(4096);
         let pages = sz.div_ceil(4096);
         match crate::mem::alloc_contig(pages) {
-            Some(b) => { zero_serviced(b, pages * 4096); crate::paging::protect(b, pages * 4096, true, false); SHM_ADDR[obj] = b; SHM_MAPSZ[obj] = pages * 4096; b }
+            Some(b) => { zero_serviced(b, pages * 4096); crate::paging::protect(b, pages * 4096, true, false); SHM_ADDR[obj] = b; SHM_MAPSZ[obj] = pages * 4096;
+                b }
             None => 0,
         }
     }
@@ -1006,7 +1030,8 @@ fn shm_stat(obj: usize, statbuf: *mut u8) -> i64 {
     let sz = unsafe { SHM_SIZE[obj] };
     // SAFETY: S1 — the caller hands in an address of the process's memory that `uaccess::gate` has
     // already validated.
-    unsafe { core::ptr::write_bytes(statbuf, 0, 144); core::ptr::write_unaligned(statbuf.add(24) as *mut u32, 0o100000 | 0o600); core::ptr::write_unaligned(statbuf.add(48) as *mut i64, sz as i64); core::ptr::write_unaligned(statbuf.add(56) as *mut i64, 4096); }
+    unsafe { core::ptr::write_bytes(statbuf, 0, 144); core::ptr::write_unaligned(statbuf.add(24) as *mut u32, 0o100000 | 0o600);
+        core::ptr::write_unaligned(statbuf.add(48) as *mut i64, sz as i64); core::ptr::write_unaligned(statbuf.add(56) as *mut i64, 4096); }
     0
 }
 fn in_ivshmem(addr: u64) -> bool { let (b, s) = crate::pci::ivshmem(); b != 0 && addr >= b && addr < b + s }
@@ -1034,7 +1059,8 @@ fn strace(f: &Frame, ret: u64) {
     let left = STRACE_LEFT.load(Ordering::Relaxed);
     if left == 0 { return; }
     STRACE_LEFT.store(left - 1, Ordering::Relaxed);
-    crate::println!("[strace {}us t{}] {}({:#x}, {:#x}, {:#x}, {:#x}) = {:#x} ({})", crate::tsc::mono_ns() / 1000, crate::sched::current_id(), f.nr, f.a1, f.a2, f.a3, f.a4, ret, ret as i64);
+    crate::println!("[strace {}us t{}] {}({:#x}, {:#x}, {:#x}, {:#x}) = {:#x} ({})", crate::tsc::mono_ns() / 1000, crate::sched::current_id(), f.nr, f.a1, f.a2,
+        f.a3, f.a4, ret, ret as i64);
 }
 
 /// The syscall dispatcher (the Linux x86-64 numbers). The returned value -> rax.
@@ -1109,14 +1135,16 @@ fn rust_syscall_inner(raw: &mut Frame) -> u64 {
         return e;
     }
     // the translation user fd -> an internal handle (the process's fd table)
-    let mut g = Frame { nr: raw.nr, a1: raw.a1, a2: raw.a2, a3: raw.a3, a4: raw.a4, a5: raw.a5, a6: raw.a6, rip: raw.rip, rflags: raw.rflags, rbx: raw.rbx, rbp: raw.rbp, r12: raw.r12, r13: raw.r13, r14: raw.r14, r15: raw.r15, ursp: raw.ursp };
+    let mut g = Frame { nr: raw.nr, a1: raw.a1, a2: raw.a2, a3: raw.a3, a4: raw.a4, a5: raw.a5, a6: raw.a6, rip: raw.rip, rflags: raw.rflags, rbx: raw.rbx,
+        rbp: raw.rbp, r12: raw.r12, r13: raw.r13, r14: raw.r14, r15: raw.r15, ursp: raw.ursp };
     if a1_is_fd(raw.nr) { g.a1 = crate::proc::tr(raw.a1) as u64; }
     if raw.nr == 233 { g.a3 = crate::proc::tr(raw.a3) as u64; }
     if raw.nr == 9 && raw.a4 & 0x20 == 0 { g.a5 = crate::proc::tr(raw.a5) as u64; }
     let r = dispatch(&g, raw);
     // the new descriptors -> into the process's fd table
     match raw.nr {
-        2 | 257 | 41 | 43 | 288 | 291 | 213 | 290 | 283 | 282 | 289 | 53 if (r as i64) >= 0 => { return crate::proc::install(r as i64) as u64; } // signalfd4(289) returns a new fd too
+        // signalfd4(289) returns a new fd too
+        2 | 257 | 41 | 43 | 288 | 291 | 213 | 290 | 283 | 282 | 289 | 53 if (r as i64) >= 0 => { return crate::proc::install(r as i64) as u64; }
         _ => {}
     }
     r
@@ -1167,7 +1195,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             if m.is_null() { return (-14i64) as u64; }
             // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
             // dispatch.
-            let (name, iov, iovlen) = unsafe { (core::ptr::read_unaligned(m as *const u64), core::ptr::read_unaligned(m.add(16) as *const u64) as *const u64, core::ptr::read_unaligned(m.add(24) as *const u64) as usize) };
+            let (name, iov, iovlen) = unsafe { (core::ptr::read_unaligned(m as *const u64), core::ptr::read_unaligned(m.add(16) as *const u64) as *const u64,
+                core::ptr::read_unaligned(m.add(24) as *const u64) as usize) };
             let fd = f.a1 as i64;
             let mut total: i64 = 0;
             for i in 0..iovlen {
@@ -1177,11 +1206,13 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 let len = unsafe { *iov.add(i * 2 + 1) } as usize;
                 if len == 0 { continue; }
                 let n = if f.nr == 46 {
-                    if crate::netsys::is_udp(fd) { crate::netsys::udp_sendto(fd, base as *const u8, len, name as *const u8) } else { do_write(fd, base as *const u8, len, f.a3) }
+                    if crate::netsys::is_udp(fd) { crate::netsys::udp_sendto(fd, base as *const u8, len, name as *const u8) } else { do_write(fd,
+                        base as *const u8, len, f.a3) }
                 } else {
                     // SAFETY: S1 — `m + 8` is the `msg_namelen` field of the `msghdr` the call
                     // passed, and `uaccess::nested` validated that structure for `recvmsg`.
-                    if crate::netsys::is_udp(fd) { crate::netsys::udp_recvfrom(fd, base as *mut u8, len, name as *mut u8, unsafe { m.add(8) } as *mut u32, f.a3) } else { do_read(fd, base as *mut u8, len, f.a3) }
+                    if crate::netsys::is_udp(fd) { crate::netsys::udp_recvfrom(fd, base as *mut u8, len, name as *mut u8, unsafe { m.add(8) } as *mut u32,
+                        f.a3) } else { do_read(fd, base as *mut u8, len, f.a3) }
                 };
                 if n < 0 { if total > 0 { break; } return n as u64; }
                 total += n;
@@ -1199,7 +1230,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
                 // dispatch.
                 let m = unsafe { base.add(k * 64) };
-                let (name, iov, iovlen) = unsafe { (core::ptr::read_unaligned(m as *const u64), core::ptr::read_unaligned(m.add(16) as *const u64) as *const u64, core::ptr::read_unaligned(m.add(24) as *const u64) as usize) };
+                let (name, iov, iovlen) = unsafe { (core::ptr::read_unaligned(m as *const u64),
+                    core::ptr::read_unaligned(m.add(16) as *const u64) as *const u64, core::ptr::read_unaligned(m.add(24) as *const u64) as usize) };
                 let mut total: i64 = 0; let mut err: i64 = 0;
                 for i in 0..iovlen {
                     // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
@@ -1207,11 +1239,13 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                     let b = unsafe { *iov.add(i * 2) }; let l = unsafe { *iov.add(i * 2 + 1) } as usize;
                     if l == 0 { continue; }
                     let n = if f.nr == 307 {
-                        if crate::netsys::is_udp(fd) { crate::netsys::udp_sendto_f(fd, b as *const u8, l, name as *const u8, false) } else { do_write(fd, b as *const u8, l, f.a4) }
+                        if crate::netsys::is_udp(fd) { crate::netsys::udp_sendto_f(fd, b as *const u8, l, name as *const u8, false) } else { do_write(fd,
+                            b as *const u8, l, f.a4) }
                     } else {
                         // SAFETY: S1 — as above, but for one `mmsghdr` of the array: `m` walks it
                         // with a 64-byte stride, and `uaccess::nested` validated the whole array.
-                        if crate::netsys::is_udp(fd) { crate::netsys::udp_recvfrom(fd, b as *mut u8, l, name as *mut u8, unsafe { m.add(8) } as *mut u32, f.a4 | 0x40) } else { do_read(fd, b as *mut u8, l, f.a4 | 0x40) }
+                        if crate::netsys::is_udp(fd) { crate::netsys::udp_recvfrom(fd, b as *mut u8, l, name as *mut u8, unsafe { m.add(8) } as *mut u32,
+                            f.a4 | 0x40) } else { do_read(fd, b as *mut u8, l, f.a4 | 0x40) }
                     };
                     if n < 0 { err = n; break; }
                     total += n;
@@ -1226,7 +1260,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             if f.nr == 307 && crate::netsys::ready() { crate::netsys::poll(); } // one run of the stack per batch
             done as u64
         }
-        41 => { if f.a1 == 1 || f.a1 == 10 { (-97i64) as u64 } else { crate::netsys::socket(f.a2) as u64 } } // socket(domain, type, proto); AF_UNIX/AF_INET6 -> EAFNOSUPPORT
+        // socket(domain, type, proto); AF_UNIX/AF_INET6 -> EAFNOSUPPORT
+        41 => { if f.a1 == 1 || f.a1 == 10 { (-97i64) as u64 } else { crate::netsys::socket(f.a2) as u64 } }
         49 => crate::netsys::bind(f.a1 as i64, f.a2 as *const u8) as u64,            // bind(fd, addr, len)
         50 => crate::netsys::listen(f.a1 as i64) as u64,                             // listen(fd, backlog)
         42 => crate::netsys::connect(f.a1 as i64, f.a2 as *const u8) as u64,         // connect(fd, addr, len)
@@ -1243,7 +1278,9 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         23 | 270 => { // select / pselect6(nfds, readfds, writefds, exceptfds, timeout)
             // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
             // dispatch.
-            let to = if f.nr == 23 { if f.a5 == 0 { -1 } else { unsafe { core::ptr::read_unaligned(f.a5 as *const i64) * 1000 + core::ptr::read_unaligned((f.a5 + 8) as *const i64) / 1000 } } }
+            let to = if f.nr == 23 { if f.a5 == 0 { -1 }
+                     else { unsafe { core::ptr::read_unaligned(f.a5 as *const i64) * 1000
+                                     + core::ptr::read_unaligned((f.a5 + 8) as *const i64) / 1000 } } }
                      else { match read_timespec(f.a5) { Some((s, ns)) => s * 1000 + ns / 1_000_000, None => -1 } };
             do_select(f.a1 as usize, f.a2, f.a3, f.a4, to) as u64
         }
@@ -1362,7 +1399,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         21 | 269 | 439 => { // access / faccessat / faccessat2 -> is there a file/directory on the disk
             let p = if f.nr == 21 { f.a1 } else { f.a2 };
             if path_empty(p) { return (-2i64) as u64; } // ENOENT (an empty path is not the cwd)
-            if f.nr != 21 && f.a1 as i64 != crate::proc::AT_FDCWD && crate::ext2::active() { return if crate::ext2::exists(crate::proc::resolve_at(f.a1 as i64, p)) { 0 } else { (-2i64) as u64 }; }
+            if f.nr != 21 && f.a1 as i64 != crate::proc::AT_FDCWD && crate::ext2::active() { return if crate::ext2::exists(crate::proc::resolve_at(f.a1 as i64,
+                p)) { 0 } else { (-2i64) as u64 }; }
             if vfs_exists(p) { 0 } else { (-2i64) as u64 }
         }
         95 => 0o22, // umask -> the former mask (a stub)
@@ -1422,11 +1460,14 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             let mut tb = [0u8; 256];
             // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
             // dispatch.
-            let n = unsafe { let mut i = 0; while i < 255 { let c = core::ptr::read_volatile((tgt as *const u8).add(i)); tb[i] = c; if c == 0 { break; } i += 1; } i };
+            let n = unsafe { let mut i = 0; while i < 255 { let c = core::ptr::read_volatile((tgt as *const u8).add(i)); tb[i] = c; if c == 0 { break; } i += 1;
+                } i };
             let lp = if f.nr == 266 { crate::proc::resolve_at(f.a2 as i64, link) } else { crate::proc::resolve(link) };
             crate::ext2::symlink(&tb[..n], lp) as u64
         }
-        102 | 104 | 107 | 108 => 1000, // getuid/getgid/geteuid/getegid -> 1000 (not root: PostgreSQL/MariaDB refuse to work under root; the owner of the files in stat is 1000 too)
+        // getuid/getgid/geteuid/getegid -> 1000 (not root: PostgreSQL/MariaDB refuse
+        // to work under root; the owner of the files in stat is 1000 too)
+        102 | 104 | 107 | 108 => 1000,
         105 | 106 | 113 | 114 | 116 | 117 | 119 | 120 => 0, // setuid/setgid/setreuid/... -> ok
         63 => { // uname(utsname*) — 6 fields of 65 bytes (sysname/nodename/release/version/machine/domain)
             let u = f.a1 as *mut u8;
@@ -1518,7 +1559,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 // dispatch.
                 let base = unsafe { *iov.add(i*2) }; let len = unsafe { *iov.add(i*2+1) } as usize;
                 if len == 0 { continue; }
-                let n = if f.nr == 295 || f.nr == 327 { crate::ext2::pread(fd, base as *mut u8, len, off) } else { crate::ext2::pwrite(fd, base as *const u8, len, off) };
+                let n = if f.nr == 295 || f.nr == 327 { crate::ext2::pread(fd, base as *mut u8, len, off) } else { crate::ext2::pwrite(fd, base as *const u8,
+                    len, off) };
                 if n < 0 { if total > 0 { break; } return n as u64; }
                 total += n; off += n as u64;
                 if (n as usize) < len { break; }
@@ -1527,11 +1569,16 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         }
         // SAFETY: S2 — the POSIX shm table (`SHM_*`): a row is written under the FS's own
         // serialisation, by the process that created or mapped the object.
-        77 => { if shm_is(f.a1 as i64) { unsafe { SHM_SIZE[shm_obj(f.a1 as i64)] = f.a2; } 0 } else if is_fs(f.a1 as i64) && crate::ext2::active() { crate::ext2::ftruncate(f.a1 as i64, f.a2) as u64 } else { 0 } } // ftruncate
+        77 => { if shm_is(f.a1 as i64) { unsafe { SHM_SIZE[shm_obj(f.a1 as i64)] = f.a2; } 0 } else if is_fs(f.a1 as i64) && crate::ext2::active() {
+            crate::ext2::ftruncate(f.a1 as i64, f.a2) as u64 } else { 0 } } // ftruncate
         76 => { if crate::ext2::active() { crate::ext2::truncate(crate::proc::resolve(f.a1), f.a2) as u64 } else { (-30i64) as u64 } } // truncate
-        17 => { if is_fs(f.a1 as i64) && crate::ext2::active() { crate::ext2::pread(f.a1 as i64, f.a2 as *mut u8, f.a3 as usize, f.a4) as u64 } else if is_fs(f.a1 as i64) { let fd = f.a1 as i64; crate::fs::lseek(fd, f.a4 as i64, 0); crate::fs::read(fd, f.a2 as *mut u8, f.a3 as usize) as u64 } else { do_read(f.a1 as i64, f.a2 as *mut u8, f.a3 as usize, 0) as u64 } } // pread64
-        18 => { if is_fs(f.a1 as i64) && crate::ext2::active() { crate::ext2::pwrite(f.a1 as i64, f.a2 as *const u8, f.a3 as usize, f.a4) as u64 } else { do_write(f.a1 as i64, f.a2 as *const u8, f.a3 as usize, 0) as u64 } } // pwrite64
-        285 => { if is_fs(f.a1 as i64) && crate::ext2::active() && f.a2 == 0 { crate::ext2::fallocate(f.a1 as i64, f.a3, f.a4) as u64 } else { 0 } } // fallocate
+        17 => { if is_fs(f.a1 as i64) && crate::ext2::active() { crate::ext2::pread(f.a1 as i64, f.a2 as *mut u8, f.a3 as usize, f.a4) as u64 }
+            else if is_fs(f.a1 as i64) { let fd = f.a1 as i64; crate::fs::lseek(fd, f.a4 as i64, 0); crate::fs::read(fd, f.a2 as *mut u8,
+            f.a3 as usize) as u64 } else { do_read(f.a1 as i64, f.a2 as *mut u8, f.a3 as usize, 0) as u64 } } // pread64
+        18 => { if is_fs(f.a1 as i64) && crate::ext2::active() { crate::ext2::pwrite(f.a1 as i64, f.a2 as *const u8, f.a3 as usize, f.a4) as u64 } else {
+            do_write(f.a1 as i64, f.a2 as *const u8, f.a3 as usize, 0) as u64 } } // pwrite64
+        // fallocate
+        285 => { if is_fs(f.a1 as i64) && crate::ext2::active() && f.a2 == 0 { crate::ext2::fallocate(f.a1 as i64, f.a3, f.a4) as u64 } else { 0 } }
         221 | 277 | 73 => 0, // fadvise64 / sync_file_range / flock -> ok
         90 | 91 | 268 | 92 | 93 | 94 | 260 | 280 | 235 | 132 => 0, // chmod/fchmod/fchmodat/chown/fchown/lchown/fchownat/utimensat/utimes/utime -> ok
         86 | 265 => (-1i64) as u64, // link/linkat -> EPERM (symlink/symlinkat are implemented above)
@@ -1590,18 +1637,23 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         82 | 264 | 316 => { // rename / renameat / renameat2
             let (o, n) = if f.nr == 82 { (f.a1, f.a2) } else { (f.a2, f.a4) };
             let (od, nd) = if f.nr == 82 { (crate::proc::AT_FDCWD, crate::proc::AT_FDCWD) } else { (f.a1 as i64, f.a3 as i64) };
-            if crate::ext2::active() { let op = crate::proc::resolve_at_slot(od, o, 0); let np = crate::proc::resolve_at_slot(nd, n, 1); crate::ext2::rename(op, np) as u64 } else { 0 }
+            if crate::ext2::active() { let op = crate::proc::resolve_at_slot(od, o, 0); let np = crate::proc::resolve_at_slot(nd, n, 1); crate::ext2::rename(op,
+                np) as u64 } else { 0 }
         }
         79 => crate::proc::getcwd(f.a1, f.a2) as u64, // getcwd
         80 => { // chdir(path)
-            if crate::ext2::active() { let p = crate::proc::resolve(f.a1); if crate::ext2::is_dir_path(p) { crate::proc::set_cwd(p) as u64 } else if crate::ext2::exists(p) { (-20i64) as u64 } else { (-2i64) as u64 } } else { 0 }
+            if crate::ext2::active() { let p = crate::proc::resolve(f.a1); if crate::ext2::is_dir_path(p) { crate::proc::set_cwd(p) as u64 }
+                else if crate::ext2::exists(p) { (-20i64) as u64 } else { (-2i64) as u64 } } else { 0 }
         }
         81 => 0, // fchdir -> ok (without a change)
-        217 => { if is_fs(f.a1 as i64) && crate::ext2::active() { crate::ext2::getdents64(f.a1 as i64, f.a2 as *mut u8, f.a3 as usize) as u64 } else { 0 } } // getdents64
+        // getdents64
+        217 => { if is_fs(f.a1 as i64) && crate::ext2::active() { crate::ext2::getdents64(f.a1 as i64, f.a2 as *mut u8, f.a3 as usize) as u64 } else { 0 } }
         // SAFETY: S2 — the pseudo-fd table (`NULL_*`): a row belongs to the descriptor's owner from
         // the CAS in `null_alloc_kind` until `null_free`.
-        290 => { let h = null_alloc_kind(4); if h >= 0 { unsafe { let i = (h - NULL_BASE) as usize; NULL_CTR[i] = f.a1; NULL_GEN[i] = 1; NULL_FL[i] = ((f.a2 & 0o4000 != 0) as u8) | (((f.a2 & 1 != 0) as u8) << 1); } } h as u64 } // eventfd2(initval, flags)
-        283 => { let h = null_alloc_kind(5); if h >= 0 { unsafe { let i = (h - NULL_BASE) as usize; NULL_CTR[i] = 0; NULL_IVL[i] = 0; NULL_FL[i] = ((f.a2 & 0o4000 != 0) as u8) | (((f.a1 == 0) as u8) << 2); } } h as u64 } // timerfd_create(clockid, flags)
+        290 => { let h = null_alloc_kind(4); if h >= 0 { unsafe { let i = (h - NULL_BASE) as usize; NULL_CTR[i] = f.a1; NULL_GEN[i] = 1;
+            NULL_FL[i] = ((f.a2 & 0o4000 != 0) as u8) | (((f.a2 & 1 != 0) as u8) << 1); } } h as u64 } // eventfd2(initval, flags)
+        283 => { let h = null_alloc_kind(5); if h >= 0 { unsafe { let i = (h - NULL_BASE) as usize; NULL_CTR[i] = 0; NULL_IVL[i] = 0;
+            NULL_FL[i] = ((f.a2 & 0o4000 != 0) as u8) | (((f.a1 == 0) as u8) << 2); } } h as u64 } // timerfd_create(clockid, flags)
         282 | 289 => { // signalfd / signalfd4(fd, mask*, sizemask, flags): the pending signals from mask as an fd
             // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
             // dispatch.
@@ -1609,8 +1661,10 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             let fd = f.a1 as i64;
             // SAFETY: S2 — the pseudo-fd table (`NULL_*`): a row belongs to the descriptor's owner
             // from the CAS in `null_alloc_kind` until `null_free`.
-            if fd >= 0 { let h = crate::proc::tr(fd as u64); if null_is(h) && unsafe { NULL_KIND[(h - NULL_BASE) as usize] } == 6 { unsafe { NULL_CTR[(h - NULL_BASE) as usize] = mask; } return fd as u64; } return (-22i64) as u64; }
-            let h = null_alloc_kind(6); if h >= 0 { unsafe { let i = (h - NULL_BASE) as usize; NULL_CTR[i] = mask; NULL_FL[i] = (f.nr == 289 && f.a4 & 0o4000 != 0) as u8; } }
+            if fd >= 0 { let h = crate::proc::tr(fd as u64); if null_is(h) && unsafe { NULL_KIND[(h - NULL_BASE) as usize] } == 6 { unsafe {
+                NULL_CTR[(h - NULL_BASE) as usize] = mask; } return fd as u64; } return (-22i64) as u64; }
+            let h = null_alloc_kind(6); if h >= 0 { unsafe { let i = (h - NULL_BASE) as usize; NULL_CTR[i] = mask;
+                NULL_FL[i] = (f.nr == 289 && f.a4 & 0o4000 != 0) as u8; } }
             h as u64
         }
         286 => { // timerfd_settime(fd, flags, new*, old*): itimerspec {interval, value}
@@ -1620,14 +1674,17 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             let i = (fd - NULL_BASE) as usize;
             // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
             // dispatch.
-            let (is, ins, vs, vns) = unsafe { (core::ptr::read_unaligned(f.a3 as *const i64), core::ptr::read_unaligned((f.a3 + 8) as *const i64), core::ptr::read_unaligned((f.a3 + 16) as *const i64), core::ptr::read_unaligned((f.a3 + 24) as *const i64)) };
+            let (is, ins, vs, vns) = unsafe { (core::ptr::read_unaligned(f.a3 as *const i64), core::ptr::read_unaligned((f.a3 + 8) as *const i64),
+                core::ptr::read_unaligned((f.a3 + 16) as *const i64), core::ptr::read_unaligned((f.a3 + 24) as *const i64)) };
             let val = (vs.max(0) as u64) * 1_000_000_000 + vns.max(0) as u64;
             // SAFETY: S2 — the pseudo-fd table (`NULL_*`): a row belongs to the descriptor's owner
             // from the CAS in `null_alloc_kind` until `null_free`.
             unsafe {
                 if f.a4 != 0 { core::ptr::write_bytes(f.a4 as *mut u8, 0, 32); }
                 NULL_IVL[i] = (is.max(0) as u64) * 1_000_000_000 + ins.max(0) as u64;
-                NULL_CTR[i] = if val == 0 { 0 } else if f.a2 & 1 != 0 { if NULL_FL[i] & 4 != 0 { val.saturating_sub(crate::tsc::wall_ns()) + crate::tsc::mono_ns() } else { val } } else { crate::tsc::mono_ns() + val };
+                NULL_CTR[i] = if val == 0 { 0 }
+                    else if f.a2 & 1 != 0 { if NULL_FL[i] & 4 != 0 { val.saturating_sub(crate::tsc::wall_ns()) + crate::tsc::mono_ns() } else { val } }
+                    else { crate::tsc::mono_ns() + val };
             }
             0
         }
@@ -1648,8 +1705,10 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 None => (-24i64) as u64,
             }
         }
-        32 => { let h = f.a1 as i64; if h < 0 { return (-9i64) as u64; } let h = if null_is(h) { null_alloc() } else { h }; crate::proc::install(h) as u64 } // dup
-        33 | 292 => { let h = f.a1 as i64; if h < 0 { return (-9i64) as u64; } let h = if null_is(h) { null_alloc() } else { h }; crate::proc::install_at(h, f.a2 as i64) as u64 } // dup2 / dup3
+        // dup
+        32 => { let h = f.a1 as i64; if h < 0 { return (-9i64) as u64; } let h = if null_is(h) { null_alloc() } else { h }; crate::proc::install(h) as u64 }
+        33 | 292 => { let h = f.a1 as i64; if h < 0 { return (-9i64) as u64; } let h = if null_is(h) { null_alloc() } else { h }; crate::proc::install_at(h,
+            f.a2 as i64) as u64 } // dup2 / dup3
         62 => crate::proc::kill(f.a1 as i64, f.a2) as u64,        // kill(pid, sig)
         200 => crate::proc::tkill(f.a1 as i64, f.a2) as u64,      // tkill(tid, sig)
         234 => crate::proc::tkill(f.a2 as i64, f.a3) as u64,      // tgkill(tgid, tid, sig)
@@ -1693,7 +1752,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         // SAFETY: S4 — `sti; hlt; cli` on THIS core: `rt_sigsuspend` waits for a signal, and
         // the window with interrupts open is exactly one instruction wide, so a signal that
         // arrives cannot be missed between the check above and the `hlt`.
-        130 => { if crate::proc::sig_pending() { (-4i64) as u64 } else { unsafe { core::arch::asm!("sti; hlt; cli", options(nostack, preserves_flags)); } (-4i64) as u64 } } // rt_sigsuspend
+        130 => { if crate::proc::sig_pending() { (-4i64) as u64 } else { unsafe { core::arch::asm!("sti; hlt; cli", options(nostack, preserves_flags)); }
+            (-4i64) as u64 } } // rt_sigsuspend
         273 => 0, // set_robust_list -> ok (sigaltstack is implemented above)
         334 => ENOSYS, // rseq: not supported (glibc switches rseq off at an ENOSYS; a "success" without updating the area would break sched_getcpu)
         302 | 97 => { // prlimit64(pid, res, new, old) / getrlimit(res, rlim)
@@ -1892,7 +1952,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         60 => { // exit — the end of A THREAD (or of the process, if it is single-threaded)
             if THREADED.load(Ordering::SeqCst) {
                 let p = crate::sched::proc_of(crate::sched::current_id());
-                if crate::sched::proc_task_count(p) <= 1 { let c = ((f.a1 & 0xff) << 8) as i32; crate::sched::exit_all(c); crate::proc::exit_cleanup(p); crate::sched::queue_dead_space(crate::sched::task_cr3(p)); crate::sched::exit_current_code(c); }
+                if crate::sched::proc_task_count(p) <= 1 { let c = ((f.a1 & 0xff) << 8) as i32; crate::sched::exit_all(c); crate::proc::exit_cleanup(p);
+                    crate::sched::queue_dead_space(crate::sched::task_cr3(p)); crate::sched::exit_current_code(c); }
                 crate::sched::exit_current_code(((f.a1 & 0xff) << 8) as i32);
             }
             EXIT_CODE.store(f.a1, Ordering::SeqCst); EXITED.store(true, Ordering::SeqCst);
@@ -1946,7 +2007,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 let base = HEAP_BASE.load(Ordering::SeqCst);
                 let top = base + HEAP_FRAMES * 4096;
                 if f.a1 == 0 { return HEAP_BRK.load(Ordering::SeqCst); }
-                if f.a1 >= base && f.a1 <= top { HEAP_BRK.store(f.a1, Ordering::SeqCst); if f.a1 > HEAP_HIGH.load(Ordering::SeqCst) { HEAP_HIGH.store(f.a1, Ordering::SeqCst); } f.a1 }
+                if f.a1 >= base && f.a1 <= top { HEAP_BRK.store(f.a1, Ordering::SeqCst); if f.a1 > HEAP_HIGH.load(Ordering::SeqCst) { HEAP_HIGH.store(f.a1,
+                    Ordering::SeqCst); } f.a1 }
                 else { HEAP_BRK.load(Ordering::SeqCst) }
             }
         }
@@ -2143,7 +2205,10 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         257 => vfs_open_at(f.a1 as i64, f.a2, f.a3, f.a4) as u64, // openat(dirfd, path, flags, mode)
         // SAFETY: S2 — the pseudo-fd table (`NULL_*`): a row belongs to the descriptor's owner from
         // the CAS in `null_alloc_kind` until `null_free`.
-        8 => { if is_fs(f.a1 as i64) { if crate::ext2::active() { crate::ext2::lseek(f.a1 as i64, f.a2 as i64, f.a3 as i64) as u64 } else { crate::fs::lseek(f.a1 as i64, f.a2 as i64, f.a3 as i64) as u64 } } else if null_is(f.a1 as i64) { let i = (f.a1 as i64 - NULL_BASE) as usize; if unsafe { NULL_KIND[i] } == 7 { unsafe { NULL_CTR[i] = match f.a3 { 0 => f.a2, 1 => NULL_CTR[i].wrapping_add(f.a2), _ => NULL_CTR[i] }; NULL_CTR[i] } } else { 0 } } else { (-29i64) as u64 } } // lseek (ESPIPE)
+        8 => { if is_fs(f.a1 as i64) { if crate::ext2::active() { crate::ext2::lseek(f.a1 as i64, f.a2 as i64, f.a3 as i64) as u64 } else {
+            crate::fs::lseek(f.a1 as i64, f.a2 as i64, f.a3 as i64) as u64 } } else if null_is(f.a1 as i64) { let i = (f.a1 as i64 - NULL_BASE) as usize;
+            if unsafe { NULL_KIND[i] } == 7 { unsafe { NULL_CTR[i] = match f.a3 { 0 => f.a2, 1 => NULL_CTR[i].wrapping_add(f.a2), _ => NULL_CTR[i] };
+            NULL_CTR[i] } } else { 0 } } else { (-29i64) as u64 } } // lseek (ESPIPE)
         5 => fstat_any(f.a1 as i64, f.a2 as *mut u8) as u64, // fstat
         74 | 75 => { if crate::ext2::active() { crate::ext2::fsync(f.a1 as i64) as u64 } else { 0 } } // fsync / fdatasync -> write-back + virtio flush
         162 | 306 => crate::ext2::sync_all() as u64, // sync / syncfs — an EIO if the device refused
@@ -2267,7 +2332,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 let deadline = match read_timespec(f.a4) {
                     Some((s, ns)) => {
                         let t = (s.max(0) as u64) * 1_000_000_000 + ns.max(0) as u64;
-                        if op == 9 { Some(if f.a2 & 0x100 != 0 { t.saturating_sub(crate::tsc::wall_ns()) + crate::tsc::mono_ns() } else { t }) } // BITSET: absolute (REALTIME with the flag 0x100)
+                        // BITSET: absolute (REALTIME with the flag 0x100)
+                        if op == 9 { Some(if f.a2 & 0x100 != 0 { t.saturating_sub(crate::tsc::wall_ns()) + crate::tsc::mono_ns() } else { t }) }
                         else { Some(crate::tsc::mono_ns() + t) } // WAIT: relative
                     }
                     None => None,
@@ -2286,7 +2352,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 unsafe { core::ptr::write_volatile(u2, new); }
                 let mut n = crate::sync::wake_addr(f.a1, f.a3 as usize, leader, false);
                 let cmparg = (enc & 0xfff) as i32;
-                let cond = match (enc >> 24) & 0xf { 0 => old == cmparg, 1 => old != cmparg, 2 => old < cmparg, 3 => old <= cmparg, 4 => old > cmparg, _ => old >= cmparg };
+                let cond = match (enc >> 24) & 0xf { 0 => old == cmparg, 1 => old != cmparg, 2 => old < cmparg, 3 => old <= cmparg, 4 => old > cmparg,
+                    _ => old >= cmparg };
                 if cond { n += crate::sync::wake_addr(f.a5, f.a4 as usize, leader, false); }
                 return n as u64;
             }
@@ -2318,7 +2385,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         96 => { // gettimeofday(timeval*, tz)
             // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
             // dispatch.
-            if f.a1 != 0 { let ns = crate::tsc::wall_ns(); unsafe { core::ptr::write_unaligned(f.a1 as *mut i64, (ns / 1_000_000_000) as i64); core::ptr::write_unaligned((f.a1 + 8) as *mut i64, ((ns % 1_000_000_000) / 1000) as i64); } }
+            if f.a1 != 0 { let ns = crate::tsc::wall_ns(); unsafe { core::ptr::write_unaligned(f.a1 as *mut i64, (ns / 1_000_000_000) as i64);
+                core::ptr::write_unaligned((f.a1 + 8) as *mut i64, ((ns % 1_000_000_000) / 1000) as i64); } }
             0
         }
         201 => { let s = crate::tsc::wall_ns() / 1_000_000_000; if f.a1 != 0 { unsafe { core::ptr::write_unaligned(f.a1 as *mut i64, s as i64); } } s } // time
@@ -2327,14 +2395,16 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             let (req, abs) = if f.nr == 35 { (f.a1, false) } else { (f.a3, f.a2 & 1 != 0) };
             if let Some((s, ns)) = read_timespec(req) {
                 let t = (s.max(0) as u64) * 1_000_000_000 + ns.max(0) as u64;
-                let until = if abs { if f.a1 == 0 { t.saturating_sub(crate::tsc::wall_ns()) + crate::tsc::mono_ns() } else { t } } else { crate::tsc::mono_ns() + t };
+                let until = if abs { if f.a1 == 0 { t.saturating_sub(crate::tsc::wall_ns()) + crate::tsc::mono_ns() } else { t } }
+                            else { crate::tsc::mono_ns() + t };
                 return sleep_until_mono(until) as u64;
             }
             0
         }
         // SAFETY: S4 — `pause`: as `rt_sigsuspend` above, the interrupt window is one
         // instruction wide, so a signal cannot slip between the check and the `hlt`.
-        34 => { loop { if crate::proc::sig_pending() { return (-4i64) as u64; } unsafe { core::arch::asm!("sti; hlt; cli", options(nostack, preserves_flags)); } } } // pause — until a signal
+        34 => { loop { if crate::proc::sig_pending() { return (-4i64) as u64; } unsafe { core::arch::asm!("sti; hlt; cli", options(nostack, preserves_flags)); }
+            } } // pause — until a signal
         1000 => { // talaria_fastmap -> the base of the shared region (ring 3's access is explicit, in this AS)
             let r = crate::fastpath::region();
             if r != 0 { crate::paging::protect(r, (crate::fastpath::REGION_SZ as u64 + 4095) & !4095, true, false); }
@@ -2596,9 +2666,11 @@ pub fn deliver_exception_signal(f: &mut crate::idt::ExcFrame, sig: u64, cr2: u64
             // What exactly is under the stack pointer: the workload's own guard page (which means
             // the thread ran into its own limit) or the end of the mapping — those are different illnesses.
             let nm = crate::sched::comm(t); let nl = crate::sched::comm_len(t);
-            crate::println!("[signal] there is no room for the frame of the signal {} at the thread \"{}\" (t{}, rsp={:#x}, the alt stack={:#x}, the page at rsp: {}) — the signal is fatal",
+            crate::println!("[signal] there is no room for the frame of the signal {} at the thread \"{}\" (t{}, rsp={:#x}, the alt stack={:#x}, the page at \
+                rsp: {}) — the signal is fatal",
                 sig, core::str::from_utf8(&nm[..nl]).unwrap_or("?"), t, f.rsp, alt,
-                match crate::paging::page_kind(f.rsp) { 0 => "none at all", 1 => "PROT_NONE (the workload's guard)", 2 => "a lazy reservation", _ => "an ordinary one" });
+                match crate::paging::page_kind(f.rsp) { 0 => "none at all", 1 => "PROT_NONE (the workload's guard)", 2 => "a lazy reservation", _ => "an \
+                    ordinary one" });
             return false;
         }
         usp = alt;
@@ -2613,7 +2685,8 @@ pub fn deliver_exception_signal(f: &mut crate::idt::ExcFrame, sig: u64, cr2: u64
         core::ptr::write_unaligned(sp as *mut u64, restorer);
         core::ptr::write_unaligned(si as *mut i32, sig as i32);              // si_signo
         // si_code: for a #PF it is SEGV_MAPERR (there is no page) / SEGV_ACCERR (there are no rights)
-        let si_code: i32 = match sig { 11 if f.vec == 14 => if f.err & 1 != 0 { 2 } else { 1 }, 4 => 2 /*ILL_ILLOPN*/, 8 => 1 /*FPE_INTDIV*/, _ => 0x80 /*SI_KERNEL*/ };
+        let si_code: i32 = match sig { 11 if f.vec == 14 => if f.err & 1 != 0 { 2 } else { 1 },
+            4 => 2 /*ILL_ILLOPN*/, 8 => 1 /*FPE_INTDIV*/, _ => 0x80 /*SI_KERNEL*/ };
         core::ptr::write_unaligned((si + 8) as *mut i32, si_code);
         let addr = if f.vec == 14 { cr2 } else { f.rip };
         core::ptr::write_unaligned((si + 16) as *mut u64, addr);             // si_addr
@@ -2733,7 +2806,8 @@ fn poll_translated(fds: *mut u8, nfds: usize, to: i64) -> i64 {
     // SAFETY: S1 — the caller hands in an address of the process's memory that `uaccess::gate` has
     // already validated.
     unsafe {
-        for k in 0..n { let p = fds.add(k * 8) as *mut i32; saved[k] = core::ptr::read_unaligned(p); if saved[k] >= 0 { core::ptr::write_unaligned(p, crate::proc::tr(saved[k] as u64) as i32); } }
+        for k in 0..n { let p = fds.add(k * 8) as *mut i32; saved[k] = core::ptr::read_unaligned(p); if saved[k] >= 0 { core::ptr::write_unaligned(p,
+            crate::proc::tr(saved[k] as u64) as i32); } }
         let r = crate::netsys::poll_fds(fds, n, to);
         for k in 0..n { core::ptr::write_unaligned(fds.add(k * 8) as *mut i32, saved[k]); }
         r
@@ -2784,7 +2858,8 @@ fn sysv_shmget(key: u64, size: u64, flags: u64) -> i64 {
     // SAFETY: S2 — the SysV shm table (`SV_*`). THE CALLER HOLDS `shm_lock()`, for the
     // same reason as the POSIX one: `shmget(IPC_CREAT)` is a find-or-create.
     unsafe {
-        for i in 0..SV_N { if SV_ADDR[i] != 0 && SV_KEY[i] == key && key != 0 { if flags & 0o2000 != 0 { return -17; } return i as i64 + 1; } } // IPC_EXCL -> EEXIST
+        // IPC_EXCL -> EEXIST
+        for i in 0..SV_N { if SV_ADDR[i] != 0 && SV_KEY[i] == key && key != 0 { if flags & 0o2000 != 0 { return -17; } return i as i64 + 1; } }
         if flags & 0o1000 == 0 { return -2; } // there is no IPC_CREAT -> ENOENT
         shm_gate_delay();                    // the same window as in `shm_lookup`
         for i in 0..SV_N {
@@ -2815,7 +2890,9 @@ fn sysv_shmctl(id: u64, cmd: u64, buf: u64) -> i64 {
     unsafe {
         if i >= SV_N || SV_ADDR[i] == 0 { return -22; }
         match cmd {
-            2 => { if buf != 0 { core::ptr::write_bytes(buf as *mut u8, 0, 112); core::ptr::write_unaligned((buf + 48) as *mut u64, SV_SIZE[i]); core::ptr::write_unaligned((buf + 72) as *mut i32, 1); core::ptr::write_unaligned((buf + 80) as *mut u64, 1); } 0 } // IPC_STAT: shm_segsz, cpid, nattch
+            2 => { if buf != 0 { core::ptr::write_bytes(buf as *mut u8, 0, 112); core::ptr::write_unaligned((buf + 48) as *mut u64, SV_SIZE[i]);
+                core::ptr::write_unaligned((buf + 72) as *mut i32, 1); core::ptr::write_unaligned((buf + 80) as *mut u64, 1); } 0 }
+                // IPC_STAT: shm_segsz, cpid, nattch
             0 => { SV_ADDR[i] = 0; SV_KEY[i] = 0; 0 } // IPC_RMID (we do not return the memory: the processes may hold it)
             _ => 0,
         }

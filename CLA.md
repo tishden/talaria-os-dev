@@ -7,8 +7,9 @@ your Contributions. It is based on the Apache Software Foundation Individual
 Contributor License Agreement v2.0. You keep the copyright to your
 Contributions; this Agreement only grants licenses.
 
-**How to sign.** There is no bot. In your first pull request, leave a comment
-containing exactly this line, with your own name and the date:
+**How to sign.** There is no bot. In your first pull request to
+<https://github.com/tishden/talaria-os-dev>, leave a comment containing exactly
+this line, with your own name and the date:
 
 ```
 I have read the CLA.md and I hereby sign the Talaria OS Individual Contributor
