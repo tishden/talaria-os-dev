@@ -141,7 +141,7 @@ clean runs close the browser and background rsync.
 
 The `RESULT ...` lines are in `build/results-*.txt`, raw serial logs next to them.
 The history of these numbers (including the hangs fixed in v0.53b) is in
-`docs/POC-RESULTS.md`.
+`CHANGELOG.md`, and the current ones are in `docs/MEASUREMENTS.md` §6.
 
 ## Files
 

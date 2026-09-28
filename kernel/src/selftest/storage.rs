@@ -305,10 +305,12 @@ pub fn run(name: &str, cmdline: &str) -> bool {
         }
         "fsbigrace" => {
             crate::smp::start_from_cmdline(cmdline);
-            // A REPRODUCTION OF AN OPEN DEFECT (docs/TODO.md): four threads spin
-            // a "piece's" life cycle — a directory of files, a rename, a deletion from under
-            // a read. On one core it is green, on two and more it breaks. It is deliberately not
-            // in the suite: a red gate in a suite is noise rather than honesty.
+            // A REPRODUCTION OF A CLOSED CLASS: four threads spin a "piece's" life
+            // cycle — a directory of files, a rename, a deletion from under a read. It
+            // used to be green on one core and broken on two or more, because the
+            // syscall's path buffer was shared (see the gate's assert in `test.sh`:
+            // "a syscall's path belongs to ITS OWN task"). It is in the regression and
+            // it stays there: this is the shape that catches the class coming back.
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/fsbig", &[b"fsbig", b"race"], &[b"HOME=/"]); } }
             crate::suite::park()
         }
@@ -595,7 +597,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
         "dirtysmear" => {
             // STEP 1 OF SESSION 41: THE PRICE OF THE PRE-EMPTION MUST BE SMEARED rather than paid in a batch.
             //
-            // Session 40's stand (`docs/FSYNC-40.md`) measured both sides of the knob
+            // Session 40's stand (`docs/MEASUREMENTS.md` §3) measured both sides of the knob
             // `dirtyage`: it does take the data off an `fsync` call (47 -> 9.4 blocks),
             // but `write` pays for that WITH A BATCH — 44 flushes of 136 blocks, and
             // the insert's `p99.9` is four times worse. The batch was a consequence of
@@ -863,7 +865,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             // THE DIRTY ONES ARE COUNTED BY A COUNTER — AND THE COUNTER MUST AGREE WITH A RECOMPUTATION.
             //
             // Session 39 took 320 us off an `fsync` call (10 % of its price, the instrument
-            // `docs/FSYNC-38.md`) of PURE processor: `jrn_pending` no longer
+            // `docs/MEASUREMENTS.md` §3) of PURE processor: `jrn_pending` no longer
             // walks the whole cache (131072 slots with fscache=512), while the second
             // pass of `writeback_locked` is called only when it has something
             // to write. Both gains rest on four counters that depend

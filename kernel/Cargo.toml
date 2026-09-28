@@ -30,7 +30,7 @@ panic = "abort"
 # The lints below are allowed crate-wide: they fire on existing code as a matter
 # of style (index loops over fixed-size per-CPU/per-task tables, hand-written
 # range and rounding arithmetic, several statements per line). Each one was
-# reviewed for real defects before being allowed (docs/RELEASE-OSS.md 1.4);
+# reviewed for real defects before being allowed (docs/ENGINEERING-NOTES.md §4);
 # removing them one lint at a time is RELEASE-OSS 7.1. New lints still fail CI.
 # `talaria_host`: set by kernel-unit/build.rs when a kernel module is compiled
 # for the host unit tests; kernel glue in such modules is `cfg(not(talaria_host))`.

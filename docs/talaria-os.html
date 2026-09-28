@@ -606,8 +606,8 @@
     (Linux as the control plane): it confirms the hot path on a real 10G.
     <b>Track B</b> is a self-hosting bootable kernel (the boot, SMP, page tables of its own,
     the Linux syscall ABI, musl in ring 3, a scheduler): it confirms that the model is
-    a full-blown OS rather than a library. The full journal is <code>docs/POC-RESULTS.md</code>,
-    the measurement report is <code>docs/BENCH-B.md</code>.</p>
+    a full-blown OS rather than a library. The measurements and their analysis are in
+    <code>docs/MEASUREMENTS.md</code>.</p>
   </div>
   <div class="tablewrap">
   <table>
@@ -631,7 +631,7 @@
     (recvfrom+sendto → smoltcp) against the zero-syscall one (the polling of the rings in ring 3) —
     the socket costs <b>+2.0 us in the p50 and +3.8 us in the p99</b> above the common floor. The
     p99 tail of the socket path is noticeably worse: the gap is structural exactly in the tails rather than in
-    the average (see <code>docs/BENCH-B.md §6</code>).</p>
+    the average (see <code>docs/MEASUREMENTS.md §5</code>).</p>
     <p><b>A caveat about the virtualisation:</b> on Track B in QEMU the per-packet latency is
     squeezed by the VMEXIT on the virtio notify (~4 us) — an artefact of the nested network; on
     real hardware through VFIO (Track A) there is no such VMEXIT (rx→tx = 30–40 ns).
@@ -639,7 +639,7 @@
     <code>rdtsc</code> and do not depend on the virtualisation. <b>Confirmed on a real
     82599</b> (VFIO, <code>bench/ixgbe/hw-bench.sh</code>): a cell's rx→tx = <b>14 ns
     min / 52 ns avg, 92–94% &lt;100 ns, without a single VMEXIT</b> — those ~4 us in QEMU
-    were entirely the virtio kick. The caveat is closed (<code>docs/BENCH-B.md §9</code>).</p>
+    were entirely the virtio kick. The caveat is closed (<code>docs/MEASUREMENTS.md §5</code>).</p>
   </div>
 </section>
 

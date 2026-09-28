@@ -28,8 +28,9 @@ TOP = ("kernel", "docs", "bench", "services", "tools", "examples", "infra",
 # plan was the one file that named the private material it was about removing.
 # Nothing may be added here: an exemption is how a name leaks.
 PENDING = set()
-# Historical journals may quote files that were later removed or renamed.
-JOURNAL = re.compile(r"^docs/(journal/|POC-RESULTS|PLAN-|FSYNC-|TABLO-|SCHED-|BENCH-B|PROD-GAPS|RELEASE-|TODO)|^CHANGELOG\.md$")
+# The changelog quotes files that were later removed or renamed; everything else
+# under docs/ is current documentation and its paths must resolve.
+JOURNAL = re.compile(r"^CHANGELOG\.md$")
 
 
 def is_elf(path):

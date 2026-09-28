@@ -74,19 +74,19 @@ impl<H: Hal, T: Transport, const QUEUE_SIZE: usize> VirtIONetRaw<H, T, QUEUE_SIZ
         self.recv_queue.set_dev_notify(true);
     }
 
-    /// Talaria: звонок ТОЛЬКО по кольцу приёма.
+    /// Talaria: an interrupt on the RECEIVE ring ONLY.
     ///
-    /// Завершения передачи мы не ждём никогда: буферы возвращаются на
-    /// следующем проходе стека, и прерывание ради них — чистый расход. А расход
-    /// этот немалый: замер mongodb дал 625 616 прерываний на 358 297 принятых
-    /// кадров, то есть 1,7 прерывания на кадр — вторая половина приходилась
-    /// ровно на передачу.
+    /// We never wait for transmit completions: the buffers come back on the next
+    /// pass over the stack, so an interrupt for them is pure waste — and not a
+    /// small one. A measurement under mongodb gave 625 616 interrupts for 358 297
+    /// received frames, i.e. 1.7 interrupts per frame, and the second half of them
+    /// was exactly the transmit side.
     pub fn enable_recv_interrupts(&mut self) {
         self.send_queue.set_dev_notify(false);
         self.recv_queue.set_dev_notify(true);
     }
 
-    /// Talaria (§1.2): слово кольца ПРИЁМА для сна в простое (talaria.netidle=1).
+    /// Talaria: the RECEIVE ring's word to sleep on while idle (talaria.netidle=1).
     pub fn rx_used_watch(&self) -> (*const u32, u32) {
         self.recv_queue.used_watch()
     }
@@ -167,21 +167,21 @@ impl<H: Hal, T: Transport, const QUEUE_SIZE: usize> VirtIONetRaw<H, T, QUEUE_SIZ
         Ok(token)
     }
 
-    /// Talaria (TODO §8, батч-notify): как `transmit_begin`, но БЕЗ notify —
-    /// вызывающий батчит кадры и уведомляет устройство один раз через
-    /// [`transmit_notify`]. Экономит MMIO-kick (VMEXIT) на кадр.
+    /// Talaria (batched notify): as `transmit_begin`, but WITHOUT the notify — the
+    /// caller batches frames and notifies the device once through
+    /// [`transmit_notify`]. That saves an MMIO kick (a VMEXIT) per frame.
     ///
     /// # Safety
-    /// Те же требования, что у [`transmit_begin`].
+    /// The same requirements as [`transmit_begin`].
     pub unsafe fn transmit_begin_no_notify(&mut self, tx_buf: &[u8]) -> Result<u16> {
         Self::check_tx_buf_len(tx_buf)?;
         self.send_queue.add(&[tx_buf], &mut [])
     }
 
-    /// Talaria: уведомить устройство о наполненной TX-очереди (один раз на батч).
-    /// Возвращает true, если notify реально послан (устройство не поллит).
+    /// Talaria: notify the device of a filled TX queue (once per batch).
+    /// Returns true if a notify was really sent (the device is not polling).
     pub fn transmit_notify(&mut self) -> bool {
-        // wrap-safe vring_need_event за весь батч + обязательный mb() внутри
+        // A wrap-safe vring_need_event over the whole batch, with the mandatory mb() inside.
         if self.send_queue.prepare_notify_batched() {
             self.transport.notify(QUEUE_TRANSMIT);
             true
@@ -242,16 +242,16 @@ impl<H: Hal, T: Transport, const QUEUE_SIZE: usize> VirtIONetRaw<H, T, QUEUE_SIZ
         Ok(token)
     }
 
-    /// Talaria: перевыставить RX-буфер без notify (батч + [`receive_notify`]).
+    /// Talaria: re-post an RX buffer without a notify (a batch plus [`receive_notify`]).
     ///
     /// # Safety
-    /// Те же требования, что у [`receive_begin`].
+    /// The same requirements as [`receive_begin`].
     pub unsafe fn receive_begin_no_notify(&mut self, rx_buf: &mut [u8]) -> Result<u16> {
         Self::check_rx_buf_len(rx_buf)?;
         self.recv_queue.add(&[], &mut [rx_buf])
     }
 
-    /// Talaria: уведомить об RX-буферах (один раз на батч).
+    /// Talaria: notify about the RX buffers (once per batch).
     pub fn receive_notify(&mut self) -> bool {
         if self.recv_queue.prepare_notify_batched() {
             self.transport.notify(QUEUE_RECEIVE);

@@ -18,7 +18,7 @@ The audience: whoever **changes the kernel/the ABI itself**. How to *run* a work
 ## 0. For an AI agent: how to find one's way and work
 
 **The working cycle (proven in this project):**
-1. **An edit** to one module for one task (an item of the TODO/PROD-GAPS).
+1. **An edit** to one module for one task (an item of `docs/ROADMAP.md`).
 2. **The build:** `cd kernel && cargo -Z json-target-spec build --release   # the toolchain is pinned in rust-toolchain.toml`.
 3. **A run of one mode** in QEMU (docker), an assert of the needed line in the serial output (it is faster
    than the whole regression) — the template is in §11.2.
@@ -166,7 +166,7 @@ The point where a new mode is added is `selftest/` or `runmode.rs` (§10.2).
 | `mem.rs` | ~360 | the physical frame allocator (a bump + a free-list reclaim), the COW refcount + **v1.9: the per-node NUMA areas by the SRAT (`alloc_contig_node`) with a free list OF THEIR OWN (a frame of a foreign node lies above 4 GB and must not get into the common list) and with an identity mapping AT ONCE in `numa_init` — a process's space copies the kernel's tables at the moment of its creation, so a deferred mapping would not reach it** | `init`, `numa_init`, `alloc_frame`, `alloc_contig`, `alloc_contig_node`, `free_contig`, `rc_*`, `free_frames` |
 | `sched.rs` | ~935 | the pre-emptive scheduler, a per-task CR3, spawn/reap/exit, a per-process heap; **v0.51+: the CPU_OF affinity, `ap_loop` (pinned tasks on an AP), the migration `migrate_current_to`, a directed switch (`HINT`/`yield_to`/`yield_now`), an AP's doorbell**; **v1.9: a scheduler on EVERY core of the pool (`ap_schedule`), the pool's mask `POOL`, a thread's name `COMM`, the cheap migration of a pre-empted task `migrate_idle_task`, the BSP's idling `start_idle`** | `spawn`, `spawn_process`, `set_task_cr3`, `reap`, `exit_current_code`, `set_heap`, `start`, `start_idle`, `install`, `ap_loop`, `yield_to`, `cpu_of`, `set_comm`, `tasks_on`, `migrate_idle_task` |
 | `affinity.rs` | ~830 | **v1.9: the layout of the threads over the cores** — the manifest's rules (`pin=`), NAMED POOLS of cores (`pool=`), dedicated cores (the OS chooses the number), the spreading of the unpinned ones, the levelling by DEMAND with a hysteresis, the NUMA locality of the threads AND of the memory by the SRAT, the routing of the MSI-X (`irq=`); the world's snapshot `World` was extracted for the sake of a self-test without hardware | `configure`, `place_main`, `place_new_thread`, `on_set_name`, `balance_tick`, `pick_in_pool`, `imbalance_in_pool`, `allowed_mask`, `pick_launch_node`, `route_device_irqs`, `dump`, `selftest` |
-| `sync.rs` | ~330 | **PLAN-SYNC**: the detection of the wait primitives (WAITPKG/MONITORX/MONITOR/hlt), `kwait_once` (MONITOR→a recheck→sti;mwait), the registry of the futex waiters (WADDR/WOKEN/WDEADLINE), `wait_on_ex` (kind0 a futex / kind1 "until a target" / kind2 a doorbell+a pair), the asymmetric `membarrier` (an IPI ack), the TSC deadline, the ring 0 self-test | `init`, `mode`, `kwait_once`, `wait_on`, `wait_on_ex`, `wake_addr`, `membarrier`, `kick`, `blocked_for_sched`, `runnable_peek` |
+| `sync.rs` | ~330 | the detection of the wait primitives (WAITPKG/MONITORX/MONITOR/hlt), `kwait_once` (MONITOR→a recheck→sti;mwait), the registry of the futex waiters (WADDR/WOKEN/WDEADLINE), `wait_on_ex` (kind0 a futex / kind1 "until a target" / kind2 a doorbell+a pair), the asymmetric `membarrier` (an IPI ack), the TSC deadline, the ring 0 self-test | `init`, `mode`, `kwait_once`, `wait_on`, `wait_on_ex`, `wake_addr`, `membarrier`, `kick`, `blocked_for_sched`, `runnable_peek` |
 | `percpu.rs` | ~80 | the per-CPU data through the GS.base (without a swapgs; gs:0 the ursp, gs:8 the kstack, gs:16 the sig_newrsp, gs:24 the cpu, gs:32 the cur_task), the ONLINE bitmap | `init`, `cpu_id`, `set_kstack_top`, `set_sig_newrsp`, `cur_task` |
 | `syscall.rs` | 532 | SYSCALL/SYSRET (the MSRs), the dispatcher `rust_syscall`, brk/mmap, fork/clone/execve, the fd stubs, the **syscall filter** | `init`, `rust_syscall`, `filter_enable`, `filter_denied`, `heap_base` |
 | `user.rs` | 555 | the GDT/TSS, the ELF loading (built-in/from the disk), a SysV stack, run/run_disk/run_threaded, exec/run_processes/execve, run_processes_disk | `run`, `run_disk`, `run_threaded`, `exec`, `run_processes`, `run_processes_disk`, `execve`, `run_expect_fault` |
@@ -213,7 +213,7 @@ The point where a new mode is added is `selftest/` or `runmode.rs` (§10.2).
 `forktest.s`, `devnull.s`, `sfilter.s`; C: `memtest.c`, `launcher.c`, `fastapp.c`,
 `epsrv.c`, `srv.c`, …; C++: `cpptest*.cpp`; ready musl binaries `mhello`, `mprintf`, …).
 
-`kernel/user/tsync/` — libtsync (PLAN-SYNC): `tsync.h` (SPSC fast path — static inline)
+`kernel/user/tsync/` — libtsync: `tsync.h` (SPSC fast path — static inline)
 + `tsync.c` (a wait word/a mutex/MCS/a condvar, the slow paths of the SPSC), `fiber.[ch]` (green threads),
 the tests/benchmarks `tsynctest.c`/`syncbench.c`/`fiberbench.c`, the musl patch `musl-1.2.5-talaria.patch`
 + `build-musl.sh` (→ `user/dyn/ld-musl-x86_64.so.1`).
@@ -353,9 +353,11 @@ the four bytes of alignment in the `prpsinfo` note).
 
 ---
 
-## 6b. Synchronisation without a busy spin — how it is implemented (PLAN-SYNC, v0.51–v0.52)
+## 6b. Synchronisation without a busy spin — how it is implemented (v0.51–v0.52)
 
-The design and the measurements are in `docs/PLAN-SYNC.md` (§0 the results, §13 the files/the limitations). Here are the mechanics.
+The measured results are in `docs/MEASUREMENTS.md` §6, and the current limitations of
+the SMP model (migration BSP->AP only, an AP is run-to-completion, no signals on an
+AP, which syscalls are safe there) are in `docs/ROADMAP.md` §5. Here are the mechanics.
 
 **The kernel's waiting (`sync.rs`).** The only sleep primitive is `kwait_once(addr, val)`:
 a MONITOR on the line → a recheck of the word → an `sti; mwait` (the arm/check race is closed architecturally:
@@ -395,7 +397,7 @@ of a return from the syscall (rax=0, the callee-saved ones from the `raw` Frame,
 marks the `CPU_OF` and wakes the `ap_loop` with a doorbell; the old BSP context stays in limbo
 (the scheduler does not save the RSP/FPU of the tasks with a CPU_OF≠0), and the old kstack goes into the queue of deferred
 freeing. An AP is run-to-completion (without a timer): `ap_loop` picks a task up, and an exit
-returns the core to the loop (`ap_reenter`, a fresh stack). The limitations are in PLAN-SYNC §13.
+returns the core to the loop (`ap_reenter`, a fresh stack). The limitations are in `docs/ROADMAP.md` §5.
 
 **libtsync (`kernel/user/tsync/`).** Wait-word (tier0 pause → tier1 umwait/mwaitx →
 the futex/upark), a Drepper 3-state mutex, an MCS (a sleep on one's own node, a wake syscall only if the waiter
@@ -411,7 +413,7 @@ The MPSC (v0.53, the actor model — a receiver has many senders): `tsync_mpsc` 
 bounded one, a producer publishes a slot by a store of the per-slot seq (it wakes a kernel mwait without a syscall),
 a consumer sleeps in a kind1 upark on the seq of ITS OWN slot with a poll-then-sleep pre-spin; at a state==2 the
 futex wake is sent only by the producer of the position `c_waitpos`. The application: the tsync dispatcher of
-SObjectizer (`services/actors/`, an actor benchmark Linux vs Talaria — the TODO §11).
+SObjectizer (`services/actors/`, an actor benchmark Linux vs Talaria).
 
 **The batched virtio notify (`vendor/virtio-drivers`, `fastpath.rs`).** The cell takes the TX ring
 off entirely through a `transmit_begin_no_notify` and notifies once (`transmit_notify` →
@@ -897,6 +899,11 @@ The console's `nics` shows the table and what it sees in the machine.
 
 ## 11. The testing
 
+What is deliberately NOT covered, and why (the ENA knobs — there is no card under
+QEMU; an htree hash collision; the mapping-rollback path; …) is listed in
+`docs/ROADMAP.md` §3. A gate that cannot fail is not a gate — the rules for
+writing one are `docs/ENGINEERING-NOTES.md` §3.
+
 ### 11.0. The host unit tests (`kernel-unit/`)
 
 The kernel is `no_std` on its own target, so its modules cannot be tested in
@@ -987,10 +994,10 @@ a tail of the cmdline through the user-data (`talaria.userdata=1`, see USER-GUID
 | `ec2-crash-test.sh "<phase 1>" "<phase 2>"` | crash consistency on a live EBS: the role of "the pulled-out power" is played by a `stop-instances --force`, and the second phase starts on the same volume with another user-data |
 | `validate-remote.sh <the type>` | bring a *.metal up with terraform, upload the tree, build the kernel, run `test.sh` (+`FULL=1` — the workloads' images, the DBMS clients and `validate.sh`) |
 
-The pitfalls of this path (each of them cost half an hour or more) are collected in the header of `docs/TODO.md`,
-the sections "The pitfalls of session …": the decoding of the `get-console-output`, the base64 in the
+The pitfalls of this path (each of them cost half an hour or more) are collected in
+`docs/ENGINEERING-NOTES.md` §5: the decoding of the `get-console-output`, the base64 in the
 `modify-instance-attribute`, the limited serial buffer, the vCPU quota, and also two
-fresh ones — an AMI is bound to be assembled with the canonical cmdline
+more — an AMI is bound to be assembled with the canonical cmdline
 `console=ttyS0 talaria.pci=1 talaria.ip=dhcp talaria.userdata=1` (otherwise the PCI does not
 come up and the kernel honestly writes "no NIC was found"), and `ssh` reads the stdin
 entirely, because of which an ordinary `while read` around any of these scripts loses
@@ -1205,31 +1212,17 @@ gets through 3–6 items.
 
 ---
 
-## 13. The roadmap and the status
+## 13. The invariants each milestone added
 
-- **Closed (with automated tests)** — see `docs/PROD-GAPS.md`: the memory's correctness (a UAF,
-  the COW refcount, a per-process AS for the disk workloads), the observability/the enforcement
-  (the counters, the hot-path zero-syscall, the telemetry), the robustness (a soak, the watchdog),
-  the operator's side/the security (the control-plane auth, the syscall filter, the manifest's `core=`),
-  the test plan B1–B8, the kernel's outgoing network (DNS, TLS in user space) and a multithreaded
-  disk workload under the supervisor. The regression's counters are in the README (the single
-  source); the full map of the product's boundaries/limits is docs/PRODUCT.md, and the plan of
-  the finalisation of v1.0 is docs/RELEASE-1.0.md (talaria-pack/talaria-check/mode=cell,
-  the memory at restarts, the LICENSE/CONTRIBUTING).
-- **Bare metal (v1.7, session 9): IT IS UP.** On a `c6i.metal` (128 cores, 256 GB, without
-  a hypervisor) the kernel goes through the whole bring-up via OUR OWN BIOS chain: a memory
-  map of 22 records, the ACPI (the RSDP was found by a scan, the MADT has 64 CPUs, the MCFG has the ECAM),
-  PCIe through the ECAM (52 bridges + 307 functions), an NVMe at `c2:00.0`, ext2 on a live EBS,
-  an `ext2-test: ALL OK`. The benchmarks were run too: fsbench (an fsync of 7.4 ms for 512
-  blocks, a repeated one of 4 us), the PMU (`rdpmc`, an IPC of 1.93 — a real counter),
-  `sync` (**the tier `mwait(ring0)`**, a cross-core wake-up with a p50 of 901 ns — on
-  Nitro guests the same detection gives `hlt+ipi`, that is, on hardware PLAN-SYNC
-  works on the MAIN path). The analysis is in `docs/PLAN-V1.7.md`, the diagnostics is §11.4.
-  What is left on the hardware: **SMP** (an AP does not come up — A10) and the **ENA network** (it has not been
-  checked even once — A11), see the header of `docs/TODO.md`.
-- **Outside the environment (section C, hardware is needed):** in-kernel NIC drivers
-  (ixgbe/mlx5), a real NIC on the hot path, PTP/hardware timestamps, the tail SLA p99.9
-  against the hardware's baseline; a production exchange (the mainnet) is at the owner's decision.
+The status, the regression counters and the version are in `README.md`; what is
+still open is `docs/ROADMAP.md`; the history of what was done and when is
+`CHANGELOG.md`; the numbers are `docs/MEASUREMENTS.md`.
+
+What follows is the part of that history a kernel developer still needs: the
+invariants and the design decisions each milestone introduced, subsystem by
+subsystem. They are numbered as they were introduced, and that numbering is this
+section's own — it is NOT the numbering of §12.
+
 - **v0.48 — a DB on Talaria:** PostgreSQL 16 (a postmaster + forks) and MariaDB 10.11 (InnoDB, threads)
   work as network servers with persistence: `ext2.rs` (an RW ext2 on virtio-blk/NVMe,
   a write-back cache, e2fsck-clean images; **v1.1 §8: a JBD2 journal with barriers and
@@ -1295,7 +1288,7 @@ gets through 3–6 items.
   a `talaria.mode=proc` by a manifest (the DB path), `dyn` (musl) and `dynglibc` (glibc 2.35,
   `kernel/user/glibc/`); on the host: an `e2fsck -fn disk_ext2.img` after the run. validate.sh B10:
   PostgreSQL/MariaDB/MongoDB through their run.sh (a SKIP without the assembled artefacts).
-- **v0.51 — PLAN-SYNC (synchronisation without a busy spin), the new invariants 27–33:**
+- **v0.51 — synchronisation without a busy spin, the new invariants 27–33:**
   (27) the per-CPU data goes through the GS.base (percpu.rs), which on every core is ALWAYS the kernel's (without a
   swapgs): the syscall stub uses the gs:0/gs:8/gs:16, and the interrupts may read the gs at any moment;
   the user code is forbidden to change the GS (an `arch_prctl(ARCH_SET_GS)`→an EINVAL; a `mov %gs` in ring 3 would break
@@ -1340,14 +1333,16 @@ gets through 3–6 items.
   and `talaria.netidle=1` started working on virtio. The ENA's diagnostics: `talaria.ena=phc`
   (the device's clock), `rss`/`rsstbl`/`rsshash`/`rsscq`, `hibuf`.
   `talaria.userdata=1` is the cmdline's tail from the EC2 user-data (see §11.3).
-- **The known technical debt:** a hw watchpoint
-  is fixed at 4 bytes. **The gap of the ENA's datapath against Linux is closed**
-  (session 6: the accelerated LLQ mode, an RTT of 34 us against Linux's 43) — the story
-  of the search is in `docs/PLAN-V1.4.md`.
+- **The known technical debt:** a hw watchpoint is fixed at 4 bytes. **The gap of
+  the ENA's datapath against Linux is closed** (the accelerated LLQ mode, an RTT of
+  33.6 us against Linux's 43.0) — the story of the search, and why the mode is a
+  CONTRACT rather than a performance flag, is §12.21 and
+  `docs/MEASUREMENTS.md` §8.
 
 ---
 
 Related documents: `docs/USER-GUIDE.md` (the build/the launch of a workload),
-`kernel/README.md`, `kernel/BUILD.md`, `services/README.md`,
-`docs/PROD-GAPS.md` (the gaps/the test plan), `docs/POC-RESULTS.md` (the measurements),
-`docs/TODO.md` (the roadmap), `docs/talaria-os.html` (the design doc TAL-RFC-001).
+`docs/ENGINEERING-NOTES.md` (the rules of measurement, the harness's traps and what
+is already closed), `docs/MEASUREMENTS.md` (the numbers), `docs/ROADMAP.md` (what is
+open), `kernel/README.md`, `kernel/BUILD.md`, `services/README.md`,
+`docs/talaria-os.html` (the design doc TAL-RFC-001).

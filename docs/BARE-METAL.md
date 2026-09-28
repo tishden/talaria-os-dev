@@ -271,7 +271,7 @@ Separately about the stand itself:
 
 ---
 
-Related documents: `docs/PLAN-V1.7.md` (A9: the bring-up on hardware),
-`docs/PLAN-V1.8.md` (A10-A12: SMP, the network, pre-emption), `docs/TODO.md` (the
-open items and the pitfalls by session), `docs/USER-GUIDE.md` §9.10 (the
+Related documents: `docs/MEASUREMENTS.md` §8 (what was measured on hardware),
+`docs/ROADMAP.md` (what is still open there), `docs/ENGINEERING-NOTES.md` (the
+rules and the traps of measuring at all), `docs/USER-GUIDE.md` §9.10 (the
 deployment on AWS).

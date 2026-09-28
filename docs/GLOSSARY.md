@@ -1,9 +1,10 @@
 # Glossary
 
 The words below are used throughout this repository — in the guides, in the
-commit messages and in the working journals. Most are ordinary words used in one
+commit messages and in the code's comments. Most are ordinary words used in one
 fixed sense; a couple are this project's own. They are listed here because the
-sense is not guessable, and guessing costs a reader an hour.
+sense is not guessable, and guessing costs a reader an hour. The last section
+decodes the plan names the code's comments still cite.
 
 ## The system
 
@@ -54,12 +55,12 @@ matched by a regular expression in `kernel/test.sh` or `kernel/validate.sh`. A
 feature "has a gate" when its absence makes the regression red. A gate that
 cannot fail is not a gate.
 
-**Scoreboard** (in the journals: "табло") — a table of comparable points against
-Linux: a workload times a percentile, won / parity / lost. `docs/TABLO-41.md` is
+**Scoreboard** — a table of comparable points against
+Linux: a workload times a percentile, won / parity / lost. `docs/MEASUREMENTS.md` §2 holds
 the current one. A point enters it only if both sides ran the same binary through
 the same generator on the same stand.
 
-**Rise** (in the journals: "подъём") — one bring-up of the stand from which a
+**Rise** — one bring-up of the stand from which a
 whole set of points is taken. The unit matters because numbers from DIFFERENT
 rises are not comparable at the tails: `p99.9` does not repeat between rises
 better than a factor of a few, which is why a change is judged by alternating
@@ -81,3 +82,26 @@ measured"; that is "the guest" or "the server".
 **Noise floor** — the spread a stand gives on a REPEATED run of the same thing.
 A difference below the noise floor is not a result, and the floor is measured
 before the experiment, not deduced after it.
+
+## The names of the plans the code cites
+
+The system was built plan by plan, and the comments in `kernel/src` carry those
+plans' names as provenance: "PLAN-SYNC stage 3", "PLAN-V1.1 §4.4",
+"POC-RESULTS v0.15", "RELEASE-1.0 §1.3". The plans themselves were working
+documents and have been condensed away; the names are kept in the comments
+because they say WHEN and WHY a thing was built, which a reader of a single
+function cannot otherwise recover. Where each one's content now lives:
+
+| the name in a comment | what it was | where it is now |
+|---|---|---|
+| **PLAN-SYNC** (stages 0-5, §§1-14) | the design of synchronisation without a busy spin: the wait tiers, the kernel futex on `mwait`, libtsync, fibers, the cross-VM doorbell | the mechanics: `docs/DEVELOPMENT-GUIDE.md` §6b; the numbers: `docs/MEASUREMENTS.md` §6; the limitations: `docs/ROADMAP.md` §5 |
+| **PLAN-V1.1 … PLAN-V1.9** | the per-milestone plans (EC2 and ENA, the FS, the boot chains, bare metal, thread placement) | `CHANGELOG.md` per version; the numbers in `docs/MEASUREMENTS.md` §§8-9 |
+| **PLAN-B2, PLAN-B-RUNTIME, PLAN-B-TOOL** | the earliest plans of the bootable kernel: concurrency, epoll, the zero-syscall datapath, the runtime's breadth, the operator's side | `CHANGELOG.md` v0.20-v0.43; the microbenchmarks in `docs/MEASUREMENTS.md` §5 |
+| **POC-RESULTS vX.Y** | the measurement journal, one entry per version | `docs/MEASUREMENTS.md` (the current numbers) and `CHANGELOG.md` (when each appeared) |
+| **PROD-GAPS** (A1-A4, B1-B12, C) | the list of gaps to production and the test plan; A and B are closed with gates, C needed hardware | the gates are in `kernel/test.sh` and `kernel/validate.sh`; what is left of C is `docs/ROADMAP.md` §2 |
+| **RELEASE-1.0 §N** | the plan that finalised the product: the application pipeline, the soak, the open-source wrapping | `CHANGELOG.md` v1.0-preview; the open remainder is `docs/ROADMAP.md` |
+| **RELEASE-OSS N.N** | the private plan for publication: the build from the public tree, the export, the `unsafe` justifications, the unit tests, the language | `CHANGELOG.md` v1.13; the clippy allow-table's rules are in `kernel/Cargo.toml` itself |
+| **TABLO-NN, FSYNC-NN, SCHED-43, BENCH-B** | the per-session measurement reports | `docs/MEASUREMENTS.md` §§2-5 |
+
+The rules those sessions bought, which matter more than any single number, are in
+`docs/ENGINEERING-NOTES.md`.

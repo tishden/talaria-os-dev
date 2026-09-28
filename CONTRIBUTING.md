@@ -3,7 +3,10 @@
 Thank you for your interest. This page describes how development works and what
 a change needs to get into `main`. For orientation in the code start with
 `docs/DEVELOPMENT-GUIDE.md` (module map §4, recipes §10, **invariants §12 —
-read them before changing the kernel**).
+read them before changing the kernel**). If the change is about performance, or
+if you are going to measure anything, read `docs/ENGINEERING-NOTES.md` first: it
+holds the rules of judging a measurement, the ways the instrument has lied
+before, and a table of hypotheses already closed by measurement.
 
 ## License and CLA
 
@@ -47,7 +50,11 @@ Known flakes (do not "fix" blindly, re-run):
 - `forkap` — 40 fork/exit cycles across four vCPUs inside a fixed 8 s window; on
   a loaded host the workload is still working when the window closes (the two
   assertions after it, about the APs and the freed address spaces, still pass —
-  which is the tell that the run was alive, just slower).
+  which is the tell that the run was alive, just slower);
+- `idleshoot`, `netshoot` — both wait for acknowledgements from a neighbouring
+  core, and on a loaded host the neighbour is TAKEN OFF ITS CORE by the
+  hypervisor; the gate says so in its own log (`taken by the host true`). Both
+  are green in a single repeat on a quiet machine.
 
 Tests that need a fresh `kernel/uefi-stub` are skipped honestly otherwise: the
 stub carries the kernel ELF inside, so rebuild it with `kernel/uefi-stub/build.sh`

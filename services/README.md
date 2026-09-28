@@ -41,7 +41,7 @@ common approach: link at `0x10000000` (the Talaria user region),
   lists, sets, DBSIZE, INFO (an epoll event loop), answering RESP on TCP 6379.
 - The databases, the JVM and ClickHouse are covered by `kernel/validate.sh`
   (B10-B12), and six server workloads are compared with Linux on EC2 by
-  `bench/suite` (`docs/TABLO-41.md`).
+  `bench/suite` (`docs/MEASUREMENTS.md` §2).
 
 ## The full process life cycle (fork + execve + wait4)
 

@@ -93,5 +93,5 @@ grep -iE "rx->tx|pkts|ns|min/avg" /tmp/cell.log | tail -3
 
 kill $CELL 2>/dev/null
 echo ""
-echo "Done. Compare the RTT with docs/BENCH-B.md §2 (QEMU): on hardware the VMEXIT floor disappears."
+echo "Done. Compare the RTT with docs/MEASUREMENTS.md §5 (QEMU): on hardware the VMEXIT floor disappears."
 echo "To give the port back to ixgbe: sudo $0 cleanup"

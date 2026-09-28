@@ -71,5 +71,5 @@ initdb) — the data format of one version is the same.
 The postmaster plus 5 background processes plus one backend per connection;
 ~35 MB of ext2 for the data; about 1 s to `ready to accept connections` in
 QEMU/KVM. PostgreSQL is one of the six workloads compared with Linux on EC2
-(`docs/TABLO-41.md`). `could not create IPv6 socket` in the log is expected:
+(`docs/MEASUREMENTS.md` §2). `could not create IPv6 socket` in the log is expected:
 there is no AF_INET6.

@@ -9,7 +9,7 @@ It is built for latency-critical workloads: trading, embedded, dedicated
 appliance servers behind an external security perimeter. It boots under
 QEMU/KVM, as an AMI on EC2 and on bare metal (`c6i.metal`).
 
-**Against Linux on real workloads** (`docs/TABLO-41.md`): six servers
+**Against Linux on real workloads** (`docs/MEASUREMENTS.md` §2): six servers
 (PostgreSQL, MySQL/MariaDB, MongoDB, Redis, nginx, mongoose) on four EC2
 `c6i.xlarge` in one zone. Each server has its own load generator, the loop is
 open, and the rate ladder starts from the ceiling both systems share.
@@ -21,14 +21,12 @@ open, and the rate ladder starts from the ceiling both systems share.
 | p99.9  | 65 | 7 | 2 |
 | p99.99 | 63 | 2 | 8 |
 
-Every lost point is analysed by name (`docs/TABLO-41.md`, `docs/FSYNC-42.md`,
-`docs/SCHED-43.md`).
+Every lost point is analysed by name (`docs/MEASUREMENTS.md` §2.3).
 
 > **Status: v1.13.** Provided as is, without warranty. Interfaces are not
 > stable before 1.0: the `cell.manifest` format, the `talaria.*` boot
 > parameters, the Talaria-specific syscalls (1000+, 4600+) and the libtsync API
-> may change without backward compatibility. Most of the documentation under
-> `docs/` is still in Russian; the English translation is in progress.
+> may change without backward compatibility.
 
 ## What is different
 
@@ -96,16 +94,17 @@ qemu ... -append "console=ttyS0 talaria.mode=cell" -drive file=disk.img,...
 | `docs/DEVELOPMENT-GUIDE.md` | architecture, module map, recipes, invariants |
 | `docs/PERFORMANCE-OPTIMIZATION-GUIDE.md` | how to measure, profile and tune a workload |
 | `docs/BARE-METAL.md` | what QEMU hides: pitfalls of real machines and how to diagnose them |
-| `docs/talaria-os.html` | design document TAL-RFC-001 (motivation, prior art, architecture) |
+| `docs/MEASUREMENTS.md` | every load-bearing number, the conditions it was taken under, and what it proves |
+| `docs/ENGINEERING-NOTES.md` | the pitfalls and the rules: how to judge a measurement, how to write a gate that cannot lie, what is already closed |
+| `docs/ROADMAP.md` | what is NOT done, why, and what it would take |
 | `docs/GLOSSARY.md` | the words this repository uses in one fixed sense (cell, gate, stand, knob, scoreboard, rise, band) |
-| `CHANGELOG.md` | release history (in Russian — it is a working journal too) |
+| `docs/talaria-os.html` | design document TAL-RFC-001 (motivation, prior art, architecture) |
+| `CHANGELOG.md` | release history |
 
-Everything else under `docs/` is the WORKING JOURNAL of the sessions this system
-was built in — the measurements, the dead ends and the reasons
-(`POC-RESULTS`, `PLAN-*`, `TABLO-*`, `FSYNC-*`, `SCHED-*`, `TODO.md`), and so is
-`CHANGELOG.md`. They are published as they were written, in Russian: their value
-is in the detail, and a translation would cost exactly that. The guides in the
-table above are the ones a user needs, and they are in English.
+`MEASUREMENTS`, `ENGINEERING-NOTES` and `ROADMAP` are the condensed working
+journal of the forty-eight sessions this system was built in — the numbers and
+their analysis, the traps and rules paid for along the way, and what is still
+open. Read `ENGINEERING-NOTES` before changing anything.
 
 ## Repository layout
 

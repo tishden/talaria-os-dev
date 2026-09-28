@@ -19,9 +19,9 @@ use core::ptr;
 use core::ptr::NonNull;
 use core::sync::atomic::{fence, AtomicU16, Ordering};
 
-// Talaria: дренаж почтового ящика сброса TLB из долгого ожидания устройства.
-// Символ определён в ядре (`paging::tlb_service`, `#[no_mangle]`); у тестов
-// самого крейта ядра нет, поэтому там пустышка.
+// Talaria: draining the TLB-shootdown mailbox from inside a long wait for the
+// device. The symbol is defined in the kernel (`paging::tlb_service`,
+// `#[no_mangle]`); the crate's own tests have no kernel, so there it is a stub.
 #[cfg(not(test))]
 extern "C" {
     fn tlb_service();
@@ -68,7 +68,7 @@ pub struct VirtQueue<H: Hal, const SIZE: usize> {
     last_used_idx: u16,
     /// Whether the `VIRTIO_F_EVENT_IDX` feature has been negotiated.
     event_idx: bool,
-    /// Talaria: avail_idx на момент последнего батч-notify (vring_need_event по спеке).
+    /// Talaria: `avail_idx` as of the last batched notify (`vring_need_event` per the spec).
     last_notify_avail: u16,
     #[cfg(feature = "alloc")]
     indirect: bool,
@@ -332,12 +332,12 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
 
         // Wait until there is at least one element in the used ring.
         while !self.can_pop() {
-            // Talaria: ожидание диска — самое ДОЛГОЕ ожидание в ядре, и идёт оно
-            // с запрещёнными прерываниями. Сосед, снимающий отображение, ждёт
-            // подтверждения сброса TLB звонком, который сюда не доедет: без
-            // дренажа почтового ящика он ждёт 10 мс и сдаётся, оставляя у нас
-            // устаревшую запись TLB. `tlb_service` — символ ядра (no_mangle),
-            // он же зовётся из обработчика вектора сброса.
+            // Talaria: waiting for the disk is the LONGEST wait in the kernel, and it
+            // runs with interrupts disabled. A neighbour removing a mapping waits for
+            // an acknowledgement of the TLB shootdown through an interrupt that will
+            // not arrive here: without draining the mailbox it waits 10 ms, gives up
+            // and leaves us with a stale TLB entry. `tlb_service` is a kernel symbol
+            // (no_mangle) and is the same code the shootdown vector's handler calls.
             unsafe { tlb_service() };
             spin_loop();
         }
@@ -362,23 +362,24 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         }
     }
 
-    /// Talaria (батч-notify): нужно ли уведомить устройство за ВСЕ дескрипторы,
-    /// добавленные с прошлого вызова. По спеке VirtIO 2.6.6.4 (vring_need_event):
-    /// notify, если avail_event попал в полуинтервал (old, new] — wrap-safe по u16
-    /// (наивное `avail_idx >= avail_event+1` после 65536 дескрипторов ломается и
-    /// notify исчезает навсегда). Обязательный mb() перед чтением avail_event.
+    /// Talaria (batched notify): whether the device must be notified for ALL the
+    /// descriptors added since the last call. Per the VirtIO spec 2.6.6.4
+    /// (`vring_need_event`): notify if `avail_event` fell into the half-open interval
+    /// (old, new] — wrap-safe over u16 (the naive `avail_idx >= avail_event + 1`
+    /// breaks after 65536 descriptors and the notify disappears for ever). The mb()
+    /// before reading `avail_event` is mandatory.
     pub fn prepare_notify_batched(&mut self) -> bool {
         core::sync::atomic::fence(Ordering::SeqCst);
         let new = self.avail_idx;
         let old = self.last_notify_avail;
         self.last_notify_avail = new;
-        if new == old { return false; } // ничего не добавляли
+        if new == old { return false; } // nothing was added
         if self.event_idx {
-            // SAFETY: как в should_notify — used валиден.
+            // SAFETY: as in should_notify — `used` is valid.
             let event = unsafe { (*self.used.as_ptr()).avail_event.load(Ordering::Acquire) };
             new.wrapping_sub(event).wrapping_sub(1) < new.wrapping_sub(old)
         } else {
-            // SAFETY: как в should_notify.
+            // SAFETY: as in should_notify.
             unsafe { (*self.used.as_ptr()).flags.load(Ordering::Acquire) & 0x0001 == 0 }
         }
     }
@@ -418,14 +419,15 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         self.last_used_idx != unsafe { (*self.used.as_ptr()).idx.load(Ordering::Acquire) }
     }
 
-    /// Talaria (§1.2): слово used-кольца, на котором можно СПАТЬ в простое
-    /// (MONITOR/MWAIT), и его текущее значение. Устройство, завершая буфер,
-    /// пишет `idx` — эта DMA-запись и будит спящего без прерывания и vmexit.
-    /// Отдаём пару (flags, idx) одним u32: flags меняется редко, лишнее
-    /// пробуждение по нему безвредно, а адрес обязан быть выровнен на 4.
+    /// Talaria: the word of the used ring that can be SLEPT on while idle
+    /// (MONITOR/MWAIT), together with its current value. The device writes `idx` when
+    /// it completes a buffer, and that DMA write is what wakes the sleeper with no
+    /// interrupt and no VMEXIT. The pair (flags, idx) is returned as one u32: flags
+    /// changes rarely, a spurious wakeup on it is harmless, and the address has to be
+    /// 4-byte aligned.
     pub fn used_watch(&self) -> (*const u32, u32) {
         let p = self.used.as_ptr() as *const u32; // flags @0, idx @2
-        // SAFETY: `self.used` указывает на живое выровненное used-кольцо.
+        // SAFETY: `self.used` points at a live, aligned used ring.
         (p, unsafe { core::ptr::read_volatile(p) })
     }
 
@@ -549,39 +551,40 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         }
     }
 
-    /// Talaria: снять ЛЮБОЕ готовое завершение и вернуть его токен.
+    /// Talaria: take ANY ready completion and return its token.
     ///
-    /// Зачем. `pop_used` требует, чтобы в голове used-кольца лежал ИМЕННО наш
-    /// токен, — то есть допускает ровно одну команду в полёте. Пока команда
-    /// одна, барьер устройства (десятки миллисекунд: у хозяина это fdatasync по
-    /// образу) держит очередь целиком, и ни одно чтение мимо него не проходит.
-    /// С этим методом владельцем завершения может быть кто угодно: снявший
-    /// разбирает токен и будит того, чья это команда.
+    /// Why. `pop_used` requires OUR OWN token to be at the head of the used ring,
+    /// i.e. it allows exactly one command in flight. While there is only one, the
+    /// device's barrier (tens of milliseconds — on the host it is an `fdatasync` of
+    /// the image) holds the whole queue and not a single read gets past it. With this
+    /// method the owner of a completion can be anybody: whoever takes it parses the
+    /// token and wakes the task the command belongs to.
     ///
-    /// Освобождение цепочки идёт по `desc_shadow` (по полю `next`), а не по
-    /// списку буферов, поэтому знать их здесь не нужно. Для HAL, где `unshare`
-    /// пуст (наш случай: адресация один-в-один, отскоковых буферов нет), это
-    /// полный эквивалент `recycle_descriptors`. Косвенные цепочки (`INDIRECT`)
-    /// собираются только с фичей `alloc`, которая у нас выключена; если она
-    /// когда-нибудь появится, здесь нужен разбор её списка.
+    /// The chain is freed through `desc_shadow` (by the `next` field) rather than
+    /// through the list of buffers, so the buffers need not be known here. For a HAL
+    /// where `unshare` is empty (our case: identity addressing, no bounce buffers)
+    /// this is a full equivalent of `recycle_descriptors`. Indirect chains
+    /// (`INDIRECT`) are only built with the `alloc` feature, which is off here; if it
+    /// ever appears, its list has to be walked here too.
     ///
     /// # Safety
-    /// Буферы команды, чей токен возвращён, устройством больше не трогаются.
+    /// The buffers of a command whose token is returned are no longer touched by the
+    /// device.
     pub unsafe fn pop_any(&mut self) -> Option<u16> {
         if !self.can_pop() {
             return None;
         }
         let last_used_slot = self.last_used_idx & (SIZE as u16 - 1);
-        // SAFETY: `self.used` указывает на живое выровненное used-кольцо.
+        // SAFETY: `self.used` points at a live, aligned used ring.
         let head = unsafe { (*self.used.as_ptr()).ring[last_used_slot as usize].id as u16 };
         if usize::from(head) >= SIZE {
-            return None; // устройство назвало несуществующий дескриптор — не трогаем список
+            return None; // the device named a non-existent descriptor — leave the list alone
         }
         if self.desc_shadow[usize::from(head)]
             .flags
             .contains(DescFlags::INDIRECT)
         {
-            return None; // косвенных цепочек здесь не бывает (см. шапку)
+            return None; // there are no indirect chains here (see the note above)
         }
         let original_free_head = self.free_head;
         self.free_head = head;
@@ -598,7 +601,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         }
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
         if self.event_idx {
-            // SAFETY: см. `pop_used`.
+            // SAFETY: as in `pop_used`.
             unsafe {
                 (*self.avail.as_ptr())
                     .used_event

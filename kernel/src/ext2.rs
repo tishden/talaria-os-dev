@@ -208,7 +208,7 @@ static mut CLOCK: u32 = 0;
 static mut DIRTY_N: usize = 0;        // how many slots are dirty (0 -> a flush is not needed at all)
 // SESSION 39: THE DIRTY ONES ARE COUNTED BY A COUNTER RATHER THAN BY A WALK OVER THE WHOLE CACHE.
 //
-// The instrument of the `fsync` phases (docs/FSYNC-38.md, mongodb/insert) showed 320 us per
+// The instrument of the `fsync` phases (docs/MEASUREMENTS.md §3, mongodb/insert) showed 320 us per
 // call — 10 % of the price — of PURE processor on the walks over the whole cache (131072
 // slots with fscache=512): `jrn_pending` twice (165 us) and the second pass of
 // `writeback_locked` (156 us), which usually has nothing to write. Neither is about
@@ -867,7 +867,7 @@ unsafe fn writeback(sel: Sel, cause: WbC) -> usize {
     // `DIRTY_N > 0` — "there is at least something dirty in the cache". Under mongodb that
     // was always enough: an fsync of WiredTiger's journal goes with the dirty blocks of OTHER
     // files, and the pass honestly walked the whole cache in order to write nothing.
-    // The instrument: 156 us per call, 5 % of its price (docs/FSYNC-38.md).
+    // The instrument: 156 us per call, 5 % of its price (docs/MEASUREMENTS.md §3).
     //
     // The condition now goes BY THE SELECTION rather than by "the dirty ones in general", and every branch
     // answers the question "what could the first pass have missed":
@@ -935,7 +935,7 @@ pub fn dirty_from_cmdline(cmdline: &str) {
 }
 // ══ STEP 1 OF SESSION 40: THE PRE-EMPTIVE FLUSH BY THE AGE OF THE DIRTY DATA ═
 //
-// Session 39's instrument (`docs/FSYNC-39.md`) closed two questions and opened a knob:
+// Session 39's instrument (`docs/MEASUREMENTS.md` §3) closed two questions and opened a knob:
 //   * the §8.7 threshold DOES NOT APPLY to the `fsync` path: there are 45-50 dirty
 //     data blocks per call with a threshold of 32768 — three orders of difference, and `dirtyfrac`
 //     does not work here with any setting;
@@ -4172,7 +4172,7 @@ static mut JBUSY_SINCE: u64 = 0;           // the TSC of the start of the journa
 static mut JBUSY_TASK: i64 = -1;           // whose transaction is flying
 // SESSION 39: WHAT A FOREIGN TRANSACTION STANDS ON — AN ANSWER BY PHASE rather than "the journal is busy".
 //
-// Session 38's instrument (docs/FSYNC-38.md): the phase "a foreign transaction" costs 238 us per
+// Session 38's instrument (docs/MEASUREMENTS.md §3): the phase "a foreign transaction" costs 238 us per
 // call with THREE events over 120 s — that is, one stop drags on for hundreds of
 // milliseconds (in session 37 such a one was 193 ms). And that is the mechanics of `p99.9`:
 // a rare event with a huge price. `jrn_wait_free` named the holder by the task's

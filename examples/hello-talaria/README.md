@@ -15,8 +15,7 @@ make run
 make APP=hellopp run
 ```
 
-Expected output (the kernel's own lines are still in Russian until the
-translation of kernel messages lands):
+Expected output:
 
 ```
 talaria: a workload by the manifest /cell.manifest (restart=1, argc=2, envc=0)

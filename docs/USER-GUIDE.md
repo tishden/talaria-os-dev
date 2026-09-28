@@ -403,7 +403,7 @@ What the layout does NOT do (deliberately):
 You have already laid the cores out — but their L3 is shared, and a neighbour driving a large working
 set washes yours out of it. That is measured rather than assumed: on an `m5zn.metal`
 an LLC hog on a neighbouring core raised a latency-critical thread's p99 from 650 to 932 ns, and its
-p999 — from 686 to 1216 (POC-RESULTS v0.12).
+p999 — from 686 to 1216 ns.
 
 The cache's share is hung on the **same group of cores** you have already named:
 
@@ -479,7 +479,7 @@ clock: samples 20, adjustments 20, steps by value 0, steps BACKWARDS 0
 
 What is NOT here: the PTP protocol (IEEE-1588) and hardware timestamps on the packets.
 The ENA's PHC is read as a time reference, but Talaria does not speak 1588 into the network, while
-per-packet hardware timestamps the ENA does not give out at all — see `docs/PROD-GAPS.md`.
+per-packet hardware timestamps the ENA does not give out at all — see `docs/ROADMAP.md` §2.8.
 
 ---
 
@@ -1388,8 +1388,8 @@ The full map of the boundaries/the trade-offs/the limits is `docs/PRODUCT.md` (�
   work **SMP** (a speedup of 2.00 on two cores and of 4.00 on four) and the **ENA network**
   (the device gives out limits of 32 pairs of queues and 132 MSI-X vectors; the driver
   brings one pair up). To diagnose things on a machine without a console there are
-  `talaria.trace=` and `talaria.suite=` (§7.1), and the analysis is in `docs/PLAN-V1.7.md` and
-  `docs/PLAN-V1.8.md`.
+  `talaria.trace=` and `talaria.suite=` (§7.1), and the numbers are in
+  `docs/MEASUREMENTS.md` §8.
 - **SMP up to 64 cores** (`talaria.smp=N`), the layout of the threads over the cores is by the manifest
   (§6.6). The network stack is one per machine and is protected by a lock: the network syscalls
   execute on any core. TLS is in user space (OpenSSL in the workload's binary).
@@ -1457,5 +1457,5 @@ the same gdb as a Linux core.
 ---
 
 Related documents: `docs/DEVELOPMENT-GUIDE.md` (the development of the kernel/the ABI),
-`kernel/README.md`, `services/README.md`, `docs/PROD-GAPS.md` (the gaps/the test plan),
-`docs/POC-RESULTS.md` (the measurements), `docs/talaria-os.html` (the design doc TAL-RFC-001).
+`kernel/README.md`, `services/README.md`, `docs/ROADMAP.md` (what is open),
+`docs/MEASUREMENTS.md` (the measurements), `docs/talaria-os.html` (the design doc TAL-RFC-001).

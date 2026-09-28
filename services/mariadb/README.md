@@ -62,5 +62,5 @@ fallback.
   NOT been re-checked with InnoDB; start with the memory-mapped redo log if you do.
 
 MariaDB is one of the six workloads compared with Linux on EC2
-(`docs/TABLO-41.md`, as `mysql`). `feedback plugin: failed to retrieve the MAC
+(`docs/MEASUREMENTS.md` §2, as `mysql`). `feedback plugin: failed to retrieve the MAC
 address` in the log is expected (the plugin is off).

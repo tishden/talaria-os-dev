@@ -366,12 +366,12 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
         resp.status.into()
     }
 
-    /// Talaria: барьер БЕЗ ожидания — команда подаётся, токен возвращается.
-    /// Пока барьер идёт (десятки миллисекунд), очередь остаётся свободной для
-    /// чтений и записей: их завершения снимаются `pop_any`.
+    /// Talaria: a barrier WITHOUT waiting — the command is submitted and the token
+    /// is returned. While the barrier is in flight (tens of milliseconds) the queue
+    /// stays free for reads and writes: their completions are taken by `pop_any`.
     ///
     /// # Safety
-    /// `req`/`resp` обязаны жить и не двигаться до завершения команды.
+    /// `req`/`resp` must stay alive and not move until the command completes.
     pub unsafe fn flush_nb(&mut self, req: &mut BlkReq, resp: &mut BlkResp) -> Result<Option<u16>> {
         if !self.negotiated_features.contains(BlkFeature::FLUSH) {
             return Ok(None);
@@ -390,10 +390,11 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
         Ok(Some(token))
     }
 
-    /// Talaria: снять любое готовое завершение (см. `VirtQueue::pop_any`).
+    /// Talaria: take ANY ready completion (see `VirtQueue::pop_any`).
     ///
     /// # Safety
-    /// Буферы команды, чей токен возвращён, устройством больше не трогаются.
+    /// The buffers of a command whose token is returned are no longer touched by
+    /// the device.
     pub unsafe fn pop_any(&mut self) -> Option<u16> {
         unsafe { self.queue.pop_any() }
     }

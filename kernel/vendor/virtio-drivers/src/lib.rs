@@ -45,16 +45,16 @@
 #![deny(unused_must_use, missing_docs, clippy::undocumented_unsafe_blocks)]
 #![allow(clippy::identity_op)]
 #![allow(dead_code)]
-// ── Talaria: приглушение предупреждений ВЕНДОРЕННОГО кода ───────────────────
-// Крейт лежит здесь копией с локальными правками (см. kernel/Cargo.toml), и
-// править его ради предупреждений — значит утяжелять следующее обновление
-// апстрима. Само ядро собирается без единого предупреждения, и эти три не
-// должны создавать впечатление обратного:
-//   unused_macros/unused_imports — write_config: ядро конфиг устройства только
-//     ЧИТАЕТ, парная пишущая макра апстрима остаётся неиспользованной;
-//   unused_variables — VirtQueue::new(indirect): признак, который апстрим
-//     принимает в сигнатуре, но пока не реализует;
-//   mismatched_lifetime_syntaxes — стиль записи времён жизни в апстриме.
+// ── Talaria: silencing the warnings of VENDORED code ────────────────────────
+// The crate sits here as a copy with local edits (see kernel/Cargo.toml), and
+// editing it for the sake of warnings would only make the next upstream update
+// heavier. The kernel itself builds without a single warning, and these three
+// must not suggest otherwise:
+//   unused_macros/unused_imports — write_config: the kernel only READS a device's
+//     configuration, so upstream's paired writing macro stays unused;
+//   unused_variables — VirtQueue::new(indirect): a flag upstream accepts in the
+//     signature but does not implement yet;
+//   mismatched_lifetime_syntaxes — upstream's style of writing lifetimes.
 #![allow(unused_macros, unused_imports, unused_variables, mismatched_lifetime_syntaxes)]
 
 #[cfg(any(feature = "alloc", test))]

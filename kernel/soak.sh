@@ -67,7 +67,7 @@ R=0
 [ "${CNT:-0}" -ge $INS_OK ] 2>/dev/null || { echo "SOAK FAIL: count=$CNT < acknowledged inserts $INS_OK"; R=1; }
 [ $INS_OK -gt 0 ] || { echo "SOAK FAIL: not a single successful insert"; R=1; }
 if [ "$B50" -gt 0 ] && [ "$E50" -gt $((B50 * 3)) ]; then echo "SOAK FAIL: latency degraded ${B50}ms -> ${E50}ms (>3x)"; R=1; fi
-if grep -aq "ядро остановлено" "$SER"; then echo "SOAK FAIL: kernel crash dump in serial"; R=1; fi
+if grep -aq "the kernel has been halted" "$SER"; then echo "SOAK FAIL: kernel crash dump in serial"; R=1; fi
 [ $R = 0 ] && echo "SOAK OK: ${SECS} s, ${INS_OK} inserts, latency stable, kernel alive"
 exit $R
 INNER

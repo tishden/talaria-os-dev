@@ -73,5 +73,5 @@ The client is `mongoprobe.py` (a BSON codec + OP_MSG, ~100 lines, no dependencie
 
 25 threads, ~120 MB RSS (256 MB of WiredTiger cache reserved), 8-13 s to
 `waiting for connections` in QEMU/KVM on one vCPU. MongoDB is one of the six
-workloads compared with Linux on EC2 (`docs/TABLO-41.md`). FTDC is turned off
+workloads compared with Linux on EC2 (`docs/MEASUREMENTS.md` §2). FTDC is turned off
 by a parameter; `Error checking directory '/sys/block'` in the log is expected.
