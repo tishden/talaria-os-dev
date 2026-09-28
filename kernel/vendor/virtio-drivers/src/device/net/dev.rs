@@ -55,7 +55,7 @@ impl<H: Hal, T: Transport, const QUEUE_SIZE: usize> VirtIONet<H, T, QUEUE_SIZE> 
         self.inner.enable_interrupts()
     }
 
-    /// Talaria: звонок только по кольцу приёма (см. `dev_raw`).
+    /// Talaria: interrupt on the RECEIVE ring only (see `dev_raw`).
     pub fn enable_recv_interrupts(&mut self) {
         self.inner.enable_recv_interrupts()
     }

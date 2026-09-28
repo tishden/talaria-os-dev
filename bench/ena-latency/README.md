@@ -4,7 +4,7 @@
 > when Talaria had no ENA driver of its own and the guest reached the network
 > through a host tap/proxy_arp. Since v1.1 Talaria IS the EC2 instance (a UEFI
 > AMI with in-kernel ENA), so latency is measured without a QEMU middleman:
->   - method and numbers — `docs/POC-RESULTS.md`, section "§7 ENA datapath";
+>   - method and numbers — `docs/MEASUREMENTS.md` §8 (the ENA datapath);
 >   - tools — `infra/aws/lab-up.sh` (the stand: the subject plus a Linux
 >     neighbour in one cluster placement group), `bench/udp_ping.c`,
 >     `bench/udp_owd.c` (one-way delays), `talaria.netprof=N` (per-stage profile);

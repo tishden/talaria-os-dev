@@ -8,7 +8,8 @@ How to measure, profile and tune a workload on Talaria. For two roles:
   is happening right now" and "why is today worse than yesterday".
 
 Adjacent documents: `docs/USER-GUIDE.md` (how to run things), `docs/DEVELOPMENT-GUIDE.md`
-(how to change the kernel itself), `docs/POC-RESULTS.md` (the measured numbers and their analysis),
+(how to change the kernel itself), `docs/MEASUREMENTS.md` (the measured numbers and their analysis),
+`docs/ENGINEERING-NOTES.md` (the rules of judging a measurement, and the traps),
 `docs/BARE-METAL.md` (what QEMU hides).
 
 ---
@@ -59,9 +60,10 @@ Everything except the last two lines is available **on a live machine without a 
 MongoDB and ClickHouse live in it) the supervisor does not come up, while the operator's
 console is polled out of its housekeeping — which means that without the flag
 `talaria.console=poll` it does not answer: a typed command accumulates in the port.
-The flag has deliberately not been made the default, and the reason is named in `docs/TODO.md` (A24):
-with that polling the gate of concurrent work with the memory starts failing, uncovering
-somebody else's race. The periodic snapshot (`talaria.top=<ms>`) and the profile
+The flag has deliberately not been made the default, and the reason is measured: with that
+polling the gate of concurrent work with the memory starts failing, uncovering
+somebody else's race (that is how the page-table CAS defect was found — `CHANGELOG.md`,
+v1.13 observability). The periodic snapshot (`talaria.top=<ms>`) and the profile
 (`talaria.prof=<hz>`) do not depend on the flag — they write into the log by themselves.
 
 ---
@@ -607,9 +609,8 @@ A long tick has already uncovered somebody else's defect once: the collapse of `
 spread` (25 us per message instead of 1.5) turned out to be not a property of a rare tick but
 THE STEALING OF WORK, which turned the skew over instead of smoothing it out.
 That is a general property of thinning the tick out: it does not create new errors but makes
-visible those that depended on the frequency of entering the scheduler. The analysis is in
-`docs/TODO.md`, session 20; the instrument with which it was made is the journal of the first steals
-in `stat:`.
+visible those that depended on the frequency of entering the scheduler. The instrument with
+which it was analysed is the journal of the first steals in `stat:`.
 
 **The analysis of the tick's price by phases** is `talaria.tickprof=1`: `stat:` prints seven
 lines (the saving of the FPU, the EOI and the timer, the clock, the cleanup of the AS, the housekeeping, the accounting, the choice,
@@ -646,7 +647,7 @@ Two knobs, both about this, and both chosen by measurement rather than by taste:
   quarters of the stops in the middle of a request (17 555 rotations over the window against 3 916), while
   the band does not narrow either at a ceiling of 200 or of 100 us. The reason is the same as with
   `tickmin`: the core taken from a waiter (it gives it up every 5 us) goes to
-  a thread that does work and holds it longer. The analysis is in `docs/SCHED-43.md`.
+  a thread that does work and holds it longer. The analysis is in `docs/MEASUREMENTS.md` §4.
 
 The instrument with which such things are analysed is `talaria.appprof=1`: it divides the stage
 `read->write` per thread into "it ran on the core" and "it was taken off", and at every rotation

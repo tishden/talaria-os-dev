@@ -14,7 +14,7 @@
  * connection to THEIR OWN address, and the stack has no loopback interface: a bind on
  * 0.0.0.0 goes through, a connect to 10.0.0.2 does not. To make a gate out of this, the
  * reader has to be moved out onto the host (the guest listens and writes a writev, the
- * host counts the receives) — see docs/TODO.md. For now the behaviour is checked by the
+ * host counts the receives) — see docs/ROADMAP.md §2.9. For now the behaviour is checked by the
  * bench/suite set: the syscalls per request for nginx 3.0 -> 2.0 and exactly one tx frame
  * per request.
  */

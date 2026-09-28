@@ -367,7 +367,7 @@ extern "C" fn rust_main(start_info: u64) -> ! {
                 //
                 // The cheap half is fixed here: do not do what is unnecessary. Protecting the
                 // DMA memory from the workload's allocator is a separate item
-                // (docs/TODO.md).
+                // (docs/ROADMAP.md §2.9).
                 if let Some(tok) = tail_touches_nic(tail) {
                     // THE GUILTY TOKEN IS PRINTED BY NAME: reopening the NIC
                     // costs `DEV_STS=0x21` (see `tail_touches_nic`), and learning

@@ -33,8 +33,11 @@ variable "region"        { default = "ap-northeast-1" }
 // machine is left without a network. On c6i.large and c6i.xlarge everything works: the DHCP
 // lease is obtained, receive goes on. The difference is visible in the device itself — 8 queues and
 // 12 MSI-X vectors against 4 and 8, and status 0x21 against 0x1.
-// Until the defect is understood (docs/TODO.md), the stand's ceiling is
-// c6i.xlarge: 4 vCPU, which is enough for housekeeping 0-1 and for the data plane 2-3.
+// The cause was found — the network was initialised TWICE (a user-data token that
+// touches the NIC reopens it) — and `infra/smoke.sh` now passes on xlarge and
+// 2xlarge alike. The stand stays on c6i.xlarge because every number in
+// docs/MEASUREMENTS.md was taken on it: 4 vCPU, enough for housekeeping 0-1 and
+// for the data plane 2-3.
 variable "instance_type" { default = "c6i.xlarge" }
 variable "talaria_ami"   { default = "" }               // from bench/suite/infra/mk-ami.sh
 // PRINTING COUNTERS TO SERIAL IS OFF BY DEFAULT.

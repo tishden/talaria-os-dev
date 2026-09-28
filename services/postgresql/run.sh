@@ -13,8 +13,11 @@ K=kernel/target/x86_64-talaria/release/talaria
 SECS=${1:-40}; EXTRA=${2:-}
 # THE NUMBER OF CORES IS A PARAMETER (default 1). It was added to investigate a
 # forked PostgreSQL background process crashing with `#PF err=0x15` on `SMP=2
-# talaria.smp=2` (an instruction fetch from an mmap region); see the B10 notes
-# in docs/TODO.md.
+# talaria.smp=2` (an instruction fetch from an mmap region). That defect is
+# closed — the COW refcount table did not cover the frame, so `fork` made a
+# shared frame writable and freed it under a live owner (CHANGELOG v1.13, the
+# performance programme; gate `forktls`) — and PostgreSQL is measured on two
+# cores in `bench/suite`. The knob stays: it is how that class is reproduced.
 docker run --rm -i --device /dev/kvm --device /dev/net/tun --device /dev/vhost-net \
   --cap-add NET_ADMIN -e SMP -v "$REPO":/w talaria-qemu2 bash -s "$K" "$SECS" "$EXTRA" <<'INNER'
 set -u; K=$1; SECS=$2; EXTRA=$3; SMP=${SMP:-1}

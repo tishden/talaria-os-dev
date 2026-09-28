@@ -2875,7 +2875,7 @@ fn rust_schedule_inner(cur_rsp: u64) -> u64 {
     // (This same polling once revealed a race in the installation of page tables — two cores
     // lost each other's work because a new table was installed by a simple
     // write. It is closed with a CAS in `paging`, the gate `memrace` is clean; the details are
-    // in `docs/TODO.md`.)
+    // in `docs/DEVELOPMENT-GUIDE.md` §12.30.)
     if crate::supervise::RECOVERY_ARMED.load(Ordering::Relaxed) { crate::supervise::sched_tick(); }
     else if crate::console::poll_due(tk as u64) { crate::console::poll_tick(); }
     // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it

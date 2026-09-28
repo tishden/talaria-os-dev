@@ -235,12 +235,13 @@ static int path_race(void) {
 }
 
 int main(int argc, char **argv) {
-    /* The race of the parts is put behind an argument: it REPRODUCES AN OPEN DEFECT and
-     * therefore cannot stand in a green set. A red gate in the set is not honesty but
-     * noise: in a week people stop looking at it. And the reproduction costs forty
-     * seconds instead of a five-minute run of ClickHouse.
-     *   talaria.test=fsbig      — what must work (in the regression);
-     *   talaria.test=fsbigrace  — the open defect (by hand, see docs/TODO.md). */
+    /* The race of the parts is put behind an argument, because it reproduces a
+     * CLASS of defect (a shared path buffer under a concurrent FS) rather than a
+     * single case, and the reproduction costs forty seconds instead of a
+     * five-minute run of ClickHouse.
+     *   talaria.test=fsbig      — what must work;
+     *   talaria.test=fsbigrace  — the same plus the MergeTree part life cycle.
+     * Both are in the regression. */
     int race = (argc > 1 && strcmp(argv[1], "race") == 0);
     /* 32 MB is four times larger than the block cache (8 MB): the eviction of dirty
      * pages goes on the whole run rather than now and then. */

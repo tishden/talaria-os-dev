@@ -3,8 +3,7 @@
 This document answers three questions that are not about the code: **what is
 being offered**, **who needs it** and **where the line between proven and
 promised lies**. Technical boundaries and limits are in `docs/PRODUCT.md`,
-numbers in `docs/TABLO-41.md` and `docs/POC-RESULTS.md`, status and version in
-`README.md`.
+numbers in `docs/MEASUREMENTS.md`, status and version in `README.md`.
 
 The rule of this document is the rule of the measurements: **a claim without a
 number or a reference to a gate does not get in here**.
@@ -30,7 +29,7 @@ A comparison with Linux on six real workloads (PostgreSQL, MySQL/MariaDB,
 MongoDB, Redis, nginx, mongoose). The stand: four `c6i.xlarge` in one zone (a
 Talaria server and a Linux server, each with its own generator), two cores per
 workload on both sides, an open loop, a rate ladder from the shared ceiling,
-three repeats per point. The full board: `docs/TABLO-41.md`.
+three repeats per point. The full board: `docs/MEASUREMENTS.md` §2.
 
 | percentile | faster | parity | slower |
 |---|---:|---:|---:|

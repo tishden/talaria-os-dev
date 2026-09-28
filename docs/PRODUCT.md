@@ -2,7 +2,7 @@
 
 What Talaria OS is, what it guarantees, what it pays for its properties and
 where its boundaries lie. The numbers and statements here are checked against
-the code and the measurements (`docs/POC-RESULTS.md`); the version and the
+the code and the measurements (`docs/MEASUREMENTS.md`); the version and the
 regression count live in `README.md`. Guides: `docs/USER-GUIDE.md` (running),
 `docs/DEVELOPMENT-GUIDE.md` (development).
 
@@ -29,7 +29,7 @@ The key mechanism: **synchronisation without busy-spinning**. A futex sleeps IN
 THE KERNEL with `mwait` on the user's own word; the waker's store wakes the
 sleeper with no IPI and no syscall. Plain pthread mutexes and condition
 variables in an ordinary Linux binary get sub-microsecond wakeups at 0 % CPU
-while waiting (mechanics: DEVELOPMENT-GUIDE §6b, plan and results: PLAN-SYNC).
+while waiting (mechanics: DEVELOPMENT-GUIDE §6b, results: MEASUREMENTS §6).
 
 Tested with real software: PostgreSQL 16, MariaDB 10.11, MongoDB 4.0
 (persistent network servers), OpenJDK 21, ClickHouse 25.8, SObjectizer-5 (an
@@ -60,7 +60,7 @@ nginx, mongoose, busybox, Lua, SQLite, QuickJS.
   cores), ENA with DHCP and LLQ, NVMe. What is still missing on hardware:
   in-kernel NIC drivers other than ENA (ixgbe/mlx5 — the VFIO code exists in
   `bench/ixgbe`), PTP and hardware packet timestamps, CAT on a live chip, and
-  machines with APIC ids above 254 (§8; details in `docs/PLAN-V1.8.md`).
+  machines with APIC ids above 254 (§8; the open items are in `docs/ROADMAP.md`).
 - **Not realtime-certified:** there are no formal WCET guarantees; "low latency"
   here is measured behaviour, not a certificate.
 
@@ -69,7 +69,7 @@ nginx, mongoose, busybox, Lua, SQLite, QuickJS.
 The primary stand: an i7-3820 (Sandy Bridge-E, 4C/8T, no WAITPKG), a Linux
 host, QEMU/KVM with `-overcommit cpu-pm=on`; "versus Linux" comparisons use a
 Linux guest in the same VM topology on the same host. Details and methodology:
-POC-RESULTS (by version), PLAN-SYNC §0, `services/actors/README.md`.
+`docs/MEASUREMENTS.md`, `bench/suite/README.md`, `services/actors/README.md`.
 
 **Validated on** (full `test.sh` from scratch):
 - Intel Sandy Bridge-E (i7-3820, `mwait` in ring 0) — the primary stand; all
@@ -116,7 +116,7 @@ SERVICE latency is judged (the generator's schedule debt is not charged to the
 server); a point counts only if it is comparable: no overload, no generator
 debt, a difference larger than the stand's own jitter, and not decided by a
 handful of requests. The instrument and the method: `bench/suite/`; the full
-board: `docs/TABLO-41.md`.
+board: `docs/MEASUREMENTS.md` §2.
 
 | workload | p50 | p99 | p99.9 | p99.99 | points |
 |---|---|---|---|---|---:|
@@ -133,8 +133,7 @@ at `p99.99`. The order of magnitude where the win is large: `postgresql select1`
 at 36 k req/s — `p99.9` 72.8 µs against Linux's 11,206.7; `mysql pk` at 28.9 k —
 `p99.99` 110 µs against 18,792.
 
-**The remainder, honestly** (analysed by name in `docs/FSYNC-42.md` and
-`docs/SCHED-43.md`):
+**The remainder, honestly** (analysed by name in `docs/MEASUREMENTS.md` §§2.3-4):
 
 - five lost `mysql` points at `p99.99` are not our code: 97 % of the gap is
   vCPU time stolen by the hypervisor (the "tick gap" instrument with `steal`
@@ -229,7 +228,7 @@ subset only grows (existing syscalls do not change semantics).
   Missing on hardware: in-kernel ixgbe/mlx5 NIC drivers (the VFIO code is ready
   in `bench/ixgbe`), PTP and hardware packet timestamps (below), CAT on a live
   chip, a p99.9 tail SLA against a hardware baseline, x2APIC ids above 254.
-  Details: `docs/PLAN-V1.8.md`.
+  Details: `docs/ROADMAP.md` §§2.2-2.8.
 - **Clocks: what exists and what does not.** EXISTS (v1.10): `CLOCK_REALTIME`
   runs on the TSC from a base point that is **disciplined by an external clock** —
   the servo adjusts frequency, not value, time stays monotonic, steps are
@@ -280,5 +279,6 @@ single-application OS (unikernel-style), Linux-ABI compatible". Not used:
 ---
 
 Related: `README.md` (version and status), `docs/USER-GUIDE.md`,
-`docs/DEVELOPMENT-GUIDE.md`, `docs/POC-RESULTS.md` (all measurements by
-version), `docs/PLAN-SYNC.md` (synchronisation), `docs/PROD-GAPS.md` (test plan).
+`docs/DEVELOPMENT-GUIDE.md`, `docs/MEASUREMENTS.md` (all the numbers and their
+analysis), `docs/ROADMAP.md` (what is open), `docs/ENGINEERING-NOTES.md` (the
+rules and the traps).

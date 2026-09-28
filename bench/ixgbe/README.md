@@ -18,7 +18,7 @@ exit, which shows what it really costs:
 | share of packets < 100 ns | — | 92–94 % |
 
 So the microseconds under QEMU were **entirely** the virtio kick, not the work
-of the code. Full analysis and method: `docs/BENCH-B.md` §8-§9.
+of the code. Full analysis and method: `docs/MEASUREMENTS.md` §5.
 
 ## What is inside
 

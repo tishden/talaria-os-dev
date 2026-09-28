@@ -1493,7 +1493,7 @@ stopq $q
 # The listener stayed without a backlog for ever: the server is alive, serves the old
 # connections and answers with a refusal to EVERY new SYN, even when all the connections
 # are closed. On EC2 this was read two runs in a row as "after an overload the server
-# stops accepting connections" (docs/TODO.md §5.1).
+# stops accepting connections".
 q=$(boot "talaria.mode=eserver" net); sleep 5
 SLOT=$(python3 -c "
 import socket, time

@@ -63,7 +63,7 @@ The harness transport is ivshmem between two VMs on one host (shared memory,
 wakeup by a store without a virtio kick). EC2 has nothing like it: two
 instances share no memory, and there is no second VM inside an instance. The
 native equivalent is a network round trip over ENA, measured separately
-(`docs/POC-RESULTS.md` §7). Moving the harness to a network transport between
+(`docs/MEASUREMENTS.md` §8). Moving the harness to a network transport between
 two native instances is separate work.
 
 ## Results on c6a.metal (quiet stand)
