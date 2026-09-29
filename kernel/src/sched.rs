@@ -107,37 +107,7 @@ struct FpuArea([u8; FPU_AREA]);
 /// memory corruption — and it was caught as random crashes of the garbage collector.
 const FPU_AREA: usize = 1024;
 static mut FPU: [FpuArea; NTASKS] = [const { FpuArea([0; FPU_AREA]) }; NTASKS];
-/// The XCR0 mask for XSAVE/XRSTOR (0 — XSAVE is unavailable, we work with fxsave).
-pub static XSAVE_MASK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-/// Save the current core's FPU state into the task's area.
-///
-/// # Safety
-/// C3 + C4: `area` must be the CURRENT task's FPU area — at least the size the active
-/// `XSAVE_MASK` requires and 64-byte aligned, as `fxsave`/`xsave` demand. A wrong area
-/// silently mixes two threads' floating point.
-#[inline]
-pub unsafe fn fpu_save(area: *mut u8) {
-    let m = XSAVE_MASK.load(Ordering::Relaxed);
-    if m != 0 {
-        core::arch::asm!("xsave [{a}]", a = in(reg) area, in("eax") m as u32, in("edx") (m >> 32) as u32, options(nostack));
-    } else {
-        core::arch::asm!("fxsave [{}]", in(reg) area, options(nostack));
-    }
-}
-/// Restore the FPU state from the task's area.
-///
-/// # Safety
-/// C3 + C4, as `fpu_save`, and the area must hold a state SAVED by it (a zeroed area
-/// restores a legal but foreign state).
-#[inline]
-pub unsafe fn fpu_restore(area: *const u8) {
-    let m = XSAVE_MASK.load(Ordering::Relaxed);
-    if m != 0 {
-        core::arch::asm!("xrstor [{a}]", a = in(reg) area, in("eax") m as u32, in("edx") (m >> 32) as u32, options(nostack));
-    } else {
-        core::arch::asm!("fxrstor [{}]", in(reg) area, options(nostack));
-    }
-}
+pub use crate::arch::switch::{XSAVE_MASK, fpu_save, fpu_restore};
 static mut FPU_VALID: [bool; NTASKS] = [false; NTASKS];
 
 // The address spaces of finished processes: they are freed by the scheduler when there is
@@ -1156,7 +1126,7 @@ pub fn ap_loop(cpu: usize) -> ! {
             // connections — every new thread enters through this loop). The iretq
             // will restore the task's IF; there is nothing to wait for here longer than `stack_wait`.
             // SAFETY: C4 — this core's machine state (the registers/MSRs the switch is made of).
-            unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+            unsafe { crate::arch::cpu::irq_disable(); }
             // The preemption on this core is switched on exactly when the core is given
             // to the common pool. A dedicated core NEVER has a timer armed: a tick in
             // a latency-critical thread is the very thing for whose absence all this was done.
@@ -1842,7 +1812,7 @@ pub extern "C" fn ap_reenter() -> ! { ap_loop(crate::percpu::cpu_id()) }
 /// have nothing left on the stack it came in on, and `cpu` must be this core.
 unsafe fn ap_exit_to_loop(cpu: usize) -> ! {
     let top = ap_stack_top(cpu);
-    core::arch::asm!("mov rsp, {}", "call ap_reenter", in(reg) top, options(noreturn));
+    crate::arch::switch::stack_switch_call(top, ap_reenter);
 }
 /// Enter a saved context (like the tail of timer_stub_sched): 15 GP + an iretq.
 ///
@@ -1853,14 +1823,7 @@ unsafe fn ap_exit_to_loop(cpu: usize) -> ! {
 /// garbage. It does not return — the stack it was called on is abandoned.
 unsafe fn enter_ctx(sp: u64) -> ! {
     // cli — as in start(): the entry must be atomic with respect to the ticks/IPIs
-    core::arch::asm!(
-        "cli",
-        "mov rsp, {}",
-        "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10", "pop r9", "pop r8",
-        "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax",
-        "iretq",
-        in(reg) sp, options(noreturn)
-    );
+    crate::arch::switch::enter_saved_ctx(sp);
 }
 
 /// A migration of THE CURRENT task (from its syscall) to the core cpu: build a fresh
@@ -1903,7 +1866,7 @@ pub unsafe fn migrate_current_to(cpu: usize, rip: u64, ursp: u64, rflags: u64, g
     // limbo: the BSP timer will take the scheduler away from this context and will never come back
     loop {
         crate::paging::halt_enter();
-        core::arch::asm!("sti; hlt", options(nostack, preserves_flags));
+        crate::arch::cpu::irq_enable_halt();
         crate::paging::halt_exit();
     }
 }
@@ -2199,7 +2162,7 @@ pub fn exit_current_code(code: i32) -> ! {
     // SAFETY: C4 — this core's machine state (the registers/MSRs the switch is made of).
     if cpu != 0 { unsafe { ap_exit_to_loop(cpu); } } // an AP: the core returns to the pickup loop
     // SAFETY: C4 — this core's machine state (the registers/MSRs the switch is made of).
-    loop { unsafe { core::arch::asm!("sti; hlt"); } } // until the first tick — it is not scheduled any more
+    loop { unsafe { crate::arch::cpu::irq_enable_halt(); } } // until the first tick — it is not scheduled any more
 }
 /// exit_group: mark ALL the tasks of the process (all the threads) as finished with a code (the current one
 /// too). It does not return control to the scheduler — the caller hands it over to the supervisor.
@@ -2303,7 +2266,7 @@ pub fn drain_proc(ms: u64) -> usize {
         if crate::tsc::rdtsc().wrapping_sub(t0) > hz / 1000 * ms { return left; }
         if cpu_has_other_runnable(me_cpu, cur) { yield_now(); }
         // SAFETY: C4 — this core's machine state (the registers/MSRs the switch is made of).
-        else { unsafe { core::arch::asm!("sti; pause; cli", options(nostack)); } }
+        else { unsafe { crate::arch::cpu::irq_enable_pause_disable(); } }
     }
 }
 /// Before the supervisor's `reset()`: wait until not a single AP is executing a task
@@ -2522,20 +2485,7 @@ pub fn yield_now() { soft_yield(); }
 #[inline]
 fn soft_yield() {
     // SAFETY: C4 — this core's machine state (the registers/MSRs the switch is made of).
-    unsafe {
-        core::arch::asm!(
-            "pushfq",
-            "cli",
-            "mov {c}, gs:[24]",      // the core's logical number
-            "shl {c}, 6",            // the step of a SOFT_YIELD element is 64 bytes (a cache line)
-            "add {c}, {f}",
-            "mov qword ptr [{c}], 1",
-            "int 0x41",              // TIMER_VECTOR
-            "popfq",
-            f = in(reg) SOFT_YIELD.as_ptr(),
-            c = out(reg) _,
-        );
-    }
+    unsafe { crate::arch::switch::soft_yield_kick(SOFT_YIELD.as_ptr() as *const u64); }
 }
 /// Is there another task on the BSP ready to execute (besides me)? If yes —
 /// the one waiting on a futex must give up the CPU (yield_now) rather than sleep in an mwait holding the core.
@@ -2589,19 +2539,7 @@ pub unsafe fn spawn(entry: extern "C" fn() -> !, stack_top: u64) {
     acct_born(i);
 }
 
-/// # Safety
-/// C4: a model-specific register of THIS core; the caller must know it exists on this CPU.
-unsafe fn rdmsr(msr: u32) -> u64 {
-    let (lo, hi): (u32, u32);
-    core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nostack, preserves_flags));
-    (hi as u64) << 32 | lo as u64
-}
-/// # Safety
-/// C4: as `rdmsr`, and the value must be one this register accepts — a wrong write changes
-/// the machine silently.
-unsafe fn wrmsr(msr: u32, v: u64) {
-    core::arch::asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32, options(nostack, preserves_flags));
-}
+use crate::arch::cpu::{rdmsr, wrmsr};
 const IA32_FS_BASE: u32 = 0xC000_0100;
 
 /// Create a ring-3 thread: an initial iret frame in ring 3 (SS/RSP/RFLAGS IF=1/CS/RIP)
@@ -3570,7 +3508,7 @@ pub unsafe fn start_idle() -> ! {
         // There is nowhere to leave from here — the BSP's tick will take it away — so `bail` is always false.
         if crate::netsys::idle_poll(|| false) { continue; }
         crate::paging::halt_enter();
-        core::arch::asm!("sti; hlt", options(nostack, preserves_flags));
+        crate::arch::cpu::irq_enable_halt();
         crate::paging::halt_exit();
     }
 }
@@ -3596,64 +3534,7 @@ pub unsafe fn start() -> ! {
     // RSP[0] over the user frame (an eternal entry into itself). Under PVH the window was not caught,
     // under UEFI it is caught deterministically: a deferred interrupt of the firmware waits in the IRR,
     // it strikes at the very first window with IF=1. The task's IF will be restored by the iretq from the frame.
-    core::arch::asm!(
-        "cli",
-        "mov rsp, {}",
-        "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10", "pop r9", "pop r8",
-        "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax",
-        "iretq",
-        in(reg) sp, options(noreturn)
-    );
+    crate::arch::switch::enter_saved_ctx(sp);
 }
 
-core::arch::global_asm!(r#"
-.section .text
-.global timer_stub_sched
-timer_stub_sched:
-    push %rax
-    push %rbx
-    push %rcx
-    push %rdx
-    push %rsi
-    push %rdi
-    push %rbp
-    push %r8
-    push %r9
-    push %r10
-    push %r11
-    push %r12
-    push %r13
-    push %r14
-    push %r15
-    mov %rsp, %rdi          /* cur_rsp -> rust_schedule */
-    call rust_schedule      /* rax = next rsp */
-    mov %rax, %rsp          /* we have moved onto the target's kernel stack (in the common GB0) */
-    mov %gs:56, %rcx        /* the task whose stack we have just left (MAX = none) */
-    cmp $-1, %rcx
-    je 3f
-    lea STACK_BUSY(%rip), %rdx
-    movb $0, (%rdx,%rcx)    /* the stack is free — the taking core may enter (see stack_wait) */
-    movq $-1, %gs:56
-3:
-    mov %gs:40, %rcx        /* the CR3 of THIS core's target (0 = do not switch) */
-    test %rcx, %rcx
-    jz 2f
-    mov %rcx, %cr3          /* switch the address space here — the stack is already a common one */
-2:
-    pop %r15
-    pop %r14
-    pop %r13
-    pop %r12
-    pop %r11
-    pop %r10
-    pop %r9
-    pop %r8
-    pop %rbp
-    pop %rdi
-    pop %rsi
-    pop %rdx
-    pop %rcx
-    pop %rbx
-    pop %rax
-    iretq
-"#, options(att_syntax));
+// `timer_stub_sched` — the tick's entry and the context switch — is `arch::switch` (x86-64 asm).

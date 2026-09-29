@@ -48,8 +48,26 @@ per-CPU block, §4.6). Two more pieces of phase 3 are written ahead of their cal
 the two toolchains' headers, host-tested one-to-one), and the arm64 vDSO
 (`user/vdso/vdso-aarch64.S`, assembled by `build.rs` with a cross compiler: the three
 clock calls over `cntvct_el0` with a `dmb`-ordered seqlock, and the
-`__kernel_rt_sigreturn` trampoline arm64 needs because it has no `SA_RESTORER`). The
-gates in `main.rs` went 92 → 85: that count is the meter. The x86-64 tree is the release (`README.md`); the
+`__kernel_rt_sigreturn` trampoline arm64 needs because it has no `SA_RESTORER`). Both are now EXERCISED: `vdso.rs`
+runs on arm64 (`vdso::symbol` finds the clock call in the image, `init` refuses an image
+without it — on either architecture), and the EL0 probe calls `__kernel_clock_gettime`
+through the mapped image: the answer lands inside the kernel's own bracket around the
+call. The dirty bit exists: FEAT_HAFDBS's DBM scheme where the core has it (`TCR.HD`;
+`enc` writes a writable page as DBM + AP[2] = 1, the first write clears AP[2] without a
+fault, `dec` reads D from that, `take_dirty` re-arms — x86's semantics exactly), and a
+CONSERVATIVE "every writable page is dirty" without it; the probe (write → true, again →
+false, write → true) passes under TCG, which models HAFDBS. Phase 0 is COMPLETE in the
+sense the plan gave it: not one `asm!` remains outside `kernel/src/arch/` — the whole
+x86 modules moved as files (`boot`, `percpu`, `ioapic`, `vga`, `pmu`, `cat`, `crypto`,
+`idt`, `smp`, `gdb`, `tsc`, `serial`), and the mixed ones gave up their machine parts
+(`gdt.rs` the GDT/TSS and the `iretq` into ring 3 from `user.rs`; `switch.rs` the FPU
+state, the saved-context entry, `timer_stub_sched` and the soft-yield kick from
+`sched.rs`; `syscall_entry.rs` the SYSCALL MSRs, the entry stub and the sigreturn
+`iretq` from `syscall.rs`; `setjmp.rs` from `supervise.rs`; `unwind.rs` the guarded load
+from `obs/unwind.rs`) — the x86 regression at 486/0 at every step. What phase 0 leaves
+for phase 3 is the DESIGN work the plan named: the unified exception/syscall frame and
+the `arch::abi` decoder inside `dispatch`, which is where `syscall.rs`, `sched.rs` and
+`user.rs` will come over. The gates in `main.rs` went 92 → 84: that count is the meter. The x86-64 tree is the release (`README.md`); the
 port changes its behaviour nowhere.
 
 ---

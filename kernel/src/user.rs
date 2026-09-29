@@ -33,30 +33,12 @@
 //! `TSS`/`GDT` are `static mut` ARRAYS INDEXED BY CORE (`percpu::cpu_id()`): a
 //! core touches only its own entry, which is what makes them race-free without a
 //! lock (a TSS descriptor cannot be shared anyway — `ltr` sets its busy bit).
-use core::mem::size_of;
-
-#[repr(C, packed)]
-struct Tss {
-    _r0: u32, rsp0: u64, rsp1: u64, rsp2: u64, _r1: u64,
-    ist: [u64; 7], _r2: u64, _r3: u16, iomap: u16,
-}
-// Per-CPU: every core has its own TSS (rsp0 = the kernel stack of its current task) and its own
-// GDT (a TSS descriptor cannot be shared — the busy bit at ltr). BSP = 0, AP = the APIC ID.
-const MAXCPU: usize = crate::percpu::MAXCPU;
-const TSS0: Tss = Tss { _r0:0, rsp0:0, rsp1:0, rsp2:0, _r1:0, ist:[0;7], _r2:0, _r3:0, iomap: size_of::<Tss>() as u16 };
-static mut TSS: [Tss; MAXCPU] = [TSS0; MAXCPU];
-static mut GDT: [[u64; 8]; MAXCPU] = [[0; 8]; MAXCPU];
-
-/// Update TSS.rsp0 of THE CURRENT core (the kernel stack for the next ring3->ring0 entry)
-/// + gs:8 for the syscall stub. For the thread scheduler (BSP) and pinned AP tasks.
-pub fn set_rsp0(v: u64) {
-    let cpu = crate::percpu::cpu_id();
-    // SAFETY: the entry of THIS core in a per-core array (see the module's note), so no
-    // other core writes it. `write_unaligned` through `addr_of_mut!` because `Tss` is
-    // `repr(packed)`: a reference to `rsp0` would be a misaligned reference.
-    unsafe { core::ptr::write_unaligned(core::ptr::addr_of_mut!(TSS[cpu].rsp0), v); }
-    crate::percpu::set_kstack_top(v);
-}
+// The GDT/TSS and the ring-3 entry are the machine's: `arch::gdt` (docs/ARM64-PLAN.md §4.1).
+pub use crate::arch::gdt::{set_rsp0, setup_gdt_cpu};
+use crate::arch::gdt::{enter_user, switch_and_enter_user};
+/// # Safety
+/// As `setup_gdt_cpu`, with this core's number taken from `percpu`.
+unsafe fn setup_gdt(kstack_top: u64) { setup_gdt_cpu(crate::percpu::cpu_id(), kstack_top); }
 
 /// Harden the workload's stack: the bottom page is a guard (non-present, it catches an overflow
 /// with a clear #PF), the rest is RW + NX (the stack is not executable, W^X). `bottom` is the bottom of the region.
@@ -487,11 +469,7 @@ pub unsafe fn run_disk(path: *const u8, args: &[&[u8]]) -> ! {
     harden_stack(ub, ustack_top); // a guard page at the bottom + NX on the stack
     crate::fr::record(crate::fr::USER, entry);
     crate::println!("talaria: launching a binary from the disk in ring 3, entry={:#x}", entry);
-    core::arch::asm!(
-        "push {ss}", "push {rsp}", "push {flags}", "push {cs}", "push {rip}", "iretq",
-        ss = in(reg) 0x23u64, rsp = in(reg) ustack, flags = in(reg) 0x2u64,
-        cs = in(reg) 0x2Bu64, rip = in(reg) entry, options(noreturn)
-    );
+    enter_user(entry, ustack, 0x2);
 }
 
 static mut DT_STACK: u64 = 0;  // the stack of the disk workload's main thread (reused between restarts)
@@ -674,45 +652,6 @@ pub unsafe fn run_threaded(elf: &[u8]) -> ! {
     crate::sched::start();
 }
 
-#[repr(C, packed)]
-struct Gdtr { limit: u16, base: u64 }
-
-/// Build the GDT (kcode/kdata/ucode32/udata/ucode64/TSS) and load GDT+TR
-/// on THE CURRENT core cpu (a per-CPU TSS: the busy bit does not allow sharing the descriptor).
-///
-/// # Safety
-/// `cpu` must be THIS core's number (`percpu::cpu_id()`) and below `MAXCPU`: the
-/// function writes `GDT[cpu]`/`TSS[cpu]` and then loads them into the CURRENT
-/// core's GDTR/TR, so passing a foreign number both races with that core and
-/// points this one at a table it does not own. `kstack_top` must be the top of a
-/// live kernel stack (rsp0 for the next ring3 -> ring0 entry).
-pub unsafe fn setup_gdt_cpu(cpu: usize, kstack_top: u64) {
-    let g = &mut GDT[cpu];
-    g[0] = 0;
-    g[1] = 0x00209A0000000000; // 0x08 kernel code64
-    g[2] = 0x0000920000000000; // 0x10 kernel data
-    g[3] = 0x00CFFA000000FFFF; // 0x18 user code32 (a placeholder for STAR)
-    g[4] = 0x00CFF2000000FFFF; // 0x20 user data (DPL3) -> SS 0x23
-    g[5] = 0x0020FA0000000000; // 0x28 user code64 (DPL3) -> CS 0x2B
-    TSS[cpu].rsp0 = kstack_top;
-    crate::percpu::set_kstack_top(kstack_top);
-    let base = core::ptr::addr_of!(TSS[cpu]) as u64;
-    let limit = (size_of::<Tss>() - 1) as u64;
-    let low = limit & 0xFFFF
-        | (base & 0xFF_FFFF) << 16
-        | 0x9u64 << 40           // type: available 64-bit TSS
-        | 0x1u64 << 47           // present
-        | ((limit >> 16) & 0xF) << 48
-        | ((base >> 24) & 0xFF) << 56;
-    g[6] = low;                  // the TSS descriptor (16 bytes) in slots 6..8
-    g[7] = base >> 32;
-    let gdtr = Gdtr { limit: (8 * 8 - 1) as u16, base: core::ptr::addr_of!(GDT[cpu]) as u64 };
-    core::arch::asm!("lgdt [{}]", in(reg) &gdtr, options(readonly, nostack, preserves_flags));
-    core::arch::asm!("ltr {0:x}", in(reg) 0x30u16, options(nostack, preserves_flags));
-}
-/// # Safety
-/// As `setup_gdt_cpu`, with this core's number taken from `percpu`.
-unsafe fn setup_gdt(kstack_top: u64) { setup_gdt_cpu(crate::percpu::cpu_id(), kstack_top); }
 
 /// An embedded ELF is empty when the kernel is built without the `selftest`
 /// feature (see `user_elf!` in main.rs): say so and stop instead of parsing it.
@@ -808,21 +747,8 @@ pub fn run(elf: &[u8]) -> ! {
         harden_stack(ub, ustack_top); // a guard page at the bottom + NX on the stack
         crate::fr::record(crate::fr::USER, entry);
         crate::println!("talaria: launching a static ELF in ring 3, entry={:#x}", entry);
-        // iretq into ring 3: push SS, RSP, RFLAGS, CS, RIP
-        core::arch::asm!(
-            "push {ss}",
-            "push {rsp}",
-            "push {flags}",
-            "push {cs}",
-            "push {rip}",
-            "iretq",
-            ss = in(reg) 0x23u64,       // user data (DPL3)
-            rsp = in(reg) ustack,
-            flags = in(reg) 0x2u64,     // IF=0 (no interrupts in ring 3)
-            cs = in(reg) 0x2Bu64,       // user code64 (DPL3)
-            rip = in(reg) entry,
-            options(noreturn)
-        );
+        // into ring 3 with IF=0 (no interrupts in ring 3)
+        enter_user(entry, ustack, 0x2);
     }
 }
 
@@ -841,11 +767,7 @@ unsafe fn ring3_expect_fault(rip: u64, rsp: u64) -> u64 {
     CRASH_VEC.store(0, Ordering::SeqCst);
     if tal_setjmp(core::ptr::addr_of_mut!(RECOVERY)) == 0 {
         RECOVERY_ARMED.store(true, Ordering::SeqCst);
-        core::arch::asm!(
-            "push {ss}", "push {rsp}", "push {flags}", "push {cs}", "push {rip}", "iretq",
-            ss = in(reg) 0x23u64, rsp = in(reg) rsp, flags = in(reg) 0x2u64,
-            cs = in(reg) 0x2Bu64, rip = in(reg) rip, options(noreturn)
-        );
+        enter_user(rip, rsp, 0x2);
     }
     RECOVERY_ARMED.store(false, Ordering::SeqCst);
     CRASH_VEC.load(Ordering::SeqCst)
@@ -1008,11 +930,7 @@ pub unsafe fn exec(elf: &[u8]) -> ! {
     crate::paging::switch(pml4); // activate the process's address space
     let ustack = build_stack(ustack_top, entry); // argv/auxv by vaddr (the pages are mapped)
     crate::println!("talaria: exec in the process's private AS, entry={:#x}", entry);
-    core::arch::asm!(
-        "push {ss}", "push {rsp}", "push {flags}", "push {cs}", "push {rip}", "iretq",
-        ss = in(reg) 0x23u64, rsp = in(reg) ustack, flags = in(reg) 0x2u64,
-        cs = in(reg) 0x2Bu64, rip = in(reg) entry, options(noreturn)
-    );
+    enter_user(entry, ustack, 0x2);
 }
 
 /// Run SEVERAL PROCESSES, each in ITS OWN address space, under the
@@ -1150,12 +1068,7 @@ pub unsafe fn execve_dyn(path: &[u8], argv: &[&[u8]], envp: &[&[u8]]) -> ! {
     crate::fr::record(crate::fr::USER, entry);
     crate::println!("talaria: execve: {} threads 1, entry={:#x} (argc={}, envc={})",
         core::str::from_utf8(&path[..path.iter().position(|&c| c == 0).unwrap_or(path.len())]).unwrap_or("?"), entry, argv.len(), envp.len());
-    core::arch::asm!(
-        "mov cr3, {pml4}",
-        "push {ss}", "push {rsp}", "push {flags}", "push {cs}", "push {rip}", "iretq",
-        pml4 = in(reg) pml4, ss = in(reg) 0x23u64, rsp = in(reg) ustack, flags = in(reg) 0x202u64,
-        cs = in(reg) 0x2Bu64, rip = in(reg) entry, options(noreturn)
-    );
+    switch_and_enter_user(pml4, entry, ustack, 0x202);
 }
 
 /// execve: replace the image of THE CURRENT process task — load an ELF from the disk into a new
@@ -1186,12 +1099,7 @@ pub unsafe fn execve(path: &[u8], argv: &[&[u8]]) -> ! {
     // switch + iretq as A SINGLE asm: entry/ustack/pml4 in registers (taken before the switch from
     // the old stack). The push of the iret frame goes into the current rsp — it is mapped in the new AS
     // (the same stack region). No accesses to locals after mov cr3.
-    core::arch::asm!(
-        "mov cr3, {pml4}",
-        "push {ss}", "push {rsp}", "push {flags}", "push {cs}", "push {rip}", "iretq",
-        pml4 = in(reg) pml4, ss = in(reg) 0x23u64, rsp = in(reg) ustack, flags = in(reg) 0x2u64,
-        cs = in(reg) 0x2Bu64, rip = in(reg) entry, options(noreturn)
-    );
+    switch_and_enter_user(pml4, entry, ustack, 0x2);
 }
 
 /// Run an ELF EXPECTING a #PF (for the protection tests: UAF/munmap). It catches a ring-3 fault
