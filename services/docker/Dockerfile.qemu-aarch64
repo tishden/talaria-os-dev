@@ -1,0 +1,18 @@
+# The arm64 stand image (talaria-qemu-aarch64): qemu-system-aarch64 + the edk2 firmware
+# for the UEFI block. On an x86 host it runs the kernel under TCG (no KVM) — enough for
+# "does it boot" and for the deterministic gates, useless for the timing gates and for
+# the memory-ordering audit (docs/ARM64-PLAN.md §1); on an arm64 host (a Graviton
+# *.metal) the same image runs it under KVM.
+#
+# The same Fedora 40 base and the same four dnf settings as Dockerfile.qemu, for the
+# same measured reasons (see its header) — and one more: it gives QEMU 8.2.2, the
+# version the x86 stand is pinned to, so the two architectures are judged by one QEMU.
+# Build: docker build -t talaria-qemu-aarch64 -f Dockerfile.qemu-aarch64 .
+FROM fedora:40
+RUN dnf install -y --disablerepo=updates --setopt=retries=20 --setopt=timeout=120 \
+      --setopt=minrate=1000 --setopt=max_parallel_downloads=1 --setopt=zchunk=False \
+      qemu-system-aarch64-core qemu-img edk2-aarch64 iproute iputils socat \
+      util-linux-core python3 \
+ && dnf clean all
+RUN qemu-system-aarch64 --version | head -1 && ls /usr/share/edk2/aarch64/QEMU_EFI.fd
+CMD ["/bin/bash"]

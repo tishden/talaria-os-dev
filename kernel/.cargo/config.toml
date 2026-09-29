@@ -17,6 +17,13 @@ build-std-features = ["compiler-builtins-mem"]
 # stack does not depend on this at all — it is read from the workload's own frames.
 rustflags = ["-C", "link-arg=-Tlinker.ld", "-C", "relocation-model=static"]
 
+# The arm64 kernel (docs/ARM64-PLAN.md): the same crate, another linker script. Built
+# explicitly: `cargo -Z json-target-spec build --release --target aarch64-talaria.json`.
+# Frame pointers are the AAPCS64 norm and stay ON here until the 4 % measurement of the
+# x86 decision above is repeated on this architecture (the plan, §4.14).
+[target.aarch64-talaria]
+rustflags = ["-C", "link-arg=-Tlinker-aarch64.ld", "-C", "relocation-model=static", "-C", "force-frame-pointers=yes"]
+
 # V1.11: a node may have several interfaces and several routes. smoltcp's
 # defaults are 2 addresses and 2 routes PER INTERFACE, which is not enough even
 # for "own network + gateway + a route to the management subnet".

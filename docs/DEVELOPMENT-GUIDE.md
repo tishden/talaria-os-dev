@@ -80,6 +80,20 @@ The user binaries (`kernel/user/*`, `services/*`) are built **separately**
 with a static musl at `0x10000000` (`as`/`ld` for the asm tests; `musl-gcc` for C/C++).
 See §10.4.
 
+**The arm64 kernel** (the port, `docs/ARM64-PLAN.md`) is the same crate for the target
+`kernel/aarch64-talaria.json` (ARMv8.2-A, NEON, the Crypto Extensions, LSE atomics)
+with `linker-aarch64.ld`: the image is linked at `0x4008_0000` — QEMU `virt`'s RAM base
+plus the `text_offset` of the Linux `Image` header the kernel starts with. Everything
+with an `asm!`, a register layout or an ABI constant lives under `kernel/src/arch/`
+(`x86_64/`, `aarch64/`), and every shared module that is not yet ported is gated
+`#[cfg(target_arch = "x86_64")]` in `main.rs` — the count of those gates is the
+port's progress meter.
+
+```sh
+kernel/build-aarch64.sh     # -> target/aarch64-talaria/release/talaria (ELF) and talaria.img (the raw Image)
+kernel/runq-aarch64.sh 15   # QEMU virt, TCG on an x86 host (docker image talaria-qemu-aarch64), 15 s of console
+```
+
 ---
 
 ## 3. The boot flow
