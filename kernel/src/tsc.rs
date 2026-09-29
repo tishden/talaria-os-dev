@@ -142,7 +142,8 @@ static FEEDS: AtomicU32 = AtomicU32::new(0);
 
 /// The discipline's interval in milliseconds; 0 — switch it off.
 pub fn set_sync_ms(ms: u64) { SYNC_IV_NS.store(ms.saturating_mul(1_000_000), Ordering::Relaxed); }
-/// Whether the machine has a cheap reference (kvmclock). On hardware there is none — see the TODO.
+/// Whether the machine has a cheap reference (kvmclock). On hardware there is none —
+/// `docs/ROADMAP.md` §2.3.
 pub fn have_ref() -> bool { KVM_OK.load(Ordering::Relaxed) }
 pub fn source() -> u8 { SRC.load(Ordering::Relaxed) }
 pub fn source_name() -> &'static str {

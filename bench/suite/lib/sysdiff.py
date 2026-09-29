@@ -5,8 +5,9 @@
 
 WHAT FOR. The knob `talaria.dirtyage=` pays ITS OWN price inside `write`: the pre-emptive
 flush is called from there next to the §8.7 threshold (`ext2::dirty_age_flush`). By construction
-that price does not enter the price of an `fsync` call, and session 41 wrote into the TODO
-that the knob can be judged only by a second scoreboard (nine hours of the stand). But the price of a
+that price does not enter the price of an `fsync` call, and the knob can therefore be judged
+only by a second scoreboard (nine hours of the stand) — see `docs/ENGINEERING-NOTES.md`,
+the rule that only points from ONE bring-up may be compared. But the price of a
 `write` call is measured in exactly the same way as the price of an `fsync` call —
 by the difference of two snapshots of the `stat:` block — and on the stand that instrument turned out to be
 accurate to 0.2 %, unlike `p99.9`.

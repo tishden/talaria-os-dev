@@ -13,7 +13,7 @@ static mut STAT_MIN: u64 = u64::MAX;
 static mut STAT_MAX: u64 = 0;
 static mut DIAG_TX_N: u64 = 0; static mut DIAG_TX_CYC: u64 = 0; static mut DIAG_WAIT_CYC: u64 = 0; static mut DIAG_RX_N: u64 = 0;
     static mut DIAG_RX_FULL: u64 = 0;
-static mut DIAG_TX_KICKS: u64 = 0; // how many batches really had to be kicked (TODO §8)
+static mut DIAG_TX_KICKS: u64 = 0; // how many batches really had to be kicked (DEVELOPMENT-GUIDE §6b, the batched virtio notify)
 
 // --- the layout of the shared memory (it mirrors fastapp.c) ---
 //

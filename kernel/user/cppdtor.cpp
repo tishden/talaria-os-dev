@@ -1,4 +1,4 @@
-// cppdtor: a repro of a #DE at the exit (TODO §2 / RELEASE-1.0 §1.3) — a global object
+// cppdtor: a repro of a #DE at the exit (RELEASE-1.0 §1.3, decoded in docs/GLOSSARY.md) — a global object
 // whose destructor goes into the futex path (a thread + a mutex + a condvar) after the return from main.
 // The build: musl-g++ (see cpptest2) -static -no-pie -Wl,-Ttext-segment=0x10000000
 #include <cstdio>

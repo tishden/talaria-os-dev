@@ -125,7 +125,7 @@ pub fn init() {
     }
 }
 
-// ── the per-page / per-segment protection (hardening, TODO item 1) ────────────
+// ── the per-page / per-segment protection (hardening) ─────────────────────────
 // A walker over the active tables (CR3): it splits 1G→2M→4K on demand and sets
 // the rights on a page. The identity mapping (vaddr==paddr below 4 GB) => the splitting
 // is trivial: the sub-entries inherit the physical base and the parent's flags.
@@ -1895,7 +1895,7 @@ pub fn nx_range(vaddr: u64, len: u64) {
     }
 }
 
-// ── per-process address spaces (TODO item 2): its own PML4 + a CR3 switch ──────
+// ── per-process address spaces: its own PML4 + a CR3 switch ───────────────────
 // The kernel part (the GB0 identity: the code/stack/data <32 MB, the RAM, the MMIO GB1-3) IS SHARED
 // between all the spaces through a copy of the kernel PDPT; the private user
 // pages are put into the PDPT slots unused by the kernel (the index >=4, i.e. vaddr>=4 GB),

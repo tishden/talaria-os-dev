@@ -164,6 +164,17 @@ hardware baseline rather than a virtualised one. Also open: x2APIC ids above 254
   pre-spin based on a same-core parking history is the actual fix.
 * **Per-core network stacks.** One stack under a machine-wide lock today; many
   threads doing network syscalls at once contend for it.
+* **A lost device barrier is not carried through to an `EIO` at `fsync`.** When the
+  disk does not answer a flush within 10 s the durability of that `fsync` is not
+  promised, but the call still returns 0: `fsync` answers `EIO` only when a WRITE
+  failed (`fs::WRITE_FAILED`), and a lost barrier does not set it. It is counted
+  (`fs::FLUSH_LOST`) and printed in `stat:`, which is how it is noticed today.
+* **"No stall longer than 20 ms for the neighbour" holds on several cores, not on
+  one.** The owner of the FS lock is recognised by the CORE'S NUMBER and so cannot
+  yield to a neighbour sharing its core, while a barrier under that lock on a
+  gp3-class disk lasts up to ~170 ms (measured: one run in thirty). The gate
+  `talaria.test=fsyncconc talaria.smp=1` therefore judges the files' content rather
+  than the neighbour's latency.
 * **ext2**: the journal CHECKPOINT still puts copies in place one block at a
   time (a transaction already goes to the device as ONE batch), and the block
   cache is four-way (`WAYS` in `kernel/src/ext2.rs`).
