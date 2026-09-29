@@ -268,6 +268,17 @@ reasoning does not have to be repeated.
    application-TLS path of an OpenSSL record plus a copy plus a syscall per
    order. The verification is a stage-by-stage tick-to-trade breakdown showing
    that the hot price of TLS is the AES-GCM alone.
+7. **The arm64 port** (EC2 Graviton, QEMU `virt`). Planned in full in
+   `docs/ARM64-PLAN.md`: the inventory of every x86 mechanism the kernel leans
+   on and its replacement, nine phases with named gates, the risks ranked. Not
+   started. The three genuinely new pieces are the GICv3 ITS (MSI-X), the Linux
+   arm64 ABI (other syscall numbers AND other struct layouts) and the weak
+   memory model (an audit of 1 444 `Relaxed` and 367 `volatile` sites that TSO
+   made correct); the estimate to a regression-green kernel with the six
+   workloads is 18–22 weeks, and the scoreboard against Linux arm64 is a separate
+   programme after that. It needs an arm64 stand with KVM (a Graviton `*.metal`):
+   QEMU under TCG on the x86 box boots the kernel but can show neither the timing
+   gates nor a single ordering bug.
 
 ---
 
