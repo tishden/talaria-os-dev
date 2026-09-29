@@ -27,9 +27,30 @@ generic-timer tick re-armed from the IRQ vector (§4.9: 48 ticks in 50 ms at a 1
 period), the secondary cores brought up by PSCI `CPU_ON` with a stack each (§4.10:
 4 of 4 on `-smp 4`, each taking its own tick), and an SGI delivered to every one of
 them. What TCG cannot judge — the timing of any of it and the memory ordering — waits
-for the KVM stand (§1). Every shared module is still gated on x86_64 in `main.rs`
-(92 gates): that count is the meter. The x86-64 tree is
-the release (`README.md`); the port changes its behaviour nowhere.
+for the KVM stand (§1). The first shared modules run on arm64: `paging.rs` computes in
+its canonical (x86-shaped) descriptor format and `arch::mmu::{enc, dec}` translate on
+every table access — the entry type is `Pte`, so a raw access does not compile; the
+translation needs no level (a table and a 4K page share one encoding, a block is
+"present without bit 1") and puts the OS bits at 55-58. `mem::init`, `paging::init`
+(the identity gigabytes laid out by `arch::mmu::gb_kind`: the devices below the RAM,
+the kernel's gigabyte on 2M leaves), `cmdline` and `read_cmdline` run unchanged; the
+rights probe (`protect_none`/`protect`/`query` on a fresh frame) passes under TCG. The
+neighbours they need but that have not come over are stand-ins in ONE file,
+`arch/aarch64/pending.rs` — a list of debts that must shrink. Known gap: no dirty-bit
+tracking (`take_dirty` never fires on arm64; `ext2`'s mmap writeback relies on it —
+§4.3 will need `FEAT_HAFDBS` or a software dirty bit). Of phase 3, the first step is
+proved: a probe assembled into a fresh frame runs at EL0 with its own stack, three
+`svc`s come back through the lower-EL sync vector with the answer the handler wrote
+into `x0`, and a `brk #0` returns the machine to EL1 with a verdict (`trap::sync_el0`;
+the instruction cache is synchronised after the write, §4.12; `TPIDR_EL1` carries the
+per-CPU block, §4.6). Two more pieces of phase 3 are written ahead of their callers:
+`arch/aarch64/abi.rs`, the arm64 → internal syscall-number map (160 rows derived from
+the two toolchains' headers, host-tested one-to-one), and the arm64 vDSO
+(`user/vdso/vdso-aarch64.S`, assembled by `build.rs` with a cross compiler: the three
+clock calls over `cntvct_el0` with a `dmb`-ordered seqlock, and the
+`__kernel_rt_sigreturn` trampoline arm64 needs because it has no `SA_RESTORER`). The
+gates in `main.rs` went 92 → 85: that count is the meter. The x86-64 tree is the release (`README.md`); the
+port changes its behaviour nowhere.
 
 ---
 

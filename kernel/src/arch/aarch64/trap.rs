@@ -127,7 +127,17 @@ STUB_FATAL 4
 STUB_IRQ 5
 STUB_FATAL 6
 STUB_FATAL 7
-STUB_FATAL 8
+.macro STUB_SYNC_EL0 kind
+vec_\kind:
+    SAVE_FRAME
+    mov x0, #\kind
+    mov x1, sp
+    bl sync_el0
+    RESTORE_FRAME
+    eret
+.endm
+
+STUB_SYNC_EL0 8
 STUB_IRQ 9
 STUB_FATAL 10
 STUB_FATAL 11
@@ -176,6 +186,36 @@ extern "C" fn trap(kind: u64, f: &Frame) -> ! {
     }
     crate::println!("[trap]   x30={:#018x}", f.x[30]);
     cpu::halt_irq_off_forever()
+}
+
+/// SVCs taken from EL0, for the bring-up's proof.
+pub static SVCS: AtomicU64 = AtomicU64::new(0);
+/// Where a `brk #0` from EL0 returns the machine to (a kernel function, entered at EL1h
+/// on the kernel stack the `eret` into EL0 left): the bring-up's probe sets it, so that
+/// its deliberate end is not a halt. 0 — a `brk` from EL0 is fatal, as any other fault.
+pub static EL0_RETURN: AtomicU64 = AtomicU64::new(0);
+
+/// A synchronous exception from EL0 (AArch64): an `svc` or a fault of the workload. Phase 3
+/// puts the Linux syscall dispatcher here (docs/ARM64-PLAN.md §4.5); today an SVC answers
+/// with `x0 = x8 + 1` (so that a probe can see the round trip) and anything else — a data
+/// or instruction abort, `brk`, an illegal instruction — is fatal with the full diagnosis,
+/// which is what the probe's last step provokes on purpose.
+#[unsafe(no_mangle)]
+extern "C" fn sync_el0(kind: u64, f: &mut Frame) {
+    let ec = (f.esr >> 26) & 0x3F;
+    if ec == 0x15 {
+        SVCS.fetch_add(1, Ordering::Relaxed);
+        f.x[0] = f.x[8].wrapping_add(1);
+        return;
+    }
+    let back = EL0_RETURN.swap(0, Ordering::Relaxed);
+    if ec == 0x3C && f.esr & 0xFFFF == 0 && back != 0 {
+        // `brk #0` with a continuation: resume the kernel there, at EL1h, interrupts masked.
+        f.elr = back;
+        f.spsr = 0x3C5;
+        return;
+    }
+    trap(kind, f)
 }
 
 /// The timer's PPI (from the tree; 27 is the virtual timer everywhere seen so far).

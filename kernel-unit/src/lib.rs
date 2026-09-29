@@ -56,6 +56,8 @@ pub mod jbd2;
 pub mod crypto;
 #[path = "../../kernel/src/arch/aarch64/dtb.rs"]
 pub mod dtb;
+#[path = "../../kernel/src/arch/aarch64/abi.rs"]
+pub mod abi;
 
 #[path = "../../kernel/src/placement.rs"]
 pub mod placement;

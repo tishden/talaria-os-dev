@@ -33,6 +33,12 @@
 // touched; when a module is done, the allow can be lifted for it alone
 // (`#![warn(unsafe_op_in_unsafe_fn)]` at the top of its file).
 #![allow(unsafe_op_in_unsafe_fn)]
+// THE PORT'S TRANSITIONAL STATE, AND ITS ONE SWITCH. On arm64 the shared modules come over
+// one at a time (docs/ARM64-PLAN.md §5), and a module that has come over is called by
+// neighbours that have not: its public functions are then "never used" on that target. The
+// allow is crate-wide and per-architecture so that the x86 build keeps judging dead code as
+// it always did; it goes when the last `cfg(target_arch = "x86_64")` gate below does.
+#![cfg_attr(target_arch = "aarch64", allow(dead_code))]
 
 /// A ring-3 test binary from `kernel/user/`, embedded into the kernel image.
 /// With the `selftest` feature off it is an empty slice, and the ELF loaders
@@ -50,6 +56,10 @@ macro_rules! user_elf {
 }
 
 mod arch;     // the machine: everything with `asm!`, a register layout or an ABI constant (docs/ARM64-PLAN.md §4.1)
+// arm64: the modules that have come over name neighbours that have not — the stand-ins are
+// listed in ONE file, `arch/aarch64/pending.rs`, and that file must shrink (docs/ARM64-PLAN.md §5).
+#[cfg(target_arch = "aarch64")]
+use arch::pending::{acpi, affinity, metrics, sched, trace, tsc, vdso};
 #[cfg(target_arch = "x86_64")]
 use arch::boot;
 #[cfg(target_arch = "x86_64")]
@@ -59,7 +69,6 @@ mod serial;
 use arch::vga;
 #[cfg(target_arch = "x86_64")]
 mod hal;
-#[cfg(target_arch = "x86_64")]
 mod cmdline;
 #[cfg(target_arch = "x86_64")]
 use arch::crypto;
@@ -67,7 +76,6 @@ use arch::crypto;
 mod idt;
 #[cfg(target_arch = "x86_64")]
 mod l1;
-#[cfg(target_arch = "x86_64")]
 mod paging;
 #[cfg(target_arch = "x86_64")]
 mod sched;
@@ -81,7 +89,6 @@ mod placement;
 mod syscall;
 #[cfg(target_arch = "x86_64")]
 mod user;
-#[cfg(target_arch = "x86_64")]
 mod mem;
 #[cfg(target_arch = "x86_64")]
 mod acpi;
@@ -91,7 +98,6 @@ mod smp;
 mod sync;
 #[cfg(target_arch = "x86_64")]
 mod waitpred; // the predicates of a wait on a word: the sleeper's side and the waker's, wrap-safe
-#[cfg(target_arch = "x86_64")]
 use arch::percpu;
 #[cfg(target_arch = "x86_64")]
 mod fastpath;
@@ -492,7 +498,6 @@ extern "C" fn rust_main(start_info: u64) -> ! {
 /// THE GATE: `cmdline::selftest` requires EVERY registered `talaria.net*`
 /// knob to be either here or in `NET_OPEN_OPTS` — a new knob without a
 /// decision "does it reopen the NIC or not" does not pass the regression rather than waiting for a stand.
-#[cfg(target_arch = "x86_64")]
 pub(crate) const NET_LIVE_OPTS: &[&str] = &[
     "talaria.netirq=",    // the NIC's line is set on the live stack (`netsys::line_late`)
     "talaria.netscan=", "talaria.netslice=", "talaria.netyield=",
@@ -502,7 +507,6 @@ pub(crate) const NET_LIVE_OPTS: &[&str] = &[
 
 /// The `talaria.net*` knobs that REALLY apply only when the NIC is
 /// opened (the rule of an address by interface name) — reopening for them is legitimate.
-#[cfg(target_arch = "x86_64")]
 pub(crate) const NET_OPEN_OPTS: &[&str] = &["talaria.net="];
 
 /// Whether the user-data tail has options that apply ONLY when the NIC is opened.
@@ -822,14 +826,10 @@ fn parse_early_opts(cmdline: &str) {
 
 // cmdline lives in ITS OWN buffer rather than as a slice of the start_info page — so that
 // a tail from EC2 user-data can be glued to it (one AMI for all the experiments).
-#[cfg(target_arch = "x86_64")]
 const CL_MAX: usize = 2048;
-#[cfg(target_arch = "x86_64")]
 static mut CL_BUF: [u8; CL_MAX] = [0; CL_MAX];
-#[cfg(target_arch = "x86_64")]
 static mut CL_LEN: usize = 0;
 /// The current cmdline (with all the tails glued on).
-#[cfg(target_arch = "x86_64")]
 fn cmdline_now() -> &'static str {
     unsafe { core::str::from_utf8(core::slice::from_raw_parts(core::ptr::addr_of!(CL_BUF) as *const u8, CL_LEN)).unwrap_or("") }
 }
@@ -909,7 +909,6 @@ fn rebootat(tag: &str, cmdline: &str) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 fn read_cmdline(start_info: u64) -> &'static str {
     unsafe {
         let magic = *(start_info as *const u32);

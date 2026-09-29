@@ -12,12 +12,16 @@
 //! shared module is compiled for this target.
 #![allow(dead_code)]
 
+pub mod abi;
 pub mod boot;
 pub mod cpu;
 pub mod dtb;
 pub mod gic;
+pub mod icache;
 pub mod kmain;
 pub mod mmu;
+pub mod pending;
+pub mod percpu;
 pub mod psci;
 pub mod timer;
 pub mod trap;
