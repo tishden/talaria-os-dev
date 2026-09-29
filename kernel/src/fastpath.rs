@@ -147,6 +147,11 @@ pub fn run_cell(dev: &'static mut dyn NetDev, mac: [u8; 6], base: usize) -> ! {
                             hi, hi*1_000_000_000/hz);
                     }
                     tc = tc.wrapping_add(1);
+                    // The slot's bytes were READ above; the producer may overwrite them the moment
+                    // it sees the new `cons`. A release fence keeps those loads before the publish
+                    // — free on x86 (TSO), a `dmb` on arm64, where a load may otherwise complete
+                    // after a later store (docs/ARM64-PLAN.md §4.13).
+                    fence(Ordering::Release);
                     write_volatile(p_cons(base, TX_OFF), tc);
                 } else {
                     // there are no free TX buffers — let them be freed
