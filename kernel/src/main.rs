@@ -38,97 +38,173 @@
 /// With the `selftest` feature off it is an empty slice, and the ELF loaders
 /// (`user::load_elf*`) stop the machine with an explicit message instead of
 /// running it. Must stay above the `mod` list: `macro_rules!` is textual.
+#[cfg(target_arch = "x86_64")]
 #[cfg(feature = "selftest")]
 macro_rules! user_elf {
     ($p:literal) => { include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/user/", $p)) };
 }
+#[cfg(target_arch = "x86_64")]
 #[cfg(not(feature = "selftest"))]
 macro_rules! user_elf {
     ($p:literal) => { &[] };
 }
 
 mod arch;     // the machine: everything with `asm!`, a register layout or an ABI constant (docs/ARM64-PLAN.md §4.1)
+#[cfg(target_arch = "x86_64")]
 mod boot;
+#[cfg(target_arch = "x86_64")]
 #[macro_use]
 mod serial;
+#[cfg(target_arch = "x86_64")]
 mod vga;
+#[cfg(target_arch = "x86_64")]
 mod hal;
+#[cfg(target_arch = "x86_64")]
 mod cmdline;
+#[cfg(target_arch = "x86_64")]
 mod crypto;
+#[cfg(target_arch = "x86_64")]
 mod idt;
+#[cfg(target_arch = "x86_64")]
 mod l1;
+#[cfg(target_arch = "x86_64")]
 mod paging;
+#[cfg(target_arch = "x86_64")]
 mod sched;
+#[cfg(target_arch = "x86_64")]
 mod rqpick;    // the choice of the next thread on a core: the rotation and the policy reqfirst
+#[cfg(target_arch = "x86_64")]
 mod affinity;
+#[cfg(target_arch = "x86_64")]
 mod placement;
+#[cfg(target_arch = "x86_64")]
 mod syscall;
+#[cfg(target_arch = "x86_64")]
 mod user;
+#[cfg(target_arch = "x86_64")]
 mod mem;
+#[cfg(target_arch = "x86_64")]
 mod acpi;
+#[cfg(target_arch = "x86_64")]
 mod smp;
+#[cfg(target_arch = "x86_64")]
 mod sync;
+#[cfg(target_arch = "x86_64")]
 mod waitpred; // the predicates of a wait on a word: the sleeper's side and the waker's, wrap-safe
+#[cfg(target_arch = "x86_64")]
 mod percpu;
+#[cfg(target_arch = "x86_64")]
 mod fastpath;
+#[cfg(target_arch = "x86_64")]
 mod fastring;  // the zero-syscall rings: the layout, the index arithmetic, the ARP the cell answers itself
+#[cfg(target_arch = "x86_64")]
 mod fs;
+#[cfg(target_arch = "x86_64")]
 mod tfs;
+#[cfg(target_arch = "x86_64")]
 mod ext2;
+#[cfg(target_arch = "x86_64")]
 mod ext2hash;
+#[cfg(target_arch = "x86_64")]
 mod ext2dir;  // the records of a directory inside one block: the search, the insertion, the removal
+#[cfg(target_arch = "x86_64")]
 mod ext2dx;   // the htree index: the array of a node, the division of a full leaf
+#[cfg(target_arch = "x86_64")]
 mod ext2bmap; // the block/inode bitmaps: the wrap-around scan, the taking of a run
+#[cfg(target_arch = "x86_64")]
 mod ext2sb;   // the superblock: the volume's geometry and the refusal to take a volume that does not add up
+#[cfg(target_arch = "x86_64")]
 mod elfhdr;   // the ELF64 headers: a decoding that does not index past the end of the file
+#[cfg(target_arch = "x86_64")]
 mod elfnote;  // the notes of a core dump: the registers and the name, byte for byte as a debugger expects
+#[cfg(target_arch = "x86_64")]
 mod jbd2;     // the JBD2 log's format: the header of a block and the tags of a descriptor
+#[cfg(target_arch = "x86_64")]
 mod proc;
+#[cfg(target_arch = "x86_64")]
 mod gdb;
+#[cfg(target_arch = "x86_64")]
 mod supervise;
+#[cfg(target_arch = "x86_64")]
 mod console;
+#[cfg(target_arch = "x86_64")]
 mod coredump;
+#[cfg(target_arch = "x86_64")]
 mod shell;    // the operator shell: paths, ls/cat/less/rm/cp — in the kernel, without ring 3
+#[cfg(target_arch = "x86_64")]
 mod edit;     // a full-screen console editor (a subset of vi)
+#[cfg(target_arch = "x86_64")]
 mod filed;    // uploading/downloading files over TCP (an rsync-alike)
+#[cfg(target_arch = "x86_64")]
 mod imds;
+#[cfg(target_arch = "x86_64")]
 mod ioapic;
+#[cfg(target_arch = "x86_64")]
 mod netprof;
+#[cfg(target_arch = "x86_64")]
 mod netsys;
+#[cfg(target_arch = "x86_64")]
 mod netcfg;   // addresses, routes, DHCP: the network configuration as a model rather than three variables
+#[cfg(target_arch = "x86_64")]
 mod routes;
+#[cfg(target_arch = "x86_64")]
 mod tsc;
+#[cfg(target_arch = "x86_64")]
 mod clock;
+#[cfg(target_arch = "x86_64")]
 mod vdso;
+#[cfg(target_arch = "x86_64")]
 mod uaccess;
+#[cfg(target_arch = "x86_64")]
 mod fr;
+#[cfg(target_arch = "x86_64")]
 mod metrics;
+#[cfg(target_arch = "x86_64")]
 mod telemetry;
+#[cfg(target_arch = "x86_64")]
 mod watchdog;
+#[cfg(target_arch = "x86_64")]
 mod ctlplane;
+#[cfg(target_arch = "x86_64")]
 mod obs;
+#[cfg(target_arch = "x86_64")]
 mod pmu;
+#[cfg(target_arch = "x86_64")]
 mod cellman;
+#[cfg(target_arch = "x86_64")]
 mod cat;
+#[cfg(target_arch = "x86_64")]
 mod netdev;   // the network device model: the NetDev trait + the driver table
+#[cfg(target_arch = "x86_64")]
 mod virtnet;  // a driver: virtio-net (MMIO)
+#[cfg(target_arch = "x86_64")]
 mod nicloop;  // a driver: the loopback NIC (the device model's gate)
+#[cfg(target_arch = "x86_64")]
 mod ena;
+#[cfg(target_arch = "x86_64")]
 mod nvme;
+#[cfg(target_arch = "x86_64")]
 mod pci;
+#[cfg(target_arch = "x86_64")]
 mod trace;
+#[cfg(target_arch = "x86_64")]
 mod suite;
+#[cfg(target_arch = "x86_64")]
 mod runmode;   // the production modes `talaria.mode=`
+#[cfg(target_arch = "x86_64")]
 mod selftest;  // the built-in regression `talaria.test=`
 
+#[cfg(target_arch = "x86_64")]
 use core::sync::atomic::Ordering;
 
+#[cfg(target_arch = "x86_64")]
 pub const QS: usize = 256; // virtqueue size (= the queue size of microvm's virtio-net, a power of 2)
 // (the frame buffers of the legacy raw reactor went away with it: the frames are owned by
 // `l1::NicQ`, identically for every NIC — see netdev.rs)
 
 /// Enable AVX/AVX2: CR4.OSXSAVE + XCR0 (x87|SSE|AVX) through xsetbv. For user software
 /// built with -march=native (VEX instructions otherwise give a #UD).
+#[cfg(target_arch = "x86_64")]
 fn enable_avx() {
     unsafe {
         let (_, _, ecx, _) = arch::cpu::cpuid(1);
@@ -142,6 +218,7 @@ fn enable_avx() {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 extern "C" fn rust_main(start_info: u64) -> ! {
     serial::init();
@@ -415,6 +492,7 @@ extern "C" fn rust_main(start_info: u64) -> ! {
 /// THE GATE: `cmdline::selftest` requires EVERY registered `talaria.net*`
 /// knob to be either here or in `NET_OPEN_OPTS` — a new knob without a
 /// decision "does it reopen the NIC or not" does not pass the regression rather than waiting for a stand.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const NET_LIVE_OPTS: &[&str] = &[
     "talaria.netirq=",    // the NIC's line is set on the live stack (`netsys::line_late`)
     "talaria.netscan=", "talaria.netslice=", "talaria.netyield=",
@@ -424,6 +502,7 @@ pub(crate) const NET_LIVE_OPTS: &[&str] = &[
 
 /// The `talaria.net*` knobs that REALLY apply only when the NIC is
 /// opened (the rule of an address by interface name) — reopening for them is legitimate.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const NET_OPEN_OPTS: &[&str] = &["talaria.net="];
 
 /// Whether the user-data tail has options that apply ONLY when the NIC is opened.
@@ -432,6 +511,7 @@ pub(crate) const NET_OPEN_OPTS: &[&str] = &["talaria.net="];
 /// a decision that may cost a node, and it must be named in the log
 /// by name. Without that a failure looks like "the server is silent" forty minutes
 /// after its cause travelled in user-data.
+#[cfg(target_arch = "x86_64")]
 fn tail_touches_nic(tail: &str) -> Option<&str> {
     tail.split_whitespace().find(|t| {
         if NET_LIVE_OPTS.iter().any(|p| t.starts_with(p)) { return false; }
@@ -447,6 +527,7 @@ fn tail_touches_nic(tail: &str) -> Option<&str> {
 /// The options read ONCE before the mode is chosen. Called twice when
 /// `talaria.userdata=1` is on: the second time already with the tail from user-data
 /// glued on, so every setter here must be idempotent.
+#[cfg(target_arch = "x86_64")]
 static SCHED_OPTS_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// ALL THE TUNING AND DIAGNOSTIC KNOBS ARE IN ONE FUNCTION, AND IT IS CALLED
@@ -473,6 +554,7 @@ static SCHED_OPTS_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::Ato
 /// All the actions here are idempotent stores, so a repeated call is safe
 /// (the placement rules, which ACCUMULATE, live separately and are closed
 /// `SCHED_OPTS_DONE`).
+#[cfg(target_arch = "x86_64")]
 fn parse_tuning_opts(cmdline: &str) {
     // Mark WHAT the operator named explicitly: the manifest will not override these values
     // (see `cellman::tune_locked` — otherwise an A/B on such a knob on a stand is
@@ -561,6 +643,7 @@ fn parse_tuning_opts(cmdline: &str) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn parse_early_opts(cmdline: &str) {
     // The tuning knobs are RIGHT HERE: this parsing is called after every cmdline
     // merge (user-data, a suite item), and that is exactly what was missing.
@@ -739,10 +822,14 @@ fn parse_early_opts(cmdline: &str) {
 
 // cmdline lives in ITS OWN buffer rather than as a slice of the start_info page — so that
 // a tail from EC2 user-data can be glued to it (one AMI for all the experiments).
+#[cfg(target_arch = "x86_64")]
 const CL_MAX: usize = 2048;
+#[cfg(target_arch = "x86_64")]
 static mut CL_BUF: [u8; CL_MAX] = [0; CL_MAX];
+#[cfg(target_arch = "x86_64")]
 static mut CL_LEN: usize = 0;
 /// The current cmdline (with all the tails glued on).
+#[cfg(target_arch = "x86_64")]
 fn cmdline_now() -> &'static str {
     unsafe { core::str::from_utf8(core::slice::from_raw_parts(core::ptr::addr_of!(CL_BUF) as *const u8, CL_LEN)).unwrap_or("") }
 }
@@ -767,11 +854,13 @@ fn cmdline_now() -> &'static str {
 /// An audit of the `talaria.*` knobs (see `cmdline::audit`): every one is printed with
 /// its parsed value, while an unknown key, a value of the wrong kind or a duplicate is
 /// A BOOT REFUSAL (`cmdline::refuse`).
+#[cfg(target_arch = "x86_64")]
 fn audit_or_refuse(cmdline: &str, origin: &str) {
     if cmdline::audit(cmdline) { return; }
     cmdline::refuse(cmdline, origin);
 }
 
+#[cfg(target_arch = "x86_64")]
 fn cmdline_append(tail: &str) -> bool {
     unsafe {
         let b = &mut *core::ptr::addr_of_mut!(CL_BUF);
@@ -808,6 +897,7 @@ fn cmdline_append(tail: &str) -> bool {
 /// `talaria.rebootat=<point>`: on reaching it the kernel reboots the machine.
 /// The point is bare metal, where before the disk comes up there is no channel at all:
 /// the number of firmware banners in the instance console is the answer "it got there / it did not".
+#[cfg(target_arch = "x86_64")]
 fn rebootat(tag: &str, cmdline: &str) {
     for tok in cmdline.split_whitespace() {
         if let Some(v) = tok.strip_prefix("talaria.rebootat=") {
@@ -819,6 +909,7 @@ fn rebootat(tag: &str, cmdline: &str) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn read_cmdline(start_info: u64) -> &'static str {
     unsafe {
         let magic = *(start_info as *const u32);
@@ -849,9 +940,12 @@ fn read_cmdline(start_info: u64) -> &'static str {
 
 /// The machine is panicking: the locks that would otherwise wait for the culprit indefinitely
 /// (`fs::dev_lock`) are bypassed — the trace on disk matters more than the order of records.
+#[cfg(target_arch = "x86_64")]
 static PANICKING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+#[cfg(target_arch = "x86_64")]
 pub fn panicking() -> bool { PANICKING.load(core::sync::atomic::Ordering::Relaxed) }
 
+#[cfg(target_arch = "x86_64")]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     PANICKING.store(true, core::sync::atomic::Ordering::SeqCst);

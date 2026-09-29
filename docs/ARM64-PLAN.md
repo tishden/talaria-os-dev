@@ -8,8 +8,16 @@ the kernel leans on, what replaces it, in which order it is built, and by which
 gate each step is judged. The numbers here are estimates and are marked as such;
 the measurements come later and go to `docs/MEASUREMENTS.md`.
 
-Status: **not started** (2026-09-29). The x86-64 tree is the release
-(`README.md`); nothing in this plan changes it until §5 says so.
+Status (2026-09-29, branch `arm64-port`): **phase 0 in progress, phase 1 has
+first light.** `arch/x86_64/cpu.rs` holds the privileged-instruction primitives and
+21 shared modules call them instead of inline `asm!` (the x86 regression stayed at
+486/0 across the change); `arch/aarch64/` has the `Image` header and entry, the
+early identity map, the exception vectors and the PL011, and the kernel boots on
+`qemu-system-aarch64 -M virt` under TCG to its banner — printing the facts §4.9
+asked for (EL1, the DTB at `0x4800_0000`, `CNTFRQ` = 62.5 MHz on QEMU 8.2.2, i.e.
+16 ns per tick). Every shared module is still gated on x86_64 in `main.rs` (92
+gates): that count is the meter. The x86-64 tree is the release (`README.md`); the
+port changes its behaviour nowhere.
 
 ---
 

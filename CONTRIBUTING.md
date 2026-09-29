@@ -26,6 +26,8 @@ Changes to the kernel or tooling pass the local gate. It needs Linux with
 make -C kernel/user all && (cd kernel && python3 mkfs.py)   # regression binaries and disk
 (cd kernel && cargo -Z json-target-spec build --release)    # toolchain pinned in rust-toolchain.toml
 (cd kernel && cargo clippy -Zjson-target-spec --release -- -D warnings)
+kernel/build-aarch64.sh                                     # the arm64 kernel (docs/ARM64-PLAN.md): it must still build
+(cd kernel && cargo clippy -Zjson-target-spec --release --target aarch64-talaria.json -- -D warnings)
 (cd kernel-unit && cargo test && cargo clippy --all-targets -- -D warnings)
 kernel/test.sh          # QEMU regression: "TOTAL: ... FAIL=0"
 kernel/validate.sh      # heavy validation (when possible; SKIP without artefacts is fine)

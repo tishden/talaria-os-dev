@@ -34,6 +34,23 @@ jobs:
         working-directory: kernel
         run: cargo clippy -Zjson-target-spec --release --no-default-features -- -D warnings
 
+  kernel-aarch64:
+    name: kernel (aarch64 target, phase 1 of docs/ARM64-PLAN.md)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The same crate for the other architecture. Today it is the arch/ layer and
+      # the phase-1 bring-up alone (everything else is gated on x86_64 in main.rs);
+      # the job exists so that the arm64 build cannot rot between sessions.
+      - name: Target
+        run: rustup target add aarch64-unknown-none --toolchain "$(sed -n 's/^channel = "\(.*\)"/\1/p' kernel/rust-toolchain.toml)"
+      - name: Build
+        working-directory: kernel
+        run: cargo -Z json-target-spec build --release --no-default-features --target aarch64-talaria.json
+      - name: Clippy
+        working-directory: kernel
+        run: cargo clippy -Zjson-target-spec --release --no-default-features --target aarch64-talaria.json -- -D warnings
+
   kernel-full:
     name: kernel (with selftest binaries)
     runs-on: ubuntu-latest
