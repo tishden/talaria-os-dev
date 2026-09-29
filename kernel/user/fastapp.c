@@ -43,6 +43,9 @@ int main(void){
     uint32_t rc = *CONS(b, RX_OFF);
     for(;;){
         uint32_t rp = *PROD(b, RX_OFF);
+        /* the cell published `prod` after the slot's bytes: read them only after it
+           (an acquire fence — nothing on x86, a `dmb` on arm64) */
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
         while (rc != rp){
             char* rs = SLOT(b, RX_OFF, rc);
             uint32_t len = *(volatile uint32_t*)rs;
@@ -53,10 +56,14 @@ int main(void){
                 memcpy(ts + HDR, rs + HDR, len);
                 reflect((uint8_t*)(ts + HDR), len);
                 *(volatile uint32_t*)ts = len;
-                __asm__ volatile("" ::: "memory");
+                /* the bytes and the length go BEFORE the index that publishes them:
+                   a release fence, the same one the cell uses on its side */
+                __atomic_thread_fence(__ATOMIC_RELEASE);
                 *PROD(b, TX_OFF) = tp + 1;
             }
             rc++;
+            /* the slot was read; only now may the cell overwrite it */
+            __atomic_thread_fence(__ATOMIC_RELEASE);
             *CONS(b, RX_OFF) = rc;
         }
     }

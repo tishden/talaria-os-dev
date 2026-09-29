@@ -189,6 +189,16 @@ pub fn to_internal(nr: u64) -> Option<u64> {
     MAP.binary_search_by_key(&key, |&(a, _)| a).ok().map(|i| MAP[i].1 as u64)
 }
 
+/// Bring the six arguments into the internal (x86-64) order. One call differs: arm64's
+/// `clone(flags, stack, parent_tid, TLS, child_tid)` has the last two the other way
+/// round from x86-64's `clone(flags, stack, parent_tid, child_tid, tls)` (glibc's and
+/// musl's `clone.S` for aarch64 say so) — a swap that, missed, gives a new thread a
+/// garbage TLS and a `child_tid` written into it. `nr` is the INTERNAL number.
+#[inline]
+pub fn normalize(nr: u64, args: &mut [u64; 6]) {
+    if nr == 56 { args.swap(3, 4); }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +230,16 @@ mod tests {
         internal.sort_unstable();
         internal.dedup();
         assert_eq!(internal.len(), MAP.len());
+    }
+
+    #[test]
+    fn clone_has_its_tls_and_child_tid_swapped_and_nothing_else_moves() {
+        let mut a = [1, 2, 3, 4, 5, 6];
+        normalize(56, &mut a);
+        assert_eq!(a, [1, 2, 3, 5, 4, 6]);
+        let mut b = [1, 2, 3, 4, 5, 6];
+        normalize(9, &mut b);
+        assert_eq!(b, [1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

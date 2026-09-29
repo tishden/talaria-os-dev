@@ -1094,26 +1094,34 @@ fn a1_is_fd(nr: u64) -> bool {
 }
 fn rust_syscall_inner(raw: &mut Frame) -> u64 {
     crate::metrics::inc_syscall_of(crate::sched::current_id());
-    if filter_blocks(raw.nr) {
+    // The number and the argument order the PROCESS used are its architecture's; the
+    // dispatcher's are the kernel's internal ones (x86-64's). `arch::abi` translates —
+    // the identity on x86-64, the asm-generic table and `clone`'s tls/ctid swap on arm64
+    // (docs/ARM64-PLAN.md §4.4). `raw.nr` keeps the process's number: a restarted call
+    // (`SA_RESTART`) puts THAT back into the register.
+    let Some(nr) = crate::arch::abi::to_internal(raw.nr) else { return (-38i64) as u64; }; // -ENOSYS
+    let mut args = [raw.a1, raw.a2, raw.a3, raw.a4, raw.a5, raw.a6];
+    crate::arch::abi::normalize(nr, &mut args);
+    if filter_blocks(nr) {
         SYS_DENIED.fetch_add(1, Ordering::Relaxed);
-        crate::fr::record(crate::fr::SYSDENY, raw.nr);
-        crate::println!("syscall-filter: the syscall #{} IS FORBIDDEN -> EPERM", raw.nr);
+        crate::fr::record(crate::fr::SYSDENY, nr);
+        crate::println!("syscall-filter: the syscall #{} IS FORBIDDEN -> EPERM", nr);
         return (-1i64) as u64; // -EPERM
     }
     // Pointer arguments must point into memory the process owns (uaccess.rs):
     // otherwise the handler would read or write kernel memory on its behalf.
-    if let Some(e) = crate::uaccess::gate(raw.nr, [raw.a1, raw.a2, raw.a3, raw.a4, raw.a5, raw.a6]) {
+    if let Some(e) = crate::uaccess::gate(nr, args) {
         return e;
     }
     // the translation user fd -> an internal handle (the process's fd table)
-    let mut g = Frame { nr: raw.nr, a1: raw.a1, a2: raw.a2, a3: raw.a3, a4: raw.a4, a5: raw.a5, a6: raw.a6, rip: raw.rip, rflags: raw.rflags, rbx: raw.rbx,
+    let mut g = Frame { nr, a1: args[0], a2: args[1], a3: args[2], a4: args[3], a5: args[4], a6: args[5], rip: raw.rip, rflags: raw.rflags, rbx: raw.rbx,
         rbp: raw.rbp, r12: raw.r12, r13: raw.r13, r14: raw.r14, r15: raw.r15, ursp: raw.ursp };
-    if a1_is_fd(raw.nr) { g.a1 = crate::proc::tr(raw.a1) as u64; }
-    if raw.nr == 233 { g.a3 = crate::proc::tr(raw.a3) as u64; }
-    if raw.nr == 9 && raw.a4 & 0x20 == 0 { g.a5 = crate::proc::tr(raw.a5) as u64; }
+    if a1_is_fd(nr) { g.a1 = crate::proc::tr(args[0]) as u64; }
+    if nr == 233 { g.a3 = crate::proc::tr(args[2]) as u64; }
+    if nr == 9 && args[3] & 0x20 == 0 { g.a5 = crate::proc::tr(args[4]) as u64; }
     let r = dispatch(&g, raw);
     // the new descriptors -> into the process's fd table
-    match raw.nr {
+    match nr {
         // signalfd4(289) returns a new fd too
         2 | 257 | 41 | 43 | 288 | 291 | 213 | 290 | 283 | 282 | 289 | 53 if (r as i64) >= 0 => { return crate::proc::install(r as i64) as u64; }
         _ => {}

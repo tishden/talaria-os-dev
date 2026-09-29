@@ -585,6 +585,34 @@ The audit is NOT judged under TCG (the host is TSO) — it is judged by
 the Graviton metal for hours, and by reading. It is the phase most likely to
 find bugs that were latent on x86 (the compiler reorders too, TSO or not).
 
+**The first pass by reading (2026-09-29), the protocols that cross the ring-0/ring-3
+or the core boundary:**
+
+* `sync.rs` / `waitpred.rs` — the wait/wake protocol is ALREADY written for a weak
+  machine: the registration (`WSLEEP`) and the wake marks (`WOKEN`) are `SeqCst`, and
+  both sides of the Dekker store-load do an explicit `fence(SeqCst)` (`park_recheck`,
+  the waker's scan) — a `dmb ish` on arm64. Nothing to change; the comment there
+  records why the fence is on the wait side too.
+* `fastpath.rs` / `fastring.rs` / `user/fastapp.c` — the zero-syscall SPSC rings. The
+  producer published with `fence(Release)` and the consumer read the slot behind
+  `fence(Acquire)` — correct — but the consumer published its index with a bare store,
+  so on arm64 the producer could overwrite a slot whose bytes the consumer was still
+  loading: a `fence(Release)` now precedes the `cons` store. The ring-3 side had
+  compiler barriers only (`asm volatile("" ::: "memory")`): it now uses
+  `__atomic_thread_fence` acquire/release at the three points (after reading `prod`,
+  before publishing `prod`, before publishing `cons`) — nothing on x86, `dmb` on arm64.
+* `paging.rs` — the table protocol (P3) is a `SeqCst` CAS with the table filled before
+  it; `pte_w` is a volatile store and the TLB flush follows. Correct as is.
+* `sched.rs` — the claims (`AP_TAKEN`, `CURRENT`, `BSP_IDLE`) and the doorbells are
+  `SeqCst`; the `Relaxed` stores sampled are diagnostics (`GAP_*`, `ON_SINCE`, the
+  snapshot registers) or knobs. Left for the KVM stand: `NW_IN`, `IO_YIELD`,
+  `READY_CTX`, which a neighbour reads to decide — a `Relaxed` there is a decision on
+  a stale flag, not a crash, and only a soak shows whether it matters.
+* Device doorbells (`ena.rs`, `nvme.rs`): `fence(SeqCst)` before a doorbell is `dmb ish`
+  on arm64, which orders the inner-shareable domain — a PCIe device is outer-shareable.
+  When these drivers come over, the fences become `arch::barrier::dma_wmb` (`dmb oshst`)
+  as §4.11 says; noted here so the audit does not count them as done.
+
 ### 4.14. Observability
 
 `obs/unwind` walks `x29` (`[fp] = caller's fp, [fp+8] = lr`); the kernel is

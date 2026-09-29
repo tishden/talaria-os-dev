@@ -2,6 +2,7 @@
 //! directory is new — it is the `asm!`-holding code of the shared modules,
 //! moved behind the `arch::` surface (`docs/ARM64-PLAN.md` §4.1).
 
+pub mod abi;     // the Linux x86-64 syscall numbers ARE the internal ones: the identity decoder
 #[macro_use]
 pub mod serial;  // the 16550 UART on COM1 (port I/O), `print!`/`println!`
 pub mod boot;    // the PVH / multiboot2 entry and the 32-bit -> long mode switch
