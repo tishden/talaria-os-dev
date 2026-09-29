@@ -422,7 +422,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             crate::smp::lapic_timer_init(crate::smp::SLICE_NS);
             let hz = crate::tsc::calibrate_cached();
             let t0 = crate::tsc::rdtsc();
-            unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+            unsafe { crate::arch::cpu::irq_enable(); }
             let mut last = 0u64;
             while crate::tsc::rdtsc() - t0 < hz {          // exactly a second
                 let n = crate::idt::TICKS.load(Ordering::Relaxed) - base;
@@ -435,7 +435,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 }
                 core::hint::spin_loop();
             }
-            unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+            unsafe { crate::arch::cpu::irq_disable(); }
             let n = crate::idt::TICKS.load(Ordering::SeqCst) - base;
             println!("timer-test: over a second interrupts {} — LVT={:#x} initial={} current={} IRR={} ISR={}",
                 n, crate::smp::lapic_peek(0x320), crate::smp::lapic_peek(0x380), crate::smp::lapic_peek(0x390),

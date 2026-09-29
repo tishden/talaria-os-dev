@@ -44,6 +44,8 @@
 //! window — the identity leaves in it are supervisor, and a region is handed to
 //! ring 3 only explicitly, by `protect`.
 
+use crate::arch::cpu;
+
 /// Does the CPU support 1G pages (CPUID 0x80000001 EDX bit 26).
 fn has_1g() -> bool {
     let r = core::arch::x86_64::__cpuid(0x8000_0001);
@@ -58,8 +60,7 @@ pub fn init() {
     // — the syscall/fxsave frames on the user stack, a read() into a buffer — would go straight into the frame SHARED with the child).
     // SAFETY: P5 — CR0.WP on THIS core, before the tables are published — after it a kernel write
     // into an RO page faults instead of silently changing a page shared with a child.
-    unsafe { let mut cr0: u64; core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack)); cr0 |= 1 << 16; core::arch::asm!("mov cr0, {}",
-        in(reg) cr0, options(nomem, nostack)); }
+    unsafe { cpu::write_cr0(cpu::read_cr0() | (1 << 16)); }
     // SMEP: ring 0 must not FETCH from a user page (the kernel never does — see
     // `enable_smep`). It is printed either way: a protection one believes in without
     // seeing it in the log is the kind that turns out to have been off.
@@ -101,7 +102,7 @@ pub fn init() {
             if i == 3 { e |= 0b1_1000; }
             core::ptr::write_volatile((pdpt as *mut u64).add(i as usize), e);
         }
-        core::arch::asm!("mov cr3, {}", in(reg) pml4, options(nostack, preserves_flags));
+        cpu::write_cr3(pml4);
     }
     pat_init(); // the PAT4 slot = write-combining (the ENA's LLQ window, §A1)
     KERNEL_PML4.store(pml4, core::sync::atomic::Ordering::Relaxed); // the reference kernel AS for fork/new_address_space
@@ -214,9 +215,7 @@ const INHERIT: u64 = PTE_P | PTE_RW | PTE_US | (1 << 3) | (1 << 4) | PTE_NX | PT
 /// pointer is valid for as long as this core does not switch CR3 — that is, for the
 /// walk it is used in.
 unsafe fn cr3_root() -> *mut u64 {
-    let cr3: u64;
-    core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
-    (cr3 & ADDR_MASK) as *mut u64
+    (cpu::read_cr3() & ADDR_MASK) as *mut u64
 }
 
 /// # Safety
@@ -224,9 +223,7 @@ unsafe fn cr3_root() -> *mut u64 {
 /// publishes (P4), and never while another core is mid-walk of a table this core is
 /// freeing — that ordering is the shootdown's business.
 unsafe fn flush_tlb() {
-    let cr3: u64;
-    core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
-    core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags));
+    cpu::write_cr3(cpu::read_cr3());
 }
 
 /// How many pages it still makes sense to knock out one by one (`invlpg`) rather than extinguishing the TLB
@@ -246,7 +243,7 @@ unsafe fn flush_range(start: u64, pages: u64) {
     if pages > INVLPG_MAX { flush_tlb(); return; }
     let mut a = start & !0xFFF;
     for _ in 0..pages {
-        core::arch::asm!("invlpg [{}]", in(reg) a, options(nostack, preserves_flags));
+        cpu::invlpg(a);
         a += 4096;
     }
 }
@@ -497,7 +494,7 @@ pub fn take_dirty(vaddr: u64) -> bool {
         let v = core::ptr::read_volatile(pte);
         if v & PTE_P == 0 || v & PTE_D == 0 { return false; }
         core::ptr::write_volatile(pte, v & !PTE_D);
-        core::arch::asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
+        cpu::invlpg(vaddr);
         true
     }
 }
@@ -537,20 +534,17 @@ pub fn pat_init() {
     // SAFETY: P5 — the PAT MSR of THIS core plus a TLB flush — the slot's meaning changes for
     // translations already cached.
     unsafe {
-        let flags: u64;
-        core::arch::asm!("pushfq", "pop {}", out(reg) flags);
-        core::arch::asm!("cli", options(nomem, nostack));
-        let cr0: u64;
-        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack));
-        core::arch::asm!("mov cr0, {}", in(reg) (cr0 | (1 << 30)) & !(1u64 << 29), options(nostack)); // CD=1, NW=0
-        core::arch::asm!("wbinvd", options(nostack));
+        let flags = cpu::irq_flags();
+        cpu::irq_disable();
+        let cr0 = cpu::read_cr0();
+        cpu::write_cr0((cr0 | (1 << 30)) & !(1u64 << 29)); // CD=1, NW=0
+        cpu::wbinvd();
         flush_tlb();
-        core::arch::asm!("wrmsr", in("ecx") MSR_PAT, in("eax") PAT_VALUE as u32,
-            in("edx") (PAT_VALUE >> 32) as u32, options(nostack, preserves_flags));
-        core::arch::asm!("wbinvd", options(nostack));
+        cpu::wrmsr(MSR_PAT, PAT_VALUE);
+        cpu::wbinvd();
         flush_tlb();
-        core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nostack));
-        if flags & 0x200 != 0 { core::arch::asm!("sti", options(nomem, nostack)); }
+        cpu::write_cr0(cr0);
+        cpu::irq_restore(flags);
     }
 }
 
@@ -558,9 +552,7 @@ pub fn pat_init() {
 pub fn pat_read() -> u64 {
     // SAFETY: P5 — a read of this core's PAT MSR.
     unsafe {
-        let (lo, hi): (u32, u32);
-        core::arch::asm!("rdmsr", in("ecx") MSR_PAT, out("eax") lo, out("edx") hi, options(nostack, preserves_flags));
-        ((hi as u64) << 32) | lo as u64
+        cpu::rdmsr(MSR_PAT)
     }
 }
 
@@ -1554,7 +1546,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
                             crate::mem::free_contig(fr, 512); // a neighbouring core managed it earlier
                         } else {
                             HUGE_GIVEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                            core::arch::asm!("invlpg [{}]", in(reg) base, options(nostack, preserves_flags));
+                            cpu::invlpg(base);
                         }
                         return true;
                     }
@@ -1622,7 +1614,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
             crate::mem::free_contig(fr, 1); // we lost the race — the page has already been materialised by a neighbour
             return true;
         }
-        core::arch::asm!("invlpg [{}]", in(reg) a, options(nostack, preserves_flags));
+        cpu::invlpg(a);
         // The cluster: next come pages with THE SAME rights and untouched too —
         // we take them at once, without waiting for their own faults. We do not cross the 2 MB
         // boundary (further there is another page table — an extra walk).
@@ -1644,7 +1636,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
             if s2.compare_exchange(e2, n2, core::sync::atomic::Ordering::SeqCst, core::sync::atomic::Ordering::SeqCst).is_err() {
                 crate::mem::free_contig(f2, 1); break; // the neighbour has already been materialised by somebody else
             }
-            core::arch::asm!("invlpg [{}]", in(reg) b, options(nostack, preserves_flags));
+            cpu::invlpg(b);
             b += 4096; left -= 1;
         }
     }
@@ -1819,10 +1811,7 @@ pub fn unguard(vaddr: u64, len: u64) {
 /// table, otherwise the bit is reserved and the entry faults.
 unsafe fn enable_nxe() {
     const MSR_EFER: u32 = 0xC000_0080;
-    let (lo, hi): (u32, u32);
-    core::arch::asm!("rdmsr", in("ecx") MSR_EFER, out("eax") lo, out("edx") hi, options(nostack, preserves_flags));
-    let efer = ((hi as u64) << 32 | lo as u64) | (1 << 11);
-    core::arch::asm!("wrmsr", in("ecx") MSR_EFER, in("eax") efer as u32, in("edx") (efer >> 32) as u32, options(nostack, preserves_flags));
+    cpu::wrmsr(MSR_EFER, cpu::rdmsr(MSR_EFER) | (1 << 11));
 }
 
 /// SMEP: the processor refuses to FETCH from a user page while in ring 0.
@@ -1846,12 +1835,9 @@ unsafe fn enable_nxe() {
 /// P5: a CR4 write on THIS core, before any ring 3 exists on it.
 unsafe fn enable_smep() -> bool {
     // CPUID.(EAX=7,ECX=0):EBX bit 7 — SMEP. Ask only if leaf 7 exists at all.
-    if core::arch::x86_64::__cpuid(0).eax < 7 { return false; }
-    if core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 7) == 0 { return false; }
-    let mut cr4: u64;
-    core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
-    cr4 |= 1 << 20;
-    core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
+    if cpu::cpuid(0).0 < 7 { return false; }
+    if cpu::cpuid_count(7, 0).1 & (1 << 7) == 0 { return false; }
+    cpu::write_cr4(cpu::read_cr4() | (1 << 20));
     true
 }
 
@@ -2174,17 +2160,15 @@ pub fn map_in(pml4_phys: u64, vaddr: u64, phys: u64, writable: bool, user: bool)
 /// and the kernel stack it runs on must be mapped in the new one (it is: the kernel
 /// half is shared).
 pub unsafe fn switch(pml4_phys: u64) {
-    core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack, preserves_flags));
+    cpu::write_cr3(pml4_phys);
 }
 
 /// The current CR3 (the active PML4's physical address + the flags).
 pub fn kernel_cr3() -> u64 { KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed) }
 
 pub fn current_cr3() -> u64 {
-    let v: u64;
     // SAFETY: P5 — a read of this core's CR3.
-    unsafe { core::arch::asm!("mov {}, cr3", out(reg) v, options(nomem, nostack, preserves_flags)); }
-    v
+    unsafe { cpu::read_cr3() }
 }
 
 /// Clone an address space (a fork's memory): it creates a new AS and COPIES
@@ -2344,7 +2328,7 @@ pub fn cow_fault(vaddr: u64) -> bool {
                     crate::mem::rc_drop(phys);
                     COW_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
-                core::arch::asm!("invlpg [{}]", in(reg) a, options(nostack, preserves_flags));
+                cpu::invlpg(a);
                 return true;
             }
         }

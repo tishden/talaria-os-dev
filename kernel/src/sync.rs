@@ -36,6 +36,7 @@
 // inside an `unsafe fn` of this file has to say so out loud.
 #![warn(unsafe_op_in_unsafe_fn)]
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering, fence};
+use crate::arch::cpu;
 
 /// The wait mode (in decreasing order of desirability). On the i7-3820 stand (Sandy Bridge-E)
 /// there is no WAITPKG/MONITORX — the working mode is MWAIT (tier 2 of PLAN-SYNC §7).
@@ -50,19 +51,7 @@ pub fn mode_name(m: u8) -> &'static str {
     match m { MODE_WAITPKG => "waitpkg(umwait)", MODE_MWAITX => "mwaitx", MODE_MWAIT => "mwait(ring0)", _ => "hlt+ipi" }
 }
 
-fn cpuid(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
-    let (a, b, c, d): (u32, u32, u32, u32);
-    // SAFETY: W3 — `cpuid` on this core; rbx is saved and restored by hand because LLVM
-    // reserves it, and the block promises nothing about memory.
-    unsafe {
-        core::arch::asm!(
-            "push rbx", "cpuid", "mov {b:e}, ebx", "pop rbx",
-            b = out(reg) b, inout("eax") leaf => a, inout("ecx") sub => c, out("edx") d,
-            options(nostack, preserves_flags),
-        );
-    }
-    (a, b, c, d)
-}
+fn cpuid(leaf: u32, sub: u32) -> (u32, u32, u32, u32) { cpu::cpuid_count(leaf, sub) }
 
 /// The TSC-deadline LAPIC timer (for the timeouts of sleep on an AP without a periodic tick).
 static TSC_DL: AtomicBool = AtomicBool::new(false);
@@ -105,7 +94,7 @@ pub fn init() {
         // IA32_UMWAIT_CONTROL: [31:2] the max TSC quanta (0 = no limit), bit0 = the prohibition of C0.2 (0 = allowed)
         // SAFETY: W3 — IA32_UMWAIT_CONTROL (0xE1) of THIS core: the ceiling of a user
         // `umwait` is cleared so that tier 1 does not wake by a timeout of its own.
-        unsafe { core::arch::asm!("wrmsr", in("ecx") 0xE1u32, in("eax") 0u32, in("edx") 0u32, options(nostack, preserves_flags)); }
+        unsafe { cpu::wrmsr(0xE1, 0); }
     }
     crate::println!("sync: the wait mode is {} (monitor={} waitpkg={} mwaitx={})",
         mode_name(m), monitor as u8, waitpkg as u8, mwaitx as u8);
@@ -127,7 +116,7 @@ pub fn init() {
 pub unsafe fn kwait_once(addr: *const u32, val: u32) {
     if MODE.load(Ordering::Relaxed) >= MODE_MWAIT {
         // SAFETY: W3 — MONITOR arms THIS core on the line of `addr` (rax=the line, ecx/edx=0).
-        unsafe { core::arch::asm!("monitor", in("rax") addr, in("rcx") 0u64, in("rdx") 0u64, options(nostack, preserves_flags)); }
+        unsafe { cpu::monitor(addr); }
         // SAFETY: W1 — the re-read AFTER the arming: the workload may have written the word
         // between the two instructions, and then we must not sleep at all.
         if unsafe { core::ptr::read_volatile(addr) } != val { return; }
@@ -136,13 +125,13 @@ pub unsafe fn kwait_once(addr: *const u32, val: u32) {
         // a write to the armed line OR as an interrupt, and `cli` closes the window at once.
         // `halt_enter/exit` tell the scheduler that this core's time is SLEEP, not work
         // (without that the sleep was charged to the thread as CPU%).
-        unsafe { core::arch::asm!("sti; mwait; cli", in("rax") 0u64, in("rcx") 0u64, options(nostack)); }
+        unsafe { cpu::irq_enable_mwait_disable(); }
         crate::paging::halt_exit();
     } else {
         crate::paging::halt_enter();
         // SAFETY: W4 — without MONITOR the only wakeup is an interrupt, so the window is the
         // `hlt` itself; the waker sends an IPI kick (`wake_addr`).
-        unsafe { core::arch::asm!("sti; hlt; cli", options(nostack)); }
+        unsafe { cpu::irq_enable_halt_disable(); }
         crate::paging::halt_exit();
     }
 }
@@ -161,7 +150,7 @@ pub unsafe fn kwait_once(addr: *const u32, val: u32) {
 pub unsafe fn kwait_once_wchk(addr: *const u32, val: u32, woken: &AtomicU8) {
     if MODE.load(Ordering::Relaxed) >= MODE_MWAIT {
         // SAFETY: W3 — as `kwait_once`: the monitor is armed on this core first.
-        unsafe { core::arch::asm!("monitor", in("rax") addr, in("rcx") 0u64, in("rdx") 0u64, options(nostack, preserves_flags)); }
+        unsafe { cpu::monitor(addr); }
         // SAFETY: W1 + W2 — two checks between the arming and the sleep. The word may have
         // returned to `val` (a reused node of a musl condvar), and then only `WOKEN` — set
         // SeqCst before the waker decided to skip the IPI — says the wakeup already happened.
@@ -169,12 +158,12 @@ pub unsafe fn kwait_once_wchk(addr: *const u32, val: u32, woken: &AtomicU8) {
         if woken.load(Ordering::SeqCst) != 0 { return; }
         crate::paging::halt_enter();
         // SAFETY: W3 + W4 — as in `kwait_once`.
-        unsafe { core::arch::asm!("sti; mwait; cli", in("rax") 0u64, in("rcx") 0u64, options(nostack)); }
+        unsafe { cpu::irq_enable_mwait_disable(); }
         crate::paging::halt_exit();
     } else {
         crate::paging::halt_enter();
         // SAFETY: W4 — as in `kwait_once`.
-        unsafe { core::arch::asm!("sti; hlt; cli", options(nostack)); }
+        unsafe { cpu::irq_enable_halt_disable(); }
         crate::paging::halt_exit();
     }
 }
@@ -731,7 +720,7 @@ pub fn wait_on_ex(addr: *const u32, val: u32, deadline: Option<u64>, kind: u64, 
                 else if ap_deadline_ok { arm_tsc_deadline(d); unsafe { kwait_once_wchk(wa, wv, &WOKEN[t]) } disarm_tsc_deadline(); }
                 // SAFETY: W4 — the fallback when neither the tick nor the LVT can be used: one
                 // instruction of an open window.
-                else { unsafe { core::arch::asm!("sti; pause; cli", options(nostack)); } }
+                else { unsafe { cpu::irq_enable_pause_disable(); } }
             // SAFETY: W2 + W3 — as above.
             } else { unsafe { kwait_once_wchk(wa, wv, &WOKEN[t]) } }
         } else if threaded {
@@ -783,7 +772,7 @@ pub fn wait_on_ex(addr: *const u32, val: u32, deadline: Option<u64>, kind: u64, 
         } else {
             // SAFETY: W4 — interrupts are opened on the way out of the loop: the caller's path expects
             // them enabled.
-            unsafe { core::arch::asm!("sti", options(nostack, preserves_flags)); }
+            unsafe { cpu::irq_enable(); }
             core::hint::spin_loop(); // the old behaviour of the single-task run() mode
         }
     }
@@ -1134,8 +1123,8 @@ fn arm_tsc_deadline(deadline_mono_ns: u64) {
     // duration of one bounded sleep.
     unsafe {
         crate::smp::lapic_poke(0x320, crate::idt::WAKE_VECTOR as u32 | 0x4_0000); // LVT: TSC-deadline
-        core::arch::asm!("mfence", options(nostack, preserves_flags)); // SDM: order the LVT before the wrmsr
-        core::arch::asm!("wrmsr", in("ecx") IA32_TSC_DEADLINE, in("eax") target as u32, in("edx") (target >> 32) as u32, options(nostack, preserves_flags));
+        cpu::mfence(); // SDM: order the LVT before the wrmsr
+        cpu::wrmsr(IA32_TSC_DEADLINE, target);
     }
 }
 fn disarm_tsc_deadline() {
@@ -1148,7 +1137,7 @@ fn disarm_tsc_deadline_raw() {
     // SAFETY: W3 — the borrowed timer is returned to the CORE; it is called both by the sleeper and by
     // whoever takes the core from a preempted one.
     unsafe {
-        core::arch::asm!("wrmsr", in("ecx") IA32_TSC_DEADLINE, in("eax") 0u32, in("edx") 0u32, options(nostack, preserves_flags));
+        cpu::wrmsr(IA32_TSC_DEADLINE, 0);
     }
     // A12: the LVT timer is a SHARED register, and we borrowed it from the scheduler. Previously
     // there was a masking here, that is, the scheduler's timer died forever after the very first
@@ -1175,7 +1164,7 @@ pub fn ap_selftest_loop() -> ! {
         let cur = WORD.0.load(Ordering::SeqCst);
         // SAFETY: W4 — the self-check of the AP path: without MONITOR the core waits in `hlt` for an
         // interrupt.
-        if cur == u32::MAX { loop { unsafe { core::arch::asm!("sti; hlt", options(nostack, preserves_flags)); } } }
+        if cur == u32::MAX { loop { unsafe { cpu::irq_enable_halt(); } } }
         while WORD.0.load(Ordering::SeqCst) == cur {
             // SAFETY: W1 + W3 — the self-check sleeps on a kernel word of its own.
             unsafe { kwait_once(WORD.0.as_ptr() as *const u32, cur); }

@@ -277,8 +277,8 @@ pub fn poweroff() {
         // On REAL hardware that must not be done — the ports belong to who knows
         // what — so the branch is only for the case "there were no tables".
         unsafe {
-            core::arch::asm!("out dx, ax", in("dx") 0x604u16, in("ax") 0x2000u16, options(nomem, nostack, preserves_flags));
-            core::arch::asm!("out dx, ax", in("dx") 0xB004u16, in("ax") 0x2000u16, options(nomem, nostack, preserves_flags));
+            crate::arch::cpu::outw(0x604, 0x2000);
+            crate::arch::cpu::outw(0xB004, 0x2000);
         }
         return;
     }
@@ -291,10 +291,10 @@ pub fn poweroff() {
     let tb = if tb0 == u32::MAX { 0 } else { tb0 };
     unsafe {
         let v = ((ta as u16) << 10) | (1 << 13); // SLP_TYP | SLP_EN
-        core::arch::asm!("out dx, ax", in("dx") a as u16, in("ax") v, options(nomem, nostack, preserves_flags));
+        crate::arch::cpu::outw(a as u16, v);
         if b != 0 {
             let v = ((tb as u16) << 10) | (1 << 13);
-            core::arch::asm!("out dx, ax", in("dx") b as u16, in("ax") v, options(nomem, nostack, preserves_flags));
+            crate::arch::cpu::outw(b as u16, v);
         }
     }
 }
@@ -331,9 +331,9 @@ static BTN_WAIT_NS: AtomicU64 = AtomicU64::new(20_000_000_000);
 static SHUTDOWN_AT_NS: AtomicU64 = AtomicU64::new(0);
 const PWRBTN_BIT: u16 = 1 << 8;
 
-unsafe fn inw(port: u32) -> u16 { let v: u16; core::arch::asm!("in ax, dx", out("ax") v, in("dx") port as u16, options(nomem, nostack, preserves_flags)); v }
-unsafe fn outw(port: u32, v: u16) { core::arch::asm!("out dx, ax", in("dx") port as u16, in("ax") v, options(nomem, nostack, preserves_flags)); }
-unsafe fn outb(port: u32, v: u8) { core::arch::asm!("out dx, al", in("dx") port as u16, in("al") v, options(nomem, nostack, preserves_flags)); }
+unsafe fn inw(port: u32) -> u16 { crate::arch::cpu::inw(port as u16) }
+unsafe fn outw(port: u32, v: u16) { crate::arch::cpu::outw(port as u16, v) }
+unsafe fn outb(port: u32, v: u8) { crate::arch::cpu::outb(port as u16, v) }
 
 /// The knob from the TAIL of the cmdline (the EC2 user-data): the button is armed before the tail is merged
 /// (`main.rs`: the ACPI comes up before the network and the IMDS), and `talaria.pwrbtn=0` from
@@ -435,7 +435,7 @@ pub fn shutdown_now(why: &str) -> ! {
     for _ in 0..200_000_000u64 { core::hint::spin_loop(); }
     crate::println!("acpi: the power-off did not work — a halt");
     crate::trace::flush();
-    loop { unsafe { core::arch::asm!("hlt"); } }
+    crate::arch::cpu::halt_forever()
 }
 
 /// The flush of the FS before a power-off/reboot: everything that lies in the block cache

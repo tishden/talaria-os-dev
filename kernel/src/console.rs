@@ -478,10 +478,8 @@ fn cmd_gdb(arg: &str) {
 /// A reboot through the PCI reset control (port 0xCF9): 0x06 = a full reset.
 fn reset() -> ! {
     crate::println!("reset: rebooting (0xCF9 <- 0x06)...");
-    unsafe {
-        core::arch::asm!("out dx, al", in("dx") 0xCF9u16, in("al") 0x06u8, options(nomem, nostack, preserves_flags));
-    }
-    loop { unsafe { core::arch::asm!("hlt"); } } // if it did not work
+    unsafe { crate::arch::cpu::outb(0xCF9, 0x06); }
+    crate::arch::cpu::halt_forever() // if it did not work
 }
 
 /// The "at a glance" summary: what an operator looks at first.

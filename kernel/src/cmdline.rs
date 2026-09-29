@@ -525,7 +525,7 @@ pub fn refuse(cmdline: &str, origin: &str) -> ! {
         selftest/");
     crate::trace::flush();
     crate::acpi::poweroff();
-    loop { unsafe { core::arch::asm!("cli; hlt") } }
+    crate::arch::cpu::halt_irq_off_forever()
 }
 
 /// A self-test of the registry and the audit (part of the gate `talaria.test=cmdline`).

@@ -589,18 +589,14 @@ pub fn io_window() -> bool {
     if IO_WIN_MODE.load(Relaxed) == 0 { return false; }
     if crate::console::in_tick() { return false; }
     if !crate::syscall::THREADED.load(Relaxed) { return false; }
-    let flags: u64;
-    // SAFETY: D4 — this module's own state (the driver, the slots, the partition base), reached
-    // through `addr_of!` so that no reference to it is formed.
-    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)); }
-    if flags & 0x200 != 0 { IO_WIN_SPIN.fetch_add(1, Relaxed); return false; } // the interrupts are open anyway
+    if crate::arch::cpu::irq_enabled() { IO_WIN_SPIN.fetch_add(1, Relaxed); return false; } // the interrupts are open anyway
     IO_WIN_N.fetch_add(1, Relaxed);
     // SAFETY: D4 — this module's own state (the driver, the slots, the partition base), reached
     // through `addr_of!` so that no reference to it is formed.
     unsafe {
-        core::arch::asm!("sti", options(nostack, preserves_flags));
+        crate::arch::cpu::irq_enable();
         for _ in 0..64 { core::hint::spin_loop(); }
-        core::arch::asm!("cli", options(nostack, preserves_flags));
+        crate::arch::cpu::irq_disable();
     }
     true
 }
