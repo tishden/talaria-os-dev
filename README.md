@@ -87,7 +87,7 @@ qemu ... -append "console=ttyS0 talaria.mode=cell" -drive file=disk.img,...
 
 | Document | Contents |
 |---|---|
-| `docs/PRODUCT.md` | product boundaries, trade-offs, performance tables, limits, roadmap |
+| `docs/PRODUCT.md` | product boundaries, the mechanisms that make it fast, trade-offs, performance tables, limits, roadmap |
 | `docs/POSITIONING.md` | who it is for and where the proven boundary lies |
 | `docs/HANDS-ON-GUIDE.md` | hands-on tour on a multithreaded C++ app (`examples/mdpipe`): monitoring, placement, profiling, live debugging, core dumps, EC2 |
 | `docs/USER-GUIDE.md` | building, running your own and open-source applications, operations |
