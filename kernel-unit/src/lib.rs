@@ -54,6 +54,8 @@ pub mod elfnote;
 pub mod jbd2;
 #[path = "../../kernel/src/arch/x86_64/crypto.rs"]
 pub mod crypto;
+#[path = "../../kernel/src/arch/aarch64/dtb.rs"]
+pub mod dtb;
 
 #[path = "../../kernel/src/placement.rs"]
 pub mod placement;

@@ -53,6 +53,12 @@ pub unsafe fn early_enable(ram_base: u64, ram_size: u64) {
     for i in first.max(1)..=last.min(511) {
         t.0[i] = normal_block((i as u64) << 30);
     }
+    enable_here();
+}
+
+/// Turn the MMU on for THIS core with the table `early_enable` built: the boot core
+/// after building it, every secondary core on its way up (PSCI enters with the MMU off).
+pub unsafe fn enable_here() {
     // The intermediate physical address size: what the core supports, capped at 48 bits
     // (the encodings of PARange and TCR.IPS coincide up to that point).
     let parange = (cpu::id_aa64mmfr0() & 0xF).min(5);

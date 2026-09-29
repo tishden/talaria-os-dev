@@ -8,7 +8,25 @@
 //! (the baud divisor), LCR_H (the line control), CR (enable), ICR (clear interrupts).
 
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// One line at a time from ANY core. The wait is bounded (as every wait on this
+/// console): a core that faults while holding the lock must still get its diagnosis
+/// out, so after the budget the taker proceeds and the lines may interleave.
+static LOCK: AtomicBool = AtomicBool::new(false);
+const LOCK_SPINS: u32 = 2_000_000;
+
+pub struct Guard;
+pub fn lock() -> Guard {
+    let mut n = 0u32;
+    while LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        n += 1;
+        if n >= LOCK_SPINS { break; }
+        core::hint::spin_loop();
+    }
+    Guard
+}
+impl Drop for Guard { fn drop(&mut self) { LOCK.store(false, Ordering::Release); } }
 
 static BASE: AtomicU64 = AtomicU64::new(0x0900_0000);
 
@@ -83,6 +101,7 @@ macro_rules! print {
 macro_rules! println {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
+        let _g = $crate::arch::uart::lock();
         let mut _l = $crate::arch::uart::Line::new();
         let _ = writeln!(_l, $($arg)*);
     }};

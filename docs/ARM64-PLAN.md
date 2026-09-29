@@ -8,16 +8,28 @@ the kernel leans on, what replaces it, in which order it is built, and by which
 gate each step is judged. The numbers here are estimates and are marked as such;
 the measurements come later and go to `docs/MEASUREMENTS.md`.
 
-Status (2026-09-29, branch `arm64-port`): **phase 0 in progress, phase 1 has
-first light.** `arch/x86_64/cpu.rs` holds the privileged-instruction primitives and
-21 shared modules call them instead of inline `asm!` (the x86 regression stayed at
-486/0 across the change); `arch/aarch64/` has the `Image` header and entry, the
-early identity map, the exception vectors and the PL011, and the kernel boots on
-`qemu-system-aarch64 -M virt` under TCG to its banner — printing the facts §4.9
-asked for (EL1, the DTB at `0x4800_0000`, `CNTFRQ` = 62.5 MHz on QEMU 8.2.2, i.e.
-16 ns per tick). Every shared module is still gated on x86_64 in `main.rs` (92
-gates): that count is the meter. The x86-64 tree is the release (`README.md`); the
-port changes its behaviour nowhere.
+Status (2026-09-29, branch `arm64-port`): **phase 0 in progress; phases 1 and 2
+have their logic proved under TCG.** `arch/x86_64/cpu.rs` holds the privileged-instruction primitives
+and 21 shared modules call them instead of inline `asm!`; seven whole x86 modules
+(`boot`, `percpu`, `ioapic`, `vga`, `pmu`, `cat`, `crypto`) moved under
+`arch/x86_64/` (the x86 regression stayed at 486/0 across both changes).
+`arch/aarch64/` has the `Image` header and entry, the early identity map, the
+exception vectors, the PL011 and the device-tree parser (§4.2 — host-tested against
+the stand's own tree, 11 tests), and the kernel boots on `qemu-system-aarch64 -M virt`
+under TCG to a banner that names the RAM, the console, the GIC and its ITS, the
+timer PPIs (29/30/27/26), PSCI (`hvc`), the cores, 32 virtio-mmio windows, the ECAM,
+and translates the tree into the PVH `hvm_start_info` the x86 kernel reads — the
+"one boot record" of §2.6 turned out to be the record that already exists, as it
+did for GRUB. The facts §4.9 asked for are in: EL1, the DTB at `0x4800_0000`,
+`CNTFRQ` = 62.5 MHz on QEMU 8.2.2, i.e. 16 ns per tick. Of phase 2, everything TCG can
+judge is in and green: the GICv3 distributor/redistributors/CPU interface (§4.8), the
+generic-timer tick re-armed from the IRQ vector (§4.9: 48 ticks in 50 ms at a 1 ms
+period), the secondary cores brought up by PSCI `CPU_ON` with a stack each (§4.10:
+4 of 4 on `-smp 4`, each taking its own tick), and an SGI delivered to every one of
+them. What TCG cannot judge — the timing of any of it and the memory ordering — waits
+for the KVM stand (§1). Every shared module is still gated on x86_64 in `main.rs`
+(92 gates): that count is the meter. The x86-64 tree is
+the release (`README.md`); the port changes its behaviour nowhere.
 
 ---
 
