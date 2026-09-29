@@ -33,6 +33,15 @@ pub mod tsc {
     #[inline(always)] pub fn rdtsc() -> u64 { super::super::cpu::counter() }
     pub fn hz() -> u64 { super::super::cpu::counter_hz() }
     pub fn calibrate_cached() -> u64 { super::super::cpu::counter_hz() }
+    /// The clock's parameters for the vDSO: the counter as it is, no wall-clock offset
+    /// (the servo of `tsc.rs` is what will discipline them).
+    pub fn publish_vdso_now() {
+        let c = super::super::cpu::counter();
+        crate::vdso::publish(c, 0, super::super::cpu::counter_hz(), 0);
+        VDSO_BASE.store(c, core::sync::atomic::Ordering::Relaxed);
+    }
+    /// The counter value the vDSO's zero corresponds to (for the probe's arithmetic).
+    pub static VDSO_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 }
 
 /// `trace.rs`: the early trace on disk — there is no disk yet.
@@ -49,9 +58,4 @@ pub mod sched {
 /// `affinity.rs`: one NUMA node until the PPTT/SRAT are read.
 pub mod affinity {
     pub fn my_node() -> u8 { 0 }
-}
-
-/// `vdso.rs`: no vDSO image yet (phase 3) — a new address space gets none.
-pub mod vdso {
-    pub fn map_into(_root: u64) {}
 }

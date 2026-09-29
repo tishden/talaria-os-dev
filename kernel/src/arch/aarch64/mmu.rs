@@ -26,6 +26,18 @@
 //! Every present entry also carries AF (the access flag — there is no hardware walk to
 //! set it) and nG (not global: translations are per ASID, which is how x86 without
 //! PCID behaves too — a root switch drops them).
+//!
+//! ## The dirty bit
+//!
+//! x86 sets D (bit 6) in hardware on the first write and `paging::take_dirty` clears it;
+//! `ext2`'s mmap writeback lives on that. AArch64 has no dirty bit as such, but with
+//! FEAT_HAFDBS (`TCR.HD = 1`) it has the DBM scheme: a page with DBM (bit 51) set and
+//! AP[2] = 1 is WRITABLE, only read-only until its first write, and the hardware clears
+//! AP[2] on that write without a fault. So a canonical RW page without D is encoded as
+//! DBM + AP[2] = 1, a dirty one as DBM + AP[2] = 0, and `dec` reads RW from DBM and D from
+//! AP[2] — exactly x86's semantics, `take_dirty` re-arms the page by clearing D. Without
+//! the feature (`cpu::has_hw_dirty` false) the fallback is CONSERVATIVE: every writable
+//! page decodes as dirty, so a writeback never misses a write; it only does more of them.
 
 use super::cpu;
 
@@ -37,9 +49,12 @@ const AP2_RO: u64 = 1 << 7;
 const SH_INNER: u64 = 0b11 << 8;
 const AF: u64 = 1 << 10;
 const NG: u64 = 1 << 11;
+const DBM: u64 = 1 << 51;
 const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
-const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+/// The output address of a 4K-granule descriptor: bits 47:12. NOT x86's 51:12 — bit 51 is
+/// DBM here, and a mask that swallowed it once turned a frame number into a data abort.
+const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 
 // The canonical bits (paging.rs).
 const C_P: u64 = 1 << 0;
@@ -47,6 +62,7 @@ const C_RW: u64 = 1 << 1;
 const C_US: u64 = 1 << 2;
 const C_PWT: u64 = 1 << 3;
 const C_PCD: u64 = 1 << 4;
+const C_D: u64 = 1 << 6;
 const C_PS: u64 = 1 << 7;
 const C_NX: u64 = 1 << 63;
 const C_SW9: u64 = 1 << 9;
@@ -74,6 +90,7 @@ pub fn enc(c: u64) -> u64 {
     let mut h = (c & ADDR_MASK) | VALID | AF | NG;
     if c & C_PS == 0 { h |= TABLE_OR_PAGE; }
     if c & C_RW == 0 { h |= AP2_RO; }
+    else if hw_dirty() { h |= DBM; if c & C_D == 0 { h |= AP2_RO; } } // writable; read-only until the first write
     if c & C_US != 0 { h |= AP1_EL0 | PXN; }
     if c & C_NX != 0 { h |= UXN; if c & C_US == 0 { h |= PXN; } }
     if c & (C_PWT | C_PCD) != 0 { h |= ATTR_DEVICE << ATTR_SHIFT; } else { h |= SH_INNER; }
@@ -90,7 +107,8 @@ pub fn dec(h: u64) -> u64 {
     if h & VALID == 0 { return h; }
     let mut c = (h & ADDR_MASK) | C_P;
     if h & TABLE_OR_PAGE == 0 { c |= C_PS; }
-    if h & AP2_RO == 0 { c |= C_RW; }
+    if h & DBM != 0 { c |= C_RW; if h & AP2_RO == 0 { c |= C_D; } }   // tracked: written since the last take_dirty
+    else if h & AP2_RO == 0 { c |= C_RW; if !hw_dirty() { c |= C_D; } } // untracked: conservatively dirty
     if h & AP1_EL0 != 0 { c |= C_US; }
     if h & UXN != 0 { c |= C_NX; }
     if (h >> ATTR_SHIFT) & 0x7 == ATTR_DEVICE { c |= C_PWT | C_PCD; }
@@ -100,6 +118,11 @@ pub fn dec(h: u64) -> u64 {
     if h & H_SW55 != 0 { c |= C_SW55; }
     c
 }
+
+/// Whether the dirty state is managed by the hardware (decided once, at the early map).
+static HW_DIRTY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+#[inline(always)] fn hw_dirty() -> bool { HW_DIRTY.load(core::sync::atomic::Ordering::Relaxed) }
+pub fn hw_dirty_on() -> bool { hw_dirty() }
 
 /// The physical address of the active root table (`TTBR0_EL1` without the ASID).
 #[inline(always)]
@@ -170,13 +193,8 @@ pub unsafe fn early_enable(ram_base: u64, ram_size: u64) {
     l0.0[0] = (core::ptr::addr_of!(L1) as u64) | VALID | TABLE_OR_PAGE;
     // The intermediate physical address size: what the core supports, capped at 48 bits
     // (the encodings of PARange and TCR.IPS coincide up to that point).
-    let parange = (cpu::id_aa64mmfr0() & 0xF).min(5);
-    let tcr: u64 = 16                    // T0SZ: a 48-bit VA, four levels — as x86's PML4
-        | (1 << 8) | (1 << 10)           // IRGN0/ORGN0: the walks are write-back cacheable
-        | (0b11 << 12)                   // SH0: inner shareable
-        | (1 << 23)                      // EPD1: no TTBR1 walks
-        | (parange << 32)                // IPS
-        | (1 << 36);                     // AS: 16-bit ASIDs
+    HW_DIRTY.store(cpu::has_hw_dirty(), core::sync::atomic::Ordering::Relaxed);
+    let tcr = tcr_value();
     core::arch::asm!(
         "msr mair_el1, {mair}",
         "msr tcr_el1, {tcr}",
@@ -196,8 +214,7 @@ pub unsafe fn early_enable(ram_base: u64, ram_size: u64) {
 /// read-modify-write, never a constant.
 pub unsafe fn enable_here() {
     // The same MAIR/TCR/TTBR as the boot core (a secondary's registers start undefined).
-    let parange = (cpu::id_aa64mmfr0() & 0xF).min(5);
-    let tcr: u64 = 16 | (1 << 8) | (1 << 10) | (0b11 << 12) | (1 << 23) | (parange << 32) | (1 << 36);
+    let tcr = tcr_value();
     core::arch::asm!(
         "msr mair_el1, {mair}",
         "msr tcr_el1, {tcr}",
@@ -210,6 +227,23 @@ pub unsafe fn enable_here() {
     );
     let sctlr = cpu::sctlr_el1() | (1 << 0) | (1 << 2) | (1 << 12);
     core::arch::asm!("msr sctlr_el1, {}", "isb", in(reg) sctlr, options(nostack));
+}
+
+/// `TCR_EL1` for every core: a 48-bit VA in four levels (as x86's PML4), cacheable
+/// inner-shareable walks, no TTBR1, the supported physical address size, 16-bit ASIDs,
+/// and — where the core has FEAT_HAFDBS — the hardware access flag and dirty state.
+fn tcr_value() -> u64 {
+    // The intermediate physical address size: what the core supports, capped at 48 bits
+    // (the encodings of PARange and TCR.IPS coincide up to that point).
+    let parange = (cpu::id_aa64mmfr0() & 0xF).min(5);
+    let mut tcr: u64 = 16                // T0SZ: a 48-bit VA, four levels — as x86's PML4
+        | (1 << 8) | (1 << 10)           // IRGN0/ORGN0: the walks are write-back cacheable
+        | (0b11 << 12)                   // SH0: inner shareable
+        | (1 << 23)                      // EPD1: no TTBR1 walks
+        | (parange << 32)                // IPS
+        | (1 << 36);                     // AS: 16-bit ASIDs
+    if hw_dirty() { tcr |= (1 << 39) | (1 << 40); } // HA | HD
+    tcr
 }
 
 /// The root a core coming up should use: `paging::init`'s table once it exists, the early one before.
