@@ -262,7 +262,7 @@ pub fn run(cmdline: &str, tsc_hz: u64) -> ! {
         crate::sched::spawn(task_control_plane, sa);
         crate::sched::spawn(task_housekeeping, sb);
         crate::sched::install();                 // the timer -> a context switch
-        core::arch::asm!("sti");
+        crate::arch::cpu::irq_enable();
         crate::sched::start()                    // -> ! : enter task 0, the timer preempts from there on
     }
 }

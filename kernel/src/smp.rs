@@ -612,9 +612,7 @@ pub fn start_ap(apic_id: u32) -> bool {
             BSP_CR0.store(cr0, Ordering::SeqCst);
             BSP_CR4.store(cr4, Ordering::SeqCst);
             if cr4 & (1 << 18) != 0 { // OSXSAVE -> xgetbv is possible
-                let (lo, hi): (u32, u32);
-                core::arch::asm!("xgetbv", in("ecx") 0u32, out("eax") lo, out("edx") hi);
-                BSP_XCR0.store(((hi as u64) << 32) | lo as u64, Ordering::SeqCst);
+                BSP_XCR0.store(crate::arch::cpu::xgetbv(0), Ordering::SeqCst);
             }
         }
         // A snapshot of THE COUNTER of the live ones BEFORE the INIT: an AP may mark itself faster than the BSP

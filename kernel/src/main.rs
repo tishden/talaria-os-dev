@@ -47,6 +47,7 @@ macro_rules! user_elf {
     ($p:literal) => { &[] };
 }
 
+mod arch;     // the machine: everything with `asm!`, a register layout or an ABI constant (docs/ARM64-PLAN.md §4.1)
 mod boot;
 #[macro_use]
 mod serial;
@@ -130,13 +131,10 @@ pub const QS: usize = 256; // virtqueue size (= the queue size of microvm's virt
 /// built with -march=native (VEX instructions otherwise give a #UD).
 fn enable_avx() {
     unsafe {
-        let c = core::arch::x86_64::__cpuid(1);
-        if c.ecx & (1 << 26) == 0 || c.ecx & (1 << 28) == 0 { return; } // XSAVE, AVX
-        let mut cr4: u64;
-        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
-        cr4 |= 1 << 18; // OSXSAVE
-        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack));
-        core::arch::asm!("xsetbv", in("ecx") 0u32, in("eax") 0x7u32, in("edx") 0u32, options(nomem, nostack));
+        let (_, _, ecx, _) = arch::cpu::cpuid(1);
+        if ecx & (1 << 26) == 0 || ecx & (1 << 28) == 0 { return; } // XSAVE, AVX
+        arch::cpu::write_cr4(arch::cpu::read_cr4() | (1 << 18)); // OSXSAVE
+        arch::cpu::xsetbv(0, 0x7);
         // Since AVX is on, a context switch MUST save the whole YMM
         // (fxsave knows only the low 128 bits; see sched::FPU_AREA).
         crate::sched::XSAVE_MASK.store(0x7, core::sync::atomic::Ordering::SeqCst);
@@ -863,5 +861,5 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     // Only the BSP reboots the machine (see the same argument in idt.rs: there is one
     // NVMe queue, and writing into it from APs in a race spoils our own log).
     if smp::my_logical() == 0 { suite::park(); }
-    loop { unsafe { core::arch::asm!("hlt") }; }
+    arch::cpu::halt_forever()
 }

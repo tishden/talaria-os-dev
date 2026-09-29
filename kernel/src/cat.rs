@@ -49,21 +49,7 @@ static COS_OF: [AtomicU8; MAXCPU] = [const { AtomicU8::new(0) }; MAXCPU];
 static CLASS_MASK: [AtomicU32; MAXCOS] = [const { AtomicU32::new(0) }; MAXCOS];
 static APPLIED: AtomicU32 = AtomicU32::new(0);
 
-fn cpuid_count(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
-    let r = core::arch::x86_64::__cpuid_count(leaf, sub);
-    (r.eax, r.ebx, r.ecx, r.edx)
-}
-
-unsafe fn wrmsr(msr: u32, v: u64) {
-    core::arch::asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32,
-        options(nostack, preserves_flags));
-}
-unsafe fn rdmsr(msr: u32) -> u64 {
-    let (lo, hi): (u32, u32);
-    core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
-        options(nostack, preserves_flags));
-    (hi as u64) << 32 | lo as u64
-}
+use crate::arch::cpu::{cpuid_count, rdmsr, wrmsr};
 
 pub fn present() -> bool { PRESENT.load(Ordering::Relaxed) }
 pub fn cbm_len() -> u32 { CBM_LEN.load(Ordering::Relaxed) }

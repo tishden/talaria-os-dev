@@ -331,7 +331,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 GOT.store(crate::tsc::rdtsc() | 1, SeqCst);
                 if !held { crate::println!("DEVLOCK: FAIL — the AP got a guard without the lock (a bypass)"); }
                 drop(g);
-                loop { unsafe { core::arch::asm!("hlt") }; }
+                crate::arch::cpu::halt_forever();
             }
             if !crate::fs::init() { println!("DEVLOCK: FAIL — there is no disk"); crate::suite::park() }
             crate::smp::lapic_enable();
@@ -375,7 +375,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 let ok = crate::fs::blk_read(0, &mut buf);
                 OK.store(ok as u64, SeqCst);
                 GOT.store(crate::tsc::rdtsc() | 1, SeqCst);
-                loop { unsafe { core::arch::asm!("hlt") }; }
+                crate::arch::cpu::halt_forever();
             }
             if !crate::fs::init() { println!("RINGLOCK: FAIL — there is no disk"); crate::suite::park() }
             crate::smp::lapic_enable();
@@ -416,7 +416,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             fn ap(_id: usize) -> ! {
                 while START.load(SeqCst) == 0 { core::hint::spin_loop(); }
                 crate::netsys::hold(|| GOT.store(crate::tsc::rdtsc() | 1, SeqCst));
-                loop { unsafe { core::arch::asm!("hlt") }; }
+                crate::arch::cpu::halt_forever();
             }
             crate::smp::lapic_enable();
             crate::smp::AP_MODE.store(3, SeqCst);
@@ -471,7 +471,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 let (rc, byp) = crate::ext2::jrn_sync_for_test();
                 RC.store(rc as u64, SeqCst); BYP.store(byp, SeqCst);
                 GOT.store(crate::tsc::rdtsc() | 1, SeqCst);
-                loop { unsafe { core::arch::asm!("hlt") }; }
+                crate::arch::cpu::halt_forever();
             }
             if !crate::fs::init() { println!("JRNWAIT: FAIL — there is no disk"); crate::suite::park() }
             if !crate::ext2::jrn_active() { println!("JRNWAIT: FAIL — a volume without a journal (disk_ext2.img is needed)"); crate::suite::park() }
@@ -789,7 +789,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 while crate::tsc::rdtsc().wrapping_sub(t0) < hz / 3 { core::hint::spin_loop(); } // 333 ms
                 crate::ext2::jrn_busy_for_test(false);
                 DONE.store(1, SeqCst);
-                loop { unsafe { core::arch::asm!("hlt") }; }
+                crate::arch::cpu::halt_forever();
             }
             if !crate::fs::init() { println!("FSYNCPH: FAIL — there is no disk"); crate::suite::park() }
             if !crate::ext2::jrn_active() { println!("FSYNCPH: FAIL — a volume without a journal (disk_ext2.img is needed)"); crate::suite::park() }
@@ -1081,7 +1081,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 GOT.store(crate::tsc::rdtsc() | 1, SeqCst);
                 if !held { crate::println!("FSLOCK: FAIL — the AP got a guard without the lock (a bypass)"); }
                 drop(g);
-                loop { unsafe { core::arch::asm!("hlt") }; }
+                crate::arch::cpu::halt_forever();
             }
             if !crate::fs::init() { println!("FSLOCK: FAIL — there is no disk"); crate::suite::park() }
             crate::smp::lapic_enable();

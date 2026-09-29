@@ -462,13 +462,13 @@ extern "C" fn task_iowin() -> ! {
     for (i, mode) in [1u32, 0].iter().enumerate() {
         crate::fs::IO_WIN_MODE.store(*mode, SeqCst);
         let w0 = crate::fs::IO_WIN_N.load(SeqCst);
-        unsafe { core::arch::asm!("cli", options(nostack, preserves_flags)); } // as in a syscall
+        unsafe { crate::arch::cpu::irq_disable(); } // as in a syscall
         let (b0, i0) = crate::sched::cpu_ticks(cpu);
         let t0 = crate::tsc::rdtsc();
         let mut spins = 0u32;
         while crate::tsc::rdtsc().wrapping_sub(t0) < hz / 20 { crate::fs::io_wait_step(&mut spins); }
         let (b1, i1) = crate::sched::cpu_ticks(cpu);
-        unsafe { core::arch::asm!("sti", options(nostack, preserves_flags)); }
+        unsafe { crate::arch::cpu::irq_enable(); }
         ticks[i] = (b1 + i1) - (b0 + i0);
         wins[i] = crate::fs::IO_WIN_N.load(SeqCst) - w0;
     }

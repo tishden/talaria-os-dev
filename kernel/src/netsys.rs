@@ -2676,11 +2676,11 @@ fn note_cap_exit(had_data: bool) {
             }
         }
         nw_ph(PH_SPIN);
-        unsafe { core::arch::asm!("sti", options(nostack, preserves_flags)); }
+        unsafe { crate::arch::cpu::irq_enable(); }
         crate::obs::stat_flush_spin(); // a byte of the `talaria.stat=` block — from here rather than from a tick
         let n = NETPAUSE.load(core::sync::atomic::Ordering::Relaxed);
         for _ in 0..n { core::hint::spin_loop(); }
-        unsafe { core::arch::asm!("cli", options(nostack, preserves_flags)); }
+        unsafe { crate::arch::cpu::irq_disable(); }
     } else { nw_why(crate::sched::current_id(), 0); core::hint::spin_loop(); }
 }
 fn ms_to_cycles(ms: i64) -> u64 { (ms as u64) * (unsafe { HZ } / 1000) }

@@ -119,7 +119,7 @@ pub fn supervise_threaded(path: *const u8, args: &[&[u8]], envs: &[&[u8]], max_r
         }
         // the longjmp lands here: 1 — a fault, 2 — all threads finished, 3 — exit/exit_group
         RECOVERY_ARMED.store(false, Ordering::SeqCst);
-        unsafe { core::arch::asm!("cli", options(nostack, preserves_flags)); }
+        unsafe { crate::arch::cpu::irq_disable(); }
         crate::smp::lapic_timer_stop();
         let code = EXIT_CODE_LAST.load(Ordering::SeqCst);
         let pend = CRASH_PEND.swap(0, Ordering::SeqCst);

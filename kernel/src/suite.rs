@@ -134,7 +134,7 @@ pub fn park() -> ! {
         crate::println!("suite: the power-off did not work — halting");
         crate::trace::flush();
     }
-    loop { unsafe { core::arch::asm!("hlt"); } }
+    crate::arch::cpu::halt_forever()
 }
 
 /// `talaria.poweroff=1` — power the machine off once the mode has finished (without a suite).
@@ -146,19 +146,15 @@ pub fn set_poweroff(v: bool) { POWEROFF.store(v, Ordering::Relaxed); }
 /// to the needed point — the only channel that works BEFORE the disk comes up
 /// (`talaria.rebootat=`).
 pub fn reboot() -> ! {
-    loop {
-        unsafe {
-            // 0xCF9 = PCI reset control: 0x0E — a full reset. If the firmware does not
-            // support it, we finish the job with a triple fault through an empty IDT.
-            core::arch::asm!("out dx, al", in("dx") 0xCF9u16, in("al") 0x0Eu8, options(nomem, nostack, preserves_flags));
-            let mut n = 0u64;
-            while n < 100_000_000 { core::hint::spin_loop(); n += 1; }
-            core::arch::asm!("out dx, al", in("dx") 0x64u16, in("al") 0xFEu8, options(nomem, nostack, preserves_flags)); // the keyboard controller
-            n = 0;
-            while n < 100_000_000 { core::hint::spin_loop(); n += 1; }
-            let idt: [u8; 10] = [0; 10];
-            core::arch::asm!("lidt [{}]", in(reg) &idt, options(nostack));
-            core::arch::asm!("int3", options(nostack));
-        }
+    unsafe {
+        // 0xCF9 = PCI reset control: 0x0E — a full reset. If the firmware does not
+        // support it, we finish the job with a triple fault through an empty IDT.
+        crate::arch::cpu::outb(0xCF9, 0x0E);
+        let mut n = 0u64;
+        while n < 100_000_000 { core::hint::spin_loop(); n += 1; }
+        crate::arch::cpu::outb(0x64, 0xFE); // the keyboard controller
+        n = 0;
+        while n < 100_000_000 { core::hint::spin_loop(); n += 1; }
+        crate::arch::cpu::triple_fault()
     }
 }

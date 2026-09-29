@@ -1210,7 +1210,7 @@ pub fn run_expect_fault(elf: &[u8]) -> ! {
         }
         RECOVERY_ARMED.store(false, Ordering::SeqCst);
         let vec = CRASH_VEC.load(Ordering::SeqCst);
-        let cr2: u64; core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack));
+        let cr2 = crate::arch::cpu::read_cr2();
         crate::println!("uaf: caught #{} after munmap CR2={:#x}", vec, cr2);
         if vec == 14 { crate::println!("uaf: ALL CHECKS PASSED (munmap removed the mapping, the UAF was prevented)"); }
         else { crate::println!("uaf: FAILURE (a #14 was expected, a #{} was received)", vec); }

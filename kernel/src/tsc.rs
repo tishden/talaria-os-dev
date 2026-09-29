@@ -3,15 +3,8 @@
 
 use crate::serial::{inb, outb};
 
-#[inline(always)]
-pub fn rdtsc() -> u64 {
-    unsafe { core::arch::x86_64::_rdtsc() }
-}
-
-fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
-    let r = core::arch::x86_64::__cpuid(leaf);
-    (r.eax, r.ebx, r.ecx, r.edx)
-}
+pub use crate::arch::cpu::rdtsc;
+use crate::arch::cpu::cpuid;
 
 /// Returns TSC frequency in Hz.
 pub fn calibrate() -> u64 {

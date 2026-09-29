@@ -3680,9 +3680,9 @@ unsafe fn falloc_window() {
         FALLOC_YIELD.fetch_add(1, Relaxed);
         crate::sched::yield_origin(crate::sched::YO_FS); crate::sched::yield_now();
     } else {
-        core::arch::asm!("sti", options(nostack, preserves_flags));
+        crate::arch::cpu::irq_enable();
         for _ in 0..64 { core::hint::spin_loop(); }
-        core::arch::asm!("cli", options(nostack, preserves_flags));
+        crate::arch::cpu::irq_disable();
     }
     fs_relock(depth);
 }
