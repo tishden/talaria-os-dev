@@ -938,6 +938,7 @@ by the CPU, `s` is by the memory, `+`/`-` is the interval.
 | `talaria.console=nopoll` | do NOT poll the console from the tick (a machine without an operator) |
 | `talaria.core=<path>[,full]` | ELF core dumps of the workload and of the kernel |
 | `talaria.sigtrace=N` | the first N synchronous signals with the state of the page tables |
+| `talaria.futexhang=<s>` | "IT HUNG" on a long futex wait (it keeps silent by default) |
 
 ### The tools on the host
 
@@ -957,7 +958,6 @@ will stay a set of addresses.
 `talaria-prof` demangles **Rust v0** itself (`addr2line -C` can do C++ and the legacy mangling,
 but not v0, and the kernel is built with exactly that) and looks for the addresses in BOTH binaries: the ring 0 stack
 flows over into ring 3, and a workload's frame in the kernel's stack is marked `[ring3]`.
-| `talaria.futexhang=<s>` | "IT HUNG" on a long futex wait (it keeps silent by default) |
 
 ---
 

@@ -155,59 +155,59 @@ The point where a new mode is added is `selftest/` or `runmode.rs` (§10.2).
 
 | The file | Lines | The responsibility | The key pub APIs |
 |------|------:|-----------------|------------------|
-| `main.rs` | 539 | ONLY the machine's bring-up: from the bootloader's entry to the choice of the mode; it ends with a `runmode::run(...)` | `rust_main` |
-| `cmdline.rs` | 122 | the parsing of the command line by TOKENS (not by substring): a mode's name is compared as a whole | `value`, `has`, `flag`, `num`, `test_is`, `mode_is`, `test_name`, `selftest` |
-| `selftest/` | ~1220 | the built-in regression `talaria.test=<name>`, by theme: `platform`/`storage`/`memory`/`process`/`concur`/`netsvc` | `selftest::run(cmdline)` |
-| `runmode.rs` | 427 | the production modes `talaria.mode=<name>`: the shell, the supervisor, a workload by a manifest, the servers, the datapath, the control plane on the BSP | `run`, `open_nic`, `run_datapath`, `nic_handoff_put` |
-| `boot.rs` | ~220 | the PVH header and the entry into long mode (asm); **v1.2 §3.1: the multiboot2 header (the `.mb2` section, only under a `KEEP()` in linker.ld) + the entry `mb2_start` and the translation of the MBI into the same `hvm_start_info`** — the kernel does not tell the bootloaders apart | `pvh_start`, `mb2_start`, `is_multiboot2`, `mb2_convert` |
-| `serial.rs` | 72 | the output into a 16550 UART (ttyS0/COM1), `println!` | `init`, `putb`, `print` |
-| `idt.rs` | 293 | the IDT, the handlers of the exceptions, the **COW fast path for a #PF**, the crash dump, the IPIs | `init`, `rust_exception` |
-| `paging.rs` | 510 | our own page tables, the split 1G→2M→4K, W^X/NX, guard/unguard, a per-process AS, COW | `init`, `protect`, `guard`, `unguard`, `map_leaf`, `new_process_space`, `switch`, `cow_fault`, `virt_to_phys`, `query` |
-| `mem.rs` | ~360 | the physical frame allocator (a bump + a free-list reclaim), the COW refcount + **v1.9: the per-node NUMA areas by the SRAT (`alloc_contig_node`) with a free list OF THEIR OWN (a frame of a foreign node lies above 4 GB and must not get into the common list) and with an identity mapping AT ONCE in `numa_init` — a process's space copies the kernel's tables at the moment of its creation, so a deferred mapping would not reach it** | `init`, `numa_init`, `alloc_frame`, `alloc_contig`, `alloc_contig_node`, `free_contig`, `rc_*`, `free_frames` |
-| `sched.rs` | ~935 | the pre-emptive scheduler, a per-task CR3, spawn/reap/exit, a per-process heap; **v0.51+: the CPU_OF affinity, `ap_loop` (pinned tasks on an AP), the migration `migrate_current_to`, a directed switch (`HINT`/`yield_to`/`yield_now`), an AP's doorbell**; **v1.9: a scheduler on EVERY core of the pool (`ap_schedule`), the pool's mask `POOL`, a thread's name `COMM`, the cheap migration of a pre-empted task `migrate_idle_task`, the BSP's idling `start_idle`** | `spawn`, `spawn_process`, `set_task_cr3`, `reap`, `exit_current_code`, `set_heap`, `start`, `start_idle`, `install`, `ap_loop`, `yield_to`, `cpu_of`, `set_comm`, `tasks_on`, `migrate_idle_task` |
-| `affinity.rs` | ~830 | **v1.9: the layout of the threads over the cores** — the manifest's rules (`pin=`), NAMED POOLS of cores (`pool=`), dedicated cores (the OS chooses the number), the spreading of the unpinned ones, the levelling by DEMAND with a hysteresis, the NUMA locality of the threads AND of the memory by the SRAT, the routing of the MSI-X (`irq=`); the world's snapshot `World` was extracted for the sake of a self-test without hardware | `configure`, `place_main`, `place_new_thread`, `on_set_name`, `balance_tick`, `pick_in_pool`, `imbalance_in_pool`, `allowed_mask`, `pick_launch_node`, `route_device_irqs`, `dump`, `selftest` |
-| `sync.rs` | ~330 | the detection of the wait primitives (WAITPKG/MONITORX/MONITOR/hlt), `kwait_once` (MONITOR→a recheck→sti;mwait), the registry of the futex waiters (WADDR/WOKEN/WDEADLINE), `wait_on_ex` (kind0 a futex / kind1 "until a target" / kind2 a doorbell+a pair), the asymmetric `membarrier` (an IPI ack), the TSC deadline, the ring 0 self-test | `init`, `mode`, `kwait_once`, `wait_on`, `wait_on_ex`, `wake_addr`, `membarrier`, `kick`, `blocked_for_sched`, `runnable_peek` |
-| `percpu.rs` | ~80 | the per-CPU data through the GS.base (without a swapgs; gs:0 the ursp, gs:8 the kstack, gs:16 the sig_newrsp, gs:24 the cpu, gs:32 the cur_task), the ONLINE bitmap | `init`, `cpu_id`, `set_kstack_top`, `set_sig_newrsp`, `cur_task` |
-| `syscall.rs` | 532 | SYSCALL/SYSRET (the MSRs), the dispatcher `rust_syscall`, brk/mmap, fork/clone/execve, the fd stubs, the **syscall filter** | `init`, `rust_syscall`, `filter_enable`, `filter_denied`, `heap_base` |
-| `user.rs` | 555 | the GDT/TSS, the ELF loading (built-in/from the disk), a SysV stack, run/run_disk/run_threaded, exec/run_processes/execve, run_processes_disk | `run`, `run_disk`, `run_threaded`, `exec`, `run_processes`, `run_processes_disk`, `execve`, `run_expect_fault` |
-| `fs.rs` | ~400 | TFS1/TFS2 over virtio-blk/NVMe, the table of descriptors, **the parsing of a GPT (the data partition BY THE NAME `talaria-data`) and of an MBR (the BIOS boot image)**, `blk_write_many` | `init`, `open`, `read`, `read_all`, `lseek`, `fstat`, `close`, `readlink_fd` |
+| `main.rs` | 867 | ONLY the machine's bring-up: from the bootloader's entry to the choice of the mode; it ends with a `runmode::run(...)` | `rust_main` |
+| `cmdline.rs` | 739 | the parsing of the command line by TOKENS (not by substring): a mode's name is compared as a whole | `value`, `has`, `flag`, `num`, `test_is`, `mode_is`, `test_name`, `selftest` |
+| `selftest/` | ~3260 | the built-in regression `talaria.test=<name>`, by theme: `platform`/`storage`/`memory`/`process`/`concur`/`netsvc` | `selftest::run(cmdline)` |
+| `runmode.rs` | 569 | the production modes `talaria.mode=<name>`: the shell, the supervisor, a workload by a manifest, the servers, the datapath, the control plane on the BSP | `run`, `open_nic`, `run_datapath`, `nic_handoff_put` |
+| `boot.rs` | ~270 | the PVH header and the entry into long mode (asm); **v1.2 §3.1: the multiboot2 header (the `.mb2` section, only under a `KEEP()` in linker.ld) + the entry `mb2_start` and the translation of the MBI into the same `hvm_start_info`** — the kernel does not tell the bootloaders apart | `pvh_start`, `mb2_start`, `is_multiboot2`, `mb2_convert` |
+| `serial.rs` | 378 | the output into a 16550 UART (ttyS0/COM1), `println!` | `init`, `putb`, `print` |
+| `idt.rs` | 646 | the IDT, the handlers of the exceptions, the **COW fast path for a #PF**, the crash dump, the IPIs | `init`, `rust_exception` |
+| `paging.rs` | 2660 | our own page tables, the split 1G→2M→4K, W^X/NX, guard/unguard, a per-process AS, COW | `init`, `protect`, `guard`, `unguard`, `map_leaf`, `new_process_space`, `switch`, `cow_fault`, `virt_to_phys`, `query` |
+| `mem.rs` | ~650 | the physical frame allocator (a bump + a free-list reclaim), the COW refcount + **v1.9: the per-node NUMA areas by the SRAT (`alloc_contig_node`) with a free list OF THEIR OWN (a frame of a foreign node lies above 4 GB and must not get into the common list) and with an identity mapping AT ONCE in `numa_init` — a process's space copies the kernel's tables at the moment of its creation, so a deferred mapping would not reach it** | `init`, `numa_init`, `alloc_frame`, `alloc_contig`, `alloc_contig_node`, `free_contig`, `rc_*`, `free_frames` |
+| `sched.rs` | ~3660 | the pre-emptive scheduler, a per-task CR3, spawn/reap/exit, a per-process heap; **v0.51+: the CPU_OF affinity, `ap_loop` (pinned tasks on an AP), the migration `migrate_current_to`, a directed switch (`HINT`/`yield_to`/`yield_now`), an AP's doorbell**; **v1.9: a scheduler on EVERY core of the pool (`ap_schedule`), the pool's mask `POOL`, a thread's name `COMM`, the cheap migration of a pre-empted task `migrate_idle_task`, the BSP's idling `start_idle`** | `spawn`, `spawn_process`, `set_task_cr3`, `reap`, `exit_current_code`, `set_heap`, `start`, `start_idle`, `install`, `ap_loop`, `yield_to`, `cpu_of`, `set_comm`, `tasks_on`, `migrate_idle_task` |
+| `affinity.rs` | ~1770 | **v1.9: the layout of the threads over the cores** — the manifest's rules (`pin=`), NAMED POOLS of cores (`pool=`), dedicated cores (the OS chooses the number), the spreading of the unpinned ones, the levelling by DEMAND with a hysteresis, the NUMA locality of the threads AND of the memory by the SRAT, the routing of the MSI-X (`irq=`); the world's snapshot `World` was extracted for the sake of a self-test without hardware | `configure`, `place_main`, `place_new_thread`, `on_set_name`, `balance_tick`, `pick_in_pool`, `imbalance_in_pool`, `allowed_mask`, `pick_launch_node`, `route_device_irqs`, `dump`, `selftest` |
+| `sync.rs` | ~1220 | the detection of the wait primitives (WAITPKG/MONITORX/MONITOR/hlt), `kwait_once` (MONITOR→a recheck→sti;mwait), the registry of the futex waiters (WADDR/WOKEN/WDEADLINE), `wait_on_ex` (kind0 a futex / kind1 "until a target" / kind2 a doorbell+a pair), the asymmetric `membarrier` (an IPI ack), the TSC deadline, the ring 0 self-test | `init`, `mode`, `kwait_once`, `wait_on`, `wait_on_ex`, `wake_addr`, `membarrier`, `kick`, `blocked_for_sched`, `runnable_peek` |
+| `percpu.rs` | ~140 | the per-CPU data through the GS.base (without a swapgs; gs:0 the ursp, gs:8 the kstack, gs:16 the sig_newrsp, gs:24 the cpu, gs:32 the cur_task), the ONLINE bitmap | `init`, `cpu_id`, `set_kstack_top`, `set_sig_newrsp`, `cur_task` |
+| `syscall.rs` | 2958 | SYSCALL/SYSRET (the MSRs), the dispatcher `rust_syscall`, brk/mmap, fork/clone/execve, the fd stubs, the **syscall filter** | `init`, `rust_syscall`, `filter_enable`, `filter_denied`, `heap_base` |
+| `user.rs` | 1194 | the GDT/TSS, the ELF loading (built-in/from the disk), a SysV stack, run/run_disk/run_threaded, exec/run_processes/execve, run_processes_disk | `run`, `run_disk`, `run_threaded`, `exec`, `run_processes`, `run_processes_disk`, `execve`, `run_expect_fault` |
+| `fs.rs` | ~1940 | TFS1/TFS2 over virtio-blk/NVMe, the table of descriptors, **the parsing of a GPT (the data partition BY THE NAME `talaria-data`) and of an MBR (the BIOS boot image)**, `blk_write_many` | `init`, `open`, `read`, `read_all`, `lseek`, `fstat`, `close`, `readlink_fd` |
 | the format modules: `ext2dir.rs`, `ext2dx.rs`, `ext2bmap.rs`, `ext2sb.rs`, `jbd2.rs`, `ext2hash.rs`, `elfhdr.rs`, `elfnote.rs`, `tfs.rs`, `routes.rs`, `placement.rs`, `clock.rs`, `uaccess.rs` | ~100-300 each | the arithmetic over bytes that the FS, the loader and the dumps are built on: a directory's records and its htree index, the bitmaps, the superblock, the JBD2 log together with its REPLAY, the htree hash, the ELF headers and the notes of a core dump. They touch neither the cache nor the device, so they are compiled for the host and judged by tests (§11.0) rather than by a boot | see §11.0 |
 | the decision modules: `rqpick.rs`, `waitpred.rs`, `placement.rs`, `fastring.rs` | ~100-300 each | the scheduler's and the synchronisation's decisions as pure functions over a snapshot: whom the core takes next and the policy `reqfirst` (`rqpick`), whether a steal improves the balance (`placement`), whether a sleeper on a word keeps waiting and whether a waker may declare it woken (`waitpred`), the layout and the index arithmetic of the zero-syscall rings plus the ARP the cell answers itself (`fastring`). `sched.rs`/`affinity.rs`/`sync.rs`/`fastpath.rs` supply the state and the device, these decide — so the decision is judged by tests (§11.0) rather than by a latency somebody else measures | see §11.0 |
-| `netsys.rs` | ~900 | the socket syscalls over smoltcp (an epoll pool), TCP/UDP; **v1.11: N INTERFACES** — each has its own `SmolDev`/`Interface`/`SocketSet`/DHCP, a socket is bound to an interface (otherwise smoltcp would send its packet into BOTH cards: it does not check the source address for a match), a listener spreads its backlog over all the interfaces | `socket`, `bind`, `listen`, `accept4`, `epoll_*`, `read`/`write`, `udp_*`, `add_iface`, `if_info`, `if_set_addr`, `if_set_up`, `if_set_dhcp` |
-| `l1.rs` | ~580 | the `Nic` (virtio/the ENA, **by the reference `&'static mut`**) + the **`NicQ`** — slot-oriented rings over any card (common to smoltcp and to a cell, with batched doorbells); the `idle_watch` is now in virtio too (a sleep on the word of the receive used ring); the kernel-mode HTTP/UDP servers | `NicQ`, `SmolDev`, `run_httpd`, `run` |
-| `fastpath.rs` | ~200 | the zero-syscall datapath: a cell (an AP) ↔ SPSC rings in shared memory ↔ the application (the BSP); a batched TX notify; **v1.1 §7.4: on the `l1::NicQ` — it works on the ENA as well** | `run_cell`, `init_region`, `region`, `set_region` |
-| `smp.rs` | ~215 | the bring-up of the APs (INIT-SIPI, the EFER.NXE, **a stack of 32 KB + a guard page** — the card now travels by reference, v1.2 §1.1), the LAPIC, the timer, the IPIs, the `AP_MODE` (0 the datapath / 1 the sync self-test / 2 the scheduler of pinned threads) | `lapic_enable`, `lapic_timer_init`, `send_ipi`, `start_ap`, `AP_MODE` |
+| `netsys.rs` | ~3900 | the socket syscalls over smoltcp (an epoll pool), TCP/UDP; **v1.11: N INTERFACES** — each has its own `SmolDev`/`Interface`/`SocketSet`/DHCP, a socket is bound to an interface (otherwise smoltcp would send its packet into BOTH cards: it does not check the source address for a match), a listener spreads its backlog over all the interfaces | `socket`, `bind`, `listen`, `accept4`, `epoll_*`, `read`/`write`, `udp_*`, `add_iface`, `if_info`, `if_set_addr`, `if_set_up`, `if_set_dhcp` |
+| `l1.rs` | ~890 | the `Nic` (virtio/the ENA, **by the reference `&'static mut`**) + the **`NicQ`** — slot-oriented rings over any card (common to smoltcp and to a cell, with batched doorbells); the `idle_watch` is now in virtio too (a sleep on the word of the receive used ring); the kernel-mode HTTP/UDP servers | `NicQ`, `SmolDev`, `run_httpd`, `run` |
+| `fastpath.rs` | ~170 | the zero-syscall datapath: a cell (an AP) ↔ SPSC rings in shared memory ↔ the application (the BSP); a batched TX notify; **v1.1 §7.4: on the `l1::NicQ` — it works on the ENA as well** | `run_cell`, `init_region`, `region`, `set_region` |
+| `smp.rs` | ~1390 | the bring-up of the APs (INIT-SIPI, the EFER.NXE, **a stack of 32 KB + a guard page** — the card now travels by reference, v1.2 §1.1), the LAPIC, the timer, the IPIs, the `AP_MODE` (0 the datapath / 1 the sync self-test / 2 the scheduler of pinned threads) | `lapic_enable`, `lapic_timer_init`, `send_ipi`, `start_ap`, `AP_MODE` |
 | `hal.rs` | 42 | the HAL for virtio-drivers (a DMA share/unshare through `virt_to_phys`) | `TalariaHal` |
-| `crypto.rs` | 136 | the AES-128-GCM self-test (for the trade mode) | `Aes128` |
-| `supervise.rs` | 75 | the isolation of a workload's failure (setjmp/longjmp) + the auto-restart | `supervise`, `tal_setjmp`, `tal_longjmp`, `RECOVERY*`, `CRASH_*` |
-| `cellman.rs` | ~420 | the parser of the workload's manifest (`binary`/`args`/`restart`/`core`) + **v1.9: the pools of cores `pool=<name>:<cores>`, the layout rules `pin=<pattern>:<target\|a pool's name>`, `spread=`/`balance=`/`numa=`/`node=`/`irq=`** (two passes: the pools are parsed first, so the order of the lines does not matter) | `parse`, `CellManifest`, `PinRule`, `CorePool`, `match_pin`, `pool_index`, `add_pin_spec`, `add_pool_spec`, `selftest` |
-| `console.rs` | ~640 | the operator's console: the LINE EDITOR (the history, the arrows, Ctrl-A/E/U/K/W, the Tab completion of the commands and of the paths), the table of the commands with groups and help, a hint at a typo, the dispatcher. Two contexts: `run` (an interactive loop on the BSP) and `poll_tick` (on top of a workload, from the tick — one must not block there) | `feed`, `line`, `exec_line`, `run`, `poll_tick`, `selftest` |
-| `shell.rs` | ~600 | the operator's shell in the kernel: the cwd and the parsing of the paths, `ls/cat/less/head/tail/hd/stat/mkdir/rm -r/cp/mv/touch/write/append/df/sync`, the completion of the paths. Over ext2 (RW) and TFS (RO) alike. NOT busybox: busybox is a workload in ring 3, while the console is needed when there is no ring 3 | `resolve`, `cwd`, `cmd_*`, `list_dir`, `complete_path`, `fopen/fread/fclose`, `selftest` |
-| `edit.rs` | ~520 | the console's editor — a subset of vi (hjkl/w/b/gg/G, i/a/o/x/dd/D/J/r/u, a `/`search, `:w :q :q! :wq`), a full-screen ANSI drawing with a redraw of the changed lines. A file that did not fit into the static buffer is opened READ-ONLY | `run`, `selftest` |
-| `filed.rs` | ~490 | the uploading/downloading of files over TCP (something like rsync): a `STAT`+the CRC32 of the whole file — it matched, do not transfer; `SUMS` is the CRC32 per block, `PATCH` is only the differences. A state machine (Cmd/Recv/Send), it does not block the console. The token is mandatory | `start`, `stop`, `poll`, `cmd`, `crc32_update`, `selftest` |
-| `netcfg.rs` | ~470 | the network's configuration as a model: the routing table (the longest prefix, the connected networks are stronger than a gateway), the rules `talaria.net=`/`talaria.route=` (an interface by name OR by MAC), the commands `ip`/`route`/`dhcp`/`dns` | `egress`, `default_ifx`, `add_route_f`, `del_route`, `apply_iface`, `apply_pending`, `cmd_ip`, `cmd_route`, `selftest` |
-| `ctlplane.rs` | 204 | the control plane over TCP: the auth of `/ctl` (a token from the cmdline) + the telemetry's body | `configure_from_cmdline`, `is_ctl`, `authorized`, `build_response`, `body`, `selftest` |
-| `metrics.rs` | ~250 | the atomic counters: syscalls/page_faults/cow/frame_allocs — in total and PER TASK | `inc_syscall_of`, `inc_page_fault`, `add_frames`, `syscalls_of`, `frames_of`, `snapshot`, `dump` |
-| `obs/mod.rs` | ~230 | the observability: the formatting of the quantities (bytes, rates, shares, durations), the periodic snapshot `talaria.top=` | `bytes`, `rate`, `brate`, `pct`, `dur`, `miss_llc`, `periodic_tick`, `configure_from_cmdline` |
-| `obs/top.rs` | ~330 | `top`/`ps`: the processes and the threads, the %CPU by the TSC's cycles, the RSS by a walk over the tables, the rates of the allocations/the switches/the syscalls | `cmd`, `cmd_ps`, `pmu_line` |
-| `obs/netstat.rs` | ~130 | `netstat`: the interfaces with the card's counters, the routes, the sockets with the owning thread, the datapath | `cmd`, `ifaces`, `sockets` |
-| `obs/kstat.rs` | ~190 | `kstat <section>`: sched/mem/paging/fs/net/sync/irq/cache/syscalls | `cmd`, `sched`, `mem`, `paging`, `fs`, `net` |
-| `obs/perf.rs` | ~280 | `perf`: the hardware counters per core, a `poke` into a dedicated core, the sampling profile with a stack, the top of the leaves and the top of the stacks, the dump of the samples | `cmd`, `counters`, `poke`, `top_addrs`, `top_stacks`, `record`, `verdict` |
-| `coredump.rs` | ~420 | an ELF `ET_CORE` for the workload and for the kernel: an `NT_PRSTATUS` per thread, an `NT_PRPSINFO`, a `PT_LOAD` with the stacks; it is read by an ordinary `gdb` | `dump_process`, `dump_kernel`, `dump_task`, `configure_from_cmdline` |
+| `crypto.rs` | 258 | the AES-128-GCM self-test (for the trade mode) | `Aes128` |
+| `supervise.rs` | 226 | the isolation of a workload's failure (setjmp/longjmp) + the auto-restart | `supervise`, `tal_setjmp`, `tal_longjmp`, `RECOVERY*`, `CRASH_*` |
+| `cellman.rs` | ~960 | the parser of the workload's manifest (`binary`/`args`/`restart`/`core`) + **v1.9: the pools of cores `pool=<name>:<cores>`, the layout rules `pin=<pattern>:<target\|a pool's name>`, `spread=`/`balance=`/`numa=`/`node=`/`irq=`** (two passes: the pools are parsed first, so the order of the lines does not matter) | `parse`, `CellManifest`, `PinRule`, `CorePool`, `match_pin`, `pool_index`, `add_pin_spec`, `add_pool_spec`, `selftest` |
+| `console.rs` | ~770 | the operator's console: the LINE EDITOR (the history, the arrows, Ctrl-A/E/U/K/W, the Tab completion of the commands and of the paths), the table of the commands with groups and help, a hint at a typo, the dispatcher. Two contexts: `run` (an interactive loop on the BSP) and `poll_tick` (on top of a workload, from the tick — one must not block there) | `feed`, `line`, `exec_line`, `run`, `poll_tick`, `selftest` |
+| `shell.rs` | ~780 | the operator's shell in the kernel: the cwd and the parsing of the paths, `ls/cat/less/head/tail/hd/stat/mkdir/rm -r/cp/mv/touch/write/append/df/sync`, the completion of the paths. Over ext2 (RW) and TFS (RO) alike. NOT busybox: busybox is a workload in ring 3, while the console is needed when there is no ring 3 | `resolve`, `cwd`, `cmd_*`, `list_dir`, `complete_path`, `fopen/fread/fclose`, `selftest` |
+| `edit.rs` | ~560 | the console's editor — a subset of vi (hjkl/w/b/gg/G, i/a/o/x/dd/D/J/r/u, a `/`search, `:w :q :q! :wq`), a full-screen ANSI drawing with a redraw of the changed lines. A file that did not fit into the static buffer is opened READ-ONLY | `run`, `selftest` |
+| `filed.rs` | ~590 | the uploading/downloading of files over TCP (something like rsync): a `STAT`+the CRC32 of the whole file — it matched, do not transfer; `SUMS` is the CRC32 per block, `PATCH` is only the differences. A state machine (Cmd/Recv/Send), it does not block the console. The token is mandatory | `start`, `stop`, `poll`, `cmd`, `crc32_update`, `selftest` |
+| `netcfg.rs` | ~450 | the network's configuration as a model: the routing table (the longest prefix, the connected networks are stronger than a gateway), the rules `talaria.net=`/`talaria.route=` (an interface by name OR by MAC), the commands `ip`/`route`/`dhcp`/`dns` | `egress`, `default_ifx`, `add_route_f`, `del_route`, `apply_iface`, `apply_pending`, `cmd_ip`, `cmd_route`, `selftest` |
+| `ctlplane.rs` | 194 | the control plane over TCP: the auth of `/ctl` (a token from the cmdline) + the telemetry's body | `configure_from_cmdline`, `is_ctl`, `authorized`, `build_response`, `body`, `selftest` |
+| `metrics.rs` | ~1150 | the atomic counters: syscalls/page_faults/cow/frame_allocs — in total and PER TASK | `inc_syscall_of`, `inc_page_fault`, `add_frames`, `syscalls_of`, `frames_of`, `snapshot`, `dump` |
+| `obs/mod.rs` | ~450 | the observability: the formatting of the quantities (bytes, rates, shares, durations), the periodic snapshot `talaria.top=` | `bytes`, `rate`, `brate`, `pct`, `dur`, `miss_llc`, `periodic_tick`, `configure_from_cmdline` |
+| `obs/top.rs` | ~420 | `top`/`ps`: the processes and the threads, the %CPU by the TSC's cycles, the RSS by a walk over the tables, the rates of the allocations/the switches/the syscalls | `cmd`, `cmd_ps`, `pmu_line` |
+| `obs/netstat.rs` | ~120 | `netstat`: the interfaces with the card's counters, the routes, the sockets with the owning thread, the datapath | `cmd`, `ifaces`, `sockets` |
+| `obs/kstat.rs` | ~330 | `kstat <section>`: sched/mem/paging/fs/net/sync/irq/cache/syscalls | `cmd`, `sched`, `mem`, `paging`, `fs`, `net` |
+| `obs/perf.rs` | ~330 | `perf`: the hardware counters per core, a `poke` into a dedicated core, the sampling profile with a stack, the top of the leaves and the top of the stacks, the dump of the samples | `cmd`, `counters`, `poke`, `top_addrs`, `top_stacks`, `record`, `verdict` |
+| `coredump.rs` | ~460 | an ELF `ET_CORE` for the workload and for the kernel: an `NT_PRSTATUS` per thread, an `NT_PRPSINFO`, a `PT_LOAD` with the stacks; it is read by an ordinary `gdb` | `dump_process`, `dump_kernel`, `dump_task`, `configure_from_cmdline` |
 | `obs/unwind.rs` | ~230 | the unwinding of the stack by the RBP chain with a RECOVERY POINT on a #PF (a garbage RBP must not bring the kernel down); a self-test on a synthetic chain of frames | `walk`, `try_read`, `fault_fixup`, `faults`, `selftest` |
 | `telemetry.rs` | 68 | the cell's telemetry: the pkts, the p50/p99 (a log2 histogram), the gaps, the restarts, the uptime | `record_lat`, `inc_gap`, `inc_restart`, `pctl`, `dump` |
-| `watchdog.rs` | 44 | the workload's health: there is no progress of the pkts → a stall→a restart | `arm`, `tick`, `disarm`, `stalls_total` |
+| `watchdog.rs` | 43 | the workload's health: there is no progress of the pkts → a stall→a restart | `arm`, `tick`, `disarm`, `stalls_total` |
 | `fr.rs` | 62 | the flight recorder: a ring of events (boot/paging/fault/restart/syscall-deny/…) | `record`, `dump`, the events' constants |
-| `pmu.rs` | ~330 | the hardware counters: the layout is CHECKED against the deed (not by the CPUID), an initialisation on every core, the per-core snapshots from the tick, a `poke` through an IPI | `init`, `init_cpu`, `sample`, `note_tick`, `note_here`, `poke`, `last`, `Sample::delta` |
-| `gdb.rs` | 277 | the gdb stub (the GDB Remote Serial Protocol over COM2) | — |
-| `tsc.rs` | 71 | the calibration of the TSC, `rdtsc`, the Hz cache | `calibrate`, `calibrate_cached`, `rdtsc`, `set_hz` |
+| `pmu.rs` | ~490 | the hardware counters: the layout is CHECKED against the deed (not by the CPUID), an initialisation on every core, the per-core snapshots from the tick, a `poke` through an IPI | `init`, `init_cpu`, `sample`, `note_tick`, `note_here`, `poke`, `last`, `Sample::delta` |
+| `gdb.rs` | 553 | the gdb stub (the GDB Remote Serial Protocol over COM2) | — |
+| `tsc.rs` | 482 | the calibration of the TSC, `rdtsc`, the Hz cache | `calibrate`, `calibrate_cached`, `rdtsc`, `set_hz` |
 | `vdso.rs` | 86 | the vDSO: `clock_gettime` in a process WITHOUT a syscall (the page is mapped into the process, the base is republished by the clock's servo) | `init`, `map_into`, `publish` |
 | `vga.rs` | 123 | the VGA text screen (0xB8000) — the kernel's second output channel: on `*.metal` `get-console-output` returns the FIRMWARE's console, not COM1 | `clear`, `enable`, `putb`, `peek` |
 | `trace.rs` | 166 | `talaria.trace=<LBA>`: the early log into memory and its flush ONTO THE DISK — on `*.metal` the kernel has no other channel before the drivers | `arm`, `push`, `stop`, `set_eager` |
 | `suite.rs` | 164 | `talaria.suite=<LBA>`: a LIST of modes from one image, across reboots — one POST of a metal instance instead of one per mode | `lba_from_cmdline`, `take`, `more`, `park`, `reboot` |
 | `cat.rs` | ~390 | §6.3: the partitioning of the L3 (Intel CAT, the manifest's `llc=<to whom>:<mask>`) and the cache's size — a neighbour washing the LLC out is also a tail | `init`, `present`, `l3_bytes`, `mask_valid`, `apply`, `apply_local` |
 | `ioapic.rs` | 102 | the I/O APIC: the delivery of interrupts from DEVICES (the network one — without it the stack moved only from a syscall) | `note`, `available`, `lines_of`, `route` |
-| `imds.rs` | 141 | a mini client of the EC2 metadata service (IMDSv2, `talaria.imds=1`): the token, the instance-id, the hostname, the user-data | `fetch`, `user_data` |
+| `imds.rs` | 142 | a mini client of the EC2 metadata service (IMDSv2, `talaria.imds=1`): the token, the instance-id, the hostname, the user-data | `fetch`, `user_data` |
 
 `kernel/user/` — the user binaries/sources (asm: `hello.s`, `uaftest.s`,
 `forktest.s`, `devnull.s`, `sfilter.s`; C: `memtest.c`, `launcher.c`, `fastapp.c`,
@@ -340,7 +340,8 @@ the four bytes of alignment in the `prpsinfo` note).
     **`run_disk_threaded(path, args, envs)`** — the common AS + the scheduler (clone/futex),
     the argv+the **envp**, kernel stacks of 16 KB (`alloc_contig(4)`), a stack of 32 MB reused
     between the restarts (`DT_STACK`), a `mem::reserve` of the image's identity region — the path
-    `talaria.mode=cell`. `NTASKS=32`; `spawn_user_ctx` → `usize::MAX`
+    `talaria.mode=cell`. `NTASKS=192` (it was 64: ClickHouse's thread pool ran into the
+    limit and the process fell by an abort); `spawn_user_ctx` → `usize::MAX`
     at an overflow (a clone → an EAGAIN).
   - A private AS: `exec(elf)`, `run_processes(&[elf…])` (several processes),
     `execve(path, argv)` (replace the current task's image), **`run_processes_disk(&[path…])`**
@@ -442,20 +443,37 @@ kfast=0 and a cap=2), `syncbench`, `futexlat`, `fiber`, `dynsync`, `shmwake`, th
   are printed as `[strace tK] nr(a1,a2,a3,a4) = ret` — the first means of diagnosing
   "the workload keeps silent/has hung at the start".
 - **The dispatch by the fd's type** (`do_read`/`do_write`): 0..2 the stdio(the serial line), 50.. UDP, 100..
-  TCP, 200.. epoll, 300.. the TFS files, 500.. the null fds (an eventfd/a pipe/an O_CREAT sink/urandom).
+  TCP, 200.. epoll, 300.. the TFS files, 2000.. the null fds (an eventfd/a pipe/an O_CREAT
+  sink/urandom).
 - **The time:** `clock_gettime` — the REALTIME/REALTIME_COARSE/TAI out of `tsc::wall_ns()`
   (the kvmclock MSRs 0x4b564d00/01 at the start + the TSC; the override is `talaria.epoch=`), the rest are
   `mono_ns()`; `gettimeofday`, `time`, `clock_getres`, `nanosleep`/`clock_nanosleep`
   (including the TIMER_ABSTIME) — a sleep through an `sti;hlt` under the scheduler.
-- **The threads/the locks:** a `futex` WAIT/WAIT_BITSET with a timeout (a relative/an absolute one)
-  — the wait is an `sti;hlt` (a thread does not burn the CPU), the WAKE is a no-op (the waiters re-read the
-  word themselves); `sched_yield` = an `sti;hlt`; the affinity/priority/rlimit are stubs with sensible
-  values (an RLIMIT_STACK of 32 MB, a NOFILE of 1024).
+- **The threads/the locks:** a `futex` WAIT/WAIT_BITSET with a timeout (a relative/an absolute
+  one) — the wait sleeps IN THE KERNEL on the user's own word at the best tier the chip has
+  (`mwait`/`mwaitx`/`umwait`, the fallback is `sti;hlt`; forced by `talaria.sync=`), so the
+  waker's store alone wakes it without an IPI and without a syscall (§6b). FUTEX_WAKE is NOT
+  a no-op: it sets WOKEN and finishes the job by address — a directed switch on the same core,
+  an IPI to a sleeper elsewhere (`sync::wake_addr`). `sched_yield` gives the core up when
+  there IS somebody to yield to on it and is a no-op when the thread is alone (that is what
+  run-to-completion on a dedicated core means); it used to be an unconditional `sti;hlt`, which
+  turned spin-with-yield phases into ticks. Priority is a stub; `prlimit64`/`getrlimit` answer
+  with the CEILING THE KERNEL CAN ACTUALLY DELIVER — `RLIMIT_NOFILE` = `proc::FDN`,
+  `RLIMIT_NPROC` = `sched::NTASKS`, `RLIMIT_STACK` = the stack really mapped for this
+  workload (`user::stack_limit()`, 8 MB in `mode=proc` and 32 in `mode=cell`) — and a
+  request to RAISE a limit above that ceiling is refused with an EPERM rather than granted
+  with a zero. The AFFINITY is real too: `sched_setaffinity` migrates the thread and refuses
+  a core outside the online mask with an EINVAL, and `sched_getaffinity` gives back the
+  requested mask (the gates `schedapi`, `smp2-noap`).
 - **The memory:** an anonymous `mmap` ZEROES the frames it gives out (the free list carries garbage; musl's
   mallocng relies on zeroes); a file mmap is a MAP_PRIVATE (a copy) and a MAP_SHARED
   (v1.1 §8.5: the pages of the ext2 block cache in the user AS, a write-back by the D bit;
-  an `-ENODEV` if the window does not lie in a contiguous row of the cache's slots); an `mremap` → an `-ENOMEM`
-  (musl falls back to a malloc+a memcpy); the `brk` at a repeated start of the workload is zeroed down to
+  an `-ENODEV` if the window does not lie in a contiguous row of the cache's slots); an `mremap`
+  grows and shrinks IN PLACE and, on MAP_MAYMOVE, moves the table entries (the frames stay,
+  there is no copy) — it used to answer `-ENOMEM`, and then `realloc` degenerated into
+  malloc+memcpy+`munmap`, i.e. a TLB shootdown on all the cores per free: 1906 `munmap`s over
+  15.2 M pages and 4090 shootdowns on four ClickHouse threads against 134/674 K/488 on one,
+  which is exactly where the speedup by cores was lost; the `brk` at a repeated start of the workload is zeroed down to
   the maximum of the previous usage (`HEAP_HIGH`).
 - **getrandom** — the RDRAND (the fallback is a TSC mixer); `/dev/urandom|random` → a null fd
   (a read gives an EOF: OpenSSL uses getrandom).
@@ -486,9 +504,9 @@ kfast=0 and a cap=2), `syncbench`, `futexlat`, `fiber`, `dynsync`, `shmwake`, th
 
 ### The network
 
-- **`netsys.rs` (v2)** — the BSD model of sockets over smoltcp: `NS=16` TCP slots (each with its own
-  buffers, an rx of 128K/a tx of 64K), `NU=8` UDP ones, `NE=8` epoll instances; the fds: TCP `100+i`, UDP
-  `50+i`, epoll `200+i`. A TCP slot: `K::{Free,Unbound,Listen,Backlog,Conn}` —
+- **`netsys.rs` (v2)** — the BSD model of sockets over smoltcp: `NS=64` TCP slots (each with its own
+  buffers, an rx of 128K/a tx of 64K), `NU=8` UDP ones, `NE=32` epoll instances; the fds: TCP `100+i`, UDP
+  `50+i`, epoll `200+i`. (The one table of limits is `docs/PRODUCT.md` §5.) A TCP slot: `K::{Free,Unbound,Listen,Backlog,Conn}` —
   a listener holds up to `BACKLOG=8` backlog slots in Listen on its port (an `arm`),
   `accept4` gives out a ready backlog slot as a new fd and re-arms; **`connect`** is
   an active open (a `tcp::Socket::connect` with an ephemeral port 40000..60000): blocking
@@ -1046,9 +1064,16 @@ gets through 3–6 items.
 1. **The CR3 switch on a shared stack.** In the scheduler the CR3 is switched in asm **after**
    the `mov rax, rsp`, because the stack lives in the common GB0. execve does a `mov cr3 + iretq`
    as a single asm without accessing locals after the change of the CR3.
-2. **The CR0.WP is off.** Switching the WP on breaks the ring 0 writes of the syscall stub into a COW-RO stack
-   after a fork (a syscall executes on the user stack). The right solution (a separate
-   kernel stack for a syscall) is future work; for now **do not switch the WP on**.
+2. **The CR0.WP is ON, and a ring 0 write into a COW page is MEANT to fault.**
+   `paging::init` sets the bit before the tables are published and every AP clones CR0
+   from the BSP (`smp.rs`). Without it the kernel's own writes into a user's COW page —
+   the syscall and fxsave frames on the user stack, a `read()` into a buffer — would go
+   straight into the frame SHARED with the child, silently. With it they take a #PF in
+   ring 0, and `rust_exception` resolves it through `paging::cow_fault` and returns to the
+   faulting instruction (`idt.rs`). Where the kernel writes by its OWN instruction and has
+   no right to fault — a signal's frame on a thread's stack — `paging::user_writable`
+   unties the COW page in advance, so that the answer "this buffer is writable" is honest.
+   Do not switch the WP off, and do not "handle" a ring 0 #PF on a user page as a crash.
 3. **The identity DMA.** The kernel accesses physical memory by its identity address. Therefore:
    - a `guard()` of a frame that is then reused for a table/a DMA would give a #PF —
      `alloc_contig` calls `unguard` when giving out of the free list (do not delete it!).
@@ -1063,7 +1088,14 @@ gets through 3–6 items.
    (use `awk`/`sed`); the tap network is flaky (repeat it); the first TCP connection after a
    boot is more reliable (the socket's re-listen in `run_httpd` races — the test sends the requests in one
    keep-alive connection right after the boot).
-8. **The fd table is not thread-safe** (it is designed for 1 datapath core).
+8. **The fd table is per process, and its cells are ATOMIC.** The threads of one process
+   run on different cores and open/close descriptors at the same time: `proc::install_min`
+   takes the smallest free number with a CAS, `proc::close` takes the handle out with a
+   swap, and the handle's reference counter (`href`) is an atomic for the same reason.
+   Without that two threads found one and the same free number, one socket was left
+   without a descriptor forever and closing the other returned EBADF. The gate is
+   `talaria.test=tickcmd` (three threads on the APs spinning `socket()`+`close()`); do not
+   turn the cells back into plain reads and writes.
 9. **Interrupts inside syscalls.** A syscall enters with IF=0 (the FMASK). Any wait in
    the kernel is bound to give the CPU up in `sti … cli` windows (a `yield_window`, an `sti;hlt` in a futex/
    a sleep/a wait4), and only when NO network/file state is held: another
@@ -1089,7 +1121,9 @@ gets through 3–6 items.
     `pgrep -f` does not see them) are pinned through /proc; otherwise vhost shares a core with a busy-poll vCPU
     (the CFS 50/50, slices of 4 ms → tails in milliseconds and drops).
 16. **A device's limitation is checked on ALL the paths rather than on "the main" one.**
-    `nvme::rw_buf` cut the request by the MDTS, while `nvme::rw_many` did not. While the files
+    Of the two submission paths one cut the request by the MDTS and the other did not (today
+    the ceiling is `nvme::max_blocks()` and BOTH callers in `fs.rs` are bound to cut by it).
+    While the files
     lay scattered, the ranges were short and that did not surface; as soon as the
     allocation of the blocks became runs (v1.2 §2.4), the very first fsync of 512 blocks went out as
     ONE command of 2 MB and was rejected — the data was silently not written. Under QEMU it
@@ -1238,8 +1272,10 @@ section's own — it is NOT the numbering of §12.
   COW-RO stack = a #DF); (16) the pages that are already COW after a previous fork get a
   reference at a new fork (`rc_share`), otherwise the parent makes them shared with the child; (17) the identity range of
   a process's image is reserved from the allocator (`mem::reserve`) — mmap gives out identity addresses;
-  (18) a `munmap` of its own stack by a thread (musl's `__unmapself`) is deferred until the thread's death
-  (`sched::defer_unmap`). The diagnostics: under a `talaria.strace=N` the `[sched] a tick`,
+  (18) a thread removes its OWN stack before exiting (musl's `__unmapself`), so nothing the kernel
+  still has to touch there may assume the page is mapped — first solved by deferring that `munmap`
+  until the thread's death, today by doing what Linux's `put_user` does (`sched::clear_ctid` checks
+  the page and silently skips the write if the stack has already gone). The diagnostics: under a `talaria.strace=N` the `[sched] a tick`,
   the `[futex] ... > 5 s` and the unsupported futex ops are printed. The `*at` syscalls with a dirfd: ext2 keeps the absolute path
   of an open directory (`ext2::fd_path`) — `proc::resolve_at`. The regression: `talaria.test=ext2`, `talaria.test=sigtest`.
 - **v0.49 — a dynamic ELF + MongoDB:** `user.rs::load_elf_into_space_disk` loads an ET_EXEC and

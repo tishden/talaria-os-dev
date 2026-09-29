@@ -31,8 +31,12 @@ kernel/test.sh          # QEMU regression: "TOTAL: ... FAIL=0"
 kernel/validate.sh      # heavy validation (when possible; SKIP without artefacts is fine)
 ```
 
-CI (`.github/workflows/ci.yml`) runs everything except `test.sh` and
-`validate.sh`, which need KVM and about half an hour.
+CI (`.github/workflows/ci.yml`) runs everything above except the FULL `test.sh` and
+`validate.sh`, which need KVM and about half an hour. It does run the deterministic
+subset of the regression on a runner's `/dev/kvm` (`TAL_CI=1`, 181 asserts plus 16
+host checks, ~7 minutes): the network probes, the latency gates and the boot-image
+chains stay the local gate, because on a shared runner they judge the neighbour
+rather than the kernel.
 
 On a clean clone `test.sh` SKIPs exactly three gates, and all three want a
 THIRD-PARTY artefact that the repository does not carry: `dyn` and `dynsync`

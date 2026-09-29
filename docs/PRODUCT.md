@@ -176,6 +176,10 @@ at 36 k req/s — `p99.9` 72.8 µs against Linux's 11,206.7; `mysql pk` at 28.9 
 | brk heap | a fixed region per process (64-128 MB depending on the mode); mmap comes from the general RAM budget |
 | Clock | TSC disciplined by kvmclock under KVM or by the ENA PHC (§8) |
 
+These are also what `getrlimit`/`prlimit64` answer: the limits reported to the workload are
+the ceilings above, not round numbers, and a request to raise one above its ceiling is
+refused (EPERM) instead of being granted silently. The gate is `talaria.test=schedapi`.
+
 **Interface stability:** there are NO compatibility contracts before 1.0 — the
 `cell.manifest` format, the `talaria.*` boot parameters, the Talaria-specific
 syscalls (1000-1002, 4600-4602), the libtsync API (`tsync.h`/`fiber.h`) and the

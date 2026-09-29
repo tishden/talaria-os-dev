@@ -35,9 +35,9 @@ did not survive a second bring-up, and two sit on the 5 % judging boundary.
 `.github/workflows/ci.yml` exists and the local gate is documented in
 `CONTRIBUTING.md`, but two jobs have never been exercised on a hosted runner:
 `kernel-full` (needs docker) and `regression-subset` (needs `/dev/kvm`; the
-deterministic subset is `TAL_CI=1`, 175 asserts, ~6.5 minutes). The triggers are
-present for `workflow_dispatch`. Until that run happens, the CI state of the
-repository is unknown rather than green.
+deterministic subset is `TAL_CI=1`: 181 asserts in QEMU plus 16 host checks, ~7
+minutes). The triggers are present for `workflow_dispatch`. Until that run
+happens, the CI state of the repository is unknown rather than green.
 
 ### 2.2. Multi-queue receive and real RSS — deferred BY MEASUREMENT
 

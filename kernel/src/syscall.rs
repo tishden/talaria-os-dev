@@ -1757,12 +1757,42 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         273 => 0, // set_robust_list -> ok (sigaltstack is implemented above)
         334 => ENOSYS, // rseq: not supported (glibc switches rseq off at an ENOSYS; a "success" without updating the area would break sched_getcpu)
         302 | 97 => { // prlimit64(pid, res, new, old) / getrlimit(res, rlim)
-            let (res, out) = if f.nr == 302 { (f.a2, f.a4) } else { (f.a1, f.a2) };
+            // A LIMIT IS A PROMISE, SO IT IS TAKEN FROM WHAT THE KERNEL CAN ACTUALLY DELIVER.
+            //
+            // These three numbers used to be literals — NOFILE 1024, NPROC 4096, STACK 32 MB —
+            // and all three were larger than the ceiling behind them: the fd table is
+            // `proc::FDN` = 256 rows, the scheduler has `sched::NTASKS` slots, and the main
+            // stack is 8 MB in `mode=proc` (32 only in `mode=cell`). An application that sizes
+            // itself by the limit then walks into an EMFILE, an EAGAIN from clone or a guard
+            // page at a quarter of the room it was promised — and it walks in there minutes
+            // later, far from the syscall that lied. That is the same class as a `fsync` that
+            // returns 0 without writing: the refusal is not visible in any log.
+            //
+            // Hence: the answer is the ceiling, and an attempt to raise it above the ceiling is
+            // REFUSED the way Linux refuses it to an unprivileged process (EPERM) rather than
+            // accepted with a zero. Lowering a limit for oneself is accepted and not enforced —
+            // that is stated here rather than hidden, and it cannot cost the workload anything
+            // it was not already able to do.
+            let (res, new, out) = if f.nr == 302 { (f.a2, f.a3, f.a4) } else { (f.a1, 0, f.a2) };
+            let ceiling: u64 = match res {
+                3 => crate::user::stack_limit(),            // RLIMIT_STACK — what was really mapped
+                6 => crate::sched::NTASKS as u64,           // RLIMIT_NPROC — the scheduler's slots
+                7 => crate::proc::FDN as u64,               // RLIMIT_NOFILE — the rows of the fd table
+                _ => u64::MAX,
+            };
+            if new != 0 {
+                // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
+                // dispatch (`rd_opt(3, Fixed(RLIMIT))` for prlimit64).
+                let (cur, max) = unsafe {
+                    (core::ptr::read_unaligned(new as *const u64), core::ptr::read_unaligned((new + 8) as *const u64))
+                };
+                if cur > max { return (-22i64) as u64; }      // EINVAL, as in Linux
+                if max > ceiling { return (-1i64) as u64; }   // EPERM: we cannot make the ceiling higher
+            }
             if out != 0 {
-                let v: u64 = match res { 3 => 32 << 20, 7 => 1024, 6 => 4096, _ => u64::MAX }; // STACK 32 MB, NOFILE 1024, NPROC
                 // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
                 // dispatch.
-                unsafe { core::ptr::write_unaligned(out as *mut u64, v); core::ptr::write_unaligned((out + 8) as *mut u64, v); }
+                unsafe { core::ptr::write_unaligned(out as *mut u64, ceiling); core::ptr::write_unaligned((out + 8) as *mut u64, ceiling); }
             }
             0
         }

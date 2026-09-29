@@ -1335,11 +1335,16 @@ The main groups (the full list is the match in `kernel/src/syscall.rs`):
   socketpair; DNS works through the ordinary musl resolver (UDP:53).
 - **The time/the rest:** clock_gettime (a kvmclock wall clock + a monotonic TSC),
   nanosleep/clock_nanosleep, getrandom, uname (a release ≥3.2 for glibc), sysinfo,
-  prlimit64, membarrier, the getuid family (→0), ioctl (FIONBIO; otherwise an ENOTTY).
-- **The deliberate ENOSYS/EINVAL** (the workloads have a fallback): rseq, clone3,
-  ARCH_CET_*, mremap. A file MAP_SHARED is supported (§7.1); since v1.2 the pages
+  prlimit64, membarrier, the getuid family (→1000: PostgreSQL and MariaDB refuse to run
+  under root, and the owner in `stat` is 1000 too), ioctl (FIONBIO; otherwise an ENOTTY).
+- **The memory:** `mremap` grows and shrinks in place and moves the table entries on
+  MAP_MAYMOVE (without it `realloc` degenerates into malloc+copy+munmap, and every munmap
+  is a TLB shootdown on all the cores — that is where ClickHouse lost its scaling by
+  cores). A file MAP_SHARED is supported (§7.1); since v1.2 the pages
   are mapped one by one, so the ENODEV stays only for the identity AS
   (`talaria.cell=identity`) — there an application falls back to pread/pwrite.
+- **The deliberate ENOSYS/EINVAL** (the workloads have a fallback): rseq, clone3,
+  ARCH_CET_*.
 - **The Talaria-specific ones:** `talaria_fastmap(1000)` (the base of the zero-syscall region),
   `1001` (a nop microbenchmark), `1002` (the TSC's Hz), `4600` (`swtchto(tid)`: a directed
   switch of the remainder of the slice), `4601` (`tsync_kmode()`: the kernel wait's mode —
