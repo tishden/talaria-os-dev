@@ -73,6 +73,41 @@ _start:
 4:  wfi
     b       4b
 
+/* A secondary core, started by PSCI CPU_ON: it arrives here with the MMU off, at the
+   caller's exception level, with x0 = the context we passed — the top of its own
+   stack. No .bss to zero (the boot core did), the same EL2 check as above. */
+.global ap_start
+ap_start:
+    mov     x19, x0
+    msr     daifset, #0xf
+    mrs     x9, CurrentEL
+    lsr     x9, x9, #2
+    cmp     x9, #2
+    b.ne    5f
+    mov     x9, #(1 << 31)
+    msr     hcr_el2, x9
+    mov     x9, #3
+    msr     cnthctl_el2, x9
+    msr     cntvoff_el2, xzr
+    mov     x9, #0x33ff
+    msr     cptr_el2, x9
+    msr     hstr_el2, xzr
+    mov     x9, #0x3c5
+    msr     spsr_el2, x9
+    adr     x9, 5f
+    msr     elr_el2, x9
+    eret
+5:
+    mov     x9, #(3 << 20)
+    msr     cpacr_el1, x9
+    isb
+    mov     sp, x19
+    mov     x29, xzr
+    mov     x0, x19
+    bl      rust_ap_main
+6:  wfi
+    b       6b
+
 .section .bss
 .balign 16
 boot_stack_bottom:

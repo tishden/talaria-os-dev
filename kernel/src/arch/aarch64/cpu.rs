@@ -93,6 +93,13 @@ pub fn mpidr() -> u64 {
     v & 0xFF00_FFFFFF
 }
 
+/// This core's index for the per-core tables. Until `smp.rs` comes across with its
+/// dense map of affinities, it is `Aff0` — which is what QEMU `virt` and a Nitro
+/// guest number their cores by (one cluster). A machine with several clusters gets
+/// the dense map, not a bigger table.
+#[inline(always)]
+pub fn cpu_index() -> usize { (mpidr() & 0xFF) as usize }
+
 /// The main id register (`MIDR_EL1`): implementer, part number, revision.
 #[inline(always)]
 pub fn midr() -> u64 {

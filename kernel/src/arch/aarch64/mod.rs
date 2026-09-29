@@ -14,7 +14,11 @@
 
 pub mod boot;
 pub mod cpu;
+pub mod dtb;
+pub mod gic;
 pub mod kmain;
 pub mod mmu;
+pub mod psci;
+pub mod timer;
 pub mod trap;
 pub mod uart;
