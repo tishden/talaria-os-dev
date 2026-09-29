@@ -12,7 +12,7 @@
 //! - **P1. The identity map.** In the kernel's own address space the physical
 //!   memory is mapped one to one (GB0 by 2M leaves, GB1..3 by 1G ones), so a
 //!   frame's physical address IS a valid pointer to its 4096 bytes. Every
-//!   `phys as *mut u64` below is that, and nothing else — the frames come from
+//!   `phys as *mut Pte` below is that, and nothing else — the frames come from
 //!   `mem::alloc_frame`/`alloc_contig`, which never hand out the same frame twice
 //!   and never hand out one below `mem::alloc_base()` (the invariant `init`
 //!   prints: the allocator must start above the kernel's last supervisor leaf).
@@ -44,43 +44,34 @@
 //! window — the identity leaves in it are supervisor, and a region is handed to
 //! ring 3 only explicitly, by `protect`.
 
-use crate::arch::cpu;
-
-/// Does the CPU support 1G pages (CPUID 0x80000001 EDX bit 26).
-fn has_1g() -> bool {
-    let r = core::arch::x86_64::__cpuid(0x8000_0001);
-    r.edx & (1 << 26) != 0
-}
+use crate::arch::mmu;
 
 /// Build our own tables (1G identity, GB3 uncached for MMIO) and load CR3.
 pub fn init() {
-    // SAFETY: P5 — EFER.NXE before any NX bit reaches a table (see `enable_nxe`).
-    unsafe { enable_nxe(); } // NX is available in all the modes (including on the boot tables)
-    // CR0.WP: a kernel write into an RO page -> a #PF (otherwise the kernel's writes into the user's COW pages
-    // — the syscall/fxsave frames on the user stack, a read() into a buffer — would go straight into the frame SHARED with the child).
-    // SAFETY: P5 — CR0.WP on THIS core, before the tables are published — after it a kernel write
-    // into an RO page faults instead of silently changing a page shared with a child.
-    unsafe { cpu::write_cr0(cpu::read_cr0() | (1 << 16)); }
-    // SMEP: ring 0 must not FETCH from a user page (the kernel never does — see
-    // `enable_smep`). It is printed either way: a protection one believes in without
-    // seeing it in the log is the kind that turns out to have been off.
-    let smep = unsafe { enable_smep() };
+    // SAFETY: P5 — THIS core's one-time enables (x86: EFER.NXE before any NX bit reaches a
+    // table, CR0.WP so that a kernel write into an RO COW page faults instead of silently
+    // changing a frame shared with a child, SMEP so that ring 0 never fetches from a user
+    // page), before the tables are published. SMEP is printed either way: a protection one
+    // believes in without seeing it in the log is the kind that turns out to have been off.
+    let smep = unsafe { mmu::init_hw() };
     crate::println!("talaria: paging: SMEP {} (ring 0 does not execute the workload's pages), SMAP is not used — the kernel copies user memory with plain \
         loads (uaccess.rs)",
                     if smep { "is ON" } else { "is NOT SUPPORTED by this CPU" });
-    if !has_1g() {
+    if !mmu::has_1g() {
         crate::println!("talaria: paging: 1G pages are not supported, I leave the boot tables");
         return;
     }
     let pml4 = crate::mem::alloc_frame().expect("frame pml4");
     let pdpt = crate::mem::alloc_frame().expect("frame pdpt");
-    let pd0 = crate::mem::alloc_frame().expect("frame pd0"); // GB0 -> 2M pages (per-page protection)
+    let pd0 = crate::mem::alloc_frame().expect("frame pd0"); // the kernel's GB -> 2M pages (per-page protection)
     // The 2M leaves occupied by THE KERNEL'S IMAGE are supervisor; leaf 0 (0..2 MB) too (the AP's
-    // trampoline and the BIOS structures are there). Everything else in GB0 is user (U/S). Previously
-    // the boundary was nailed to 32 MB; now it is computed from the image, because
-    // the kernel's base has become a link-time parameter (see linker.ld, KBASE).
+    // trampoline and the BIOS structures are there). Everything else in the kernel's gigabyte is
+    // user (U/S). Previously the boundary was nailed to 32 MB; now it is computed from the image,
+    // because the kernel's base has become a link-time parameter (see linker.ld, KBASE) — and
+    // on arm64 that gigabyte is not the first one at all (RAM starts at 1 GiB on QEMU `virt`).
     let sup_lo = crate::mem::kernel_lo() >> 21;
     let sup_hi = (crate::mem::kernel_hi() + 0x1F_FFFF) >> 21;
+    let kgb = user_gb();
     // SAFETY: P1 + P4 + P5 — the three frames have just come from the allocator (identity-mapped,
     // nobody else holds them), they are filled COMPLETELY before the CR3 write, and the
     // CR3 write is what publishes them.
@@ -88,26 +79,33 @@ pub fn init() {
         core::ptr::write_bytes(pml4 as *mut u8, 0, 4096);
         core::ptr::write_bytes(pdpt as *mut u8, 0, 4096);
         core::ptr::write_bytes(pd0 as *mut u8, 0, 4096);
-        core::ptr::write_volatile(pml4 as *mut u64, pdpt | 0b111); // P|RW|U/S
-        // GB0: a PD with 512 2M pages; the kernel is supervisor, the user region is U/S
-        for j in 0..512u64 {
-            let mut e = (j << 21) | 0b1000_0011; // P|RW|PS(2M)
-            if j != 0 && !(j >= sup_lo && j < sup_hi) { e |= 0b100; } // U/S outside the kernel's image
-            core::ptr::write_volatile((pd0 as *mut u64).add(j as usize), e);
+        pte_w(pml4 as *mut Pte, pdpt | PTE_P | PTE_RW | PTE_US);
+        // What each of the four identity gigabytes is comes from the architecture: on x86 GB0 holds
+        // the kernel and the user region, GB1-2 are RAM, GB3 is the MMIO hole; on arm64 `virt`
+        // GB0 is the devices and the kernel's gigabyte is GB1.
+        for gb in 0..4u64 {
+            match mmu::gb_kind(gb as usize, kgb) {
+                // the kernel's gigabyte: a PD with 512 2M pages; the kernel is supervisor, the rest is U/S
+                mmu::GbKind::User2M => {
+                    for j in 0..512u64 {
+                        let abs = gb * 512 + j; // the 2M index in the machine's address space
+                        let mut e = (abs << 21) | PTE_P | PTE_RW | PTE_PS;
+                        if abs != 0 && !(abs >= sup_lo && abs < sup_hi) { e |= PTE_US; } // U/S outside the kernel's image
+                        pte_w((pd0 as *mut Pte).add(j as usize), e);
+                    }
+                    pte_w((pdpt as *mut Pte).add(gb as usize), pd0 | PTE_P | PTE_RW | PTE_US);
+                }
+                mmu::GbKind::Ram1G => pte_w((pdpt as *mut Pte).add(gb as usize), (gb << 30) | PTE_P | PTE_RW | PTE_PS),
+                mmu::GbKind::Device => pte_w((pdpt as *mut Pte).add(gb as usize), (gb << 30) | PTE_P | PTE_RW | PTE_PS | PTE_UC),
+            }
         }
-        core::ptr::write_volatile(pdpt as *mut u64, pd0 | 0b111); // PDPT[0]->PD0, P|RW|U/S
-        // GB1..3 = 1G pages (supervisor); GB3 is uncached MMIO
-        for i in 1..4u64 {
-            let mut e = (i << 30) | 0b1000_0011;
-            if i == 3 { e |= 0b1_1000; }
-            core::ptr::write_volatile((pdpt as *mut u64).add(i as usize), e);
-        }
-        cpu::write_cr3(pml4);
+        mmu::set_root(pml4);
     }
-    pat_init(); // the PAT4 slot = write-combining (the ENA's LLQ window, §A1)
+    #[cfg(target_arch = "x86_64")]
+    mmu::pat_init(); // the PAT4 slot = write-combining (the ENA's LLQ window, §A1); arm64 types memory by MAIR index
     KERNEL_PML4.store(pml4, core::sync::atomic::Ordering::Relaxed); // the reference kernel AS for fork/new_address_space
-    crate::println!("talaria: our own page tables are active (GB0 on 2M: the kernel {:#x}..{:#x} is supervisor, the rest is user; GB1-3 on 1G)",
-        crate::mem::kernel_lo(), crate::mem::kernel_hi());
+    crate::println!("talaria: our own page tables are active (GB{} on 2M: the kernel {:#x}..{:#x} is supervisor, the rest is user; the other GBs on 1G)",
+        kgb, crate::mem::kernel_lo(), crate::mem::kernel_hi());
     // AN INVARIANT THAT BREAKS BY ITSELF. The protection in GB0 is set by 2 MB leaves,
     // so the leaf with the kernel's tail is supervisor ENTIRELY. The allocator must start
     // above it — otherwise the frames from that leaf will go into ring 3 and the very first write
@@ -131,10 +129,40 @@ pub fn init() {
 // the rights on a page. The identity mapping (vaddr==paddr below 4 GB) => the splitting
 // is trivial: the sub-entries inherit the physical base and the parent's flags.
 
+/// A table entry as the hardware holds it. Distinct from `u64` on purpose: the ONLY way
+/// to read or write one is `pte_r`/`pte_w`/`pte_cas`, which translate between the
+/// canonical format this module computes in and the machine's (`arch::mmu::{enc, dec}`
+/// — the identity on x86-64). A raw `*slot` does not compile, so no access can miss
+/// the translation.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct Pte(u64);
+/// # Safety
+/// P1 + P2: `p` points into a live table.
+#[inline(always)]
+unsafe fn pte_r(p: *const Pte) -> u64 { mmu::dec(core::ptr::read_volatile(p).0) }
+/// # Safety
+/// P1 + P2 + P4: `p` points into a live table; the caller flushes what the write staled.
+#[inline(always)]
+unsafe fn pte_w(p: *mut Pte, canonical: u64) { core::ptr::write_volatile(p, Pte(mmu::enc(canonical))) }
+/// A compare-and-swap of one entry (P3): the slot is a naturally aligned 8-byte word the
+/// hardware reads atomically, on both machines.
+/// # Safety
+/// P1 + P2 + P3, as `install_table`.
+#[inline(always)]
+unsafe fn pte_cas(p: *mut Pte, expect: u64, new: u64) -> bool {
+    let a = &*(p as *const core::sync::atomic::AtomicU64);
+    a.compare_exchange(mmu::enc(expect), mmu::enc(new), core::sync::atomic::Ordering::SeqCst,
+                       core::sync::atomic::Ordering::SeqCst).is_ok()
+}
+
 const PTE_P:  u64 = 1;         // present
 const PTE_RW: u64 = 1 << 1;    // writable
 const PTE_US: u64 = 1 << 2;    // user-accessible
 const PTE_PS: u64 = 1 << 7;    // page-size (a 2M/1G leaf)
+const PTE_PWT: u64 = 1 << 3;   // write-through (with PCD: the uncached type of MMIO)
+const PTE_PCD: u64 = 1 << 4;   // cache-disable
+const PTE_UC: u64 = PTE_PWT | PTE_PCD; // the PAT slot 3: UC — device memory
 const PTE_NX: u64 = 1 << 63;   // no-execute (it requires EFER.NXE)
 const PTE_PRIV: u64 = 1 << 10; // an OS bit: a process's private page (for the fork/COW bypass)
 /// An OS bit: the page is mapped, but access to it is FORBIDDEN (`mprotect(PROT_NONE)`).
@@ -208,14 +236,14 @@ fn ident_leaf_2m(va: u64) -> u64 {
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000; // the physical address [51:12]
 // P|RW|US|PWT|PCD|NX + the OS bits: the splitting of a 2M leaf OF THE WORKLOAD must preserve
 // the sign of a private page (otherwise munmap will not return the frames, and fork will not do a COW).
-const INHERIT: u64 = PTE_P | PTE_RW | PTE_US | (1 << 3) | (1 << 4) | PTE_NX | PTE_PRIV | PTE_COW;
+const INHERIT: u64 = PTE_P | PTE_RW | PTE_US | PTE_UC | PTE_NX | PTE_PRIV | PTE_COW;
 
 /// # Safety
 /// P1 + P2: the root table of the CURRENT address space, taken from CR3. The
 /// pointer is valid for as long as this core does not switch CR3 — that is, for the
 /// walk it is used in.
-unsafe fn cr3_root() -> *mut u64 {
-    (cpu::read_cr3() & ADDR_MASK) as *mut u64
+unsafe fn cr3_root() -> *mut Pte {
+    (mmu::root() & ADDR_MASK) as *mut Pte
 }
 
 /// # Safety
@@ -223,7 +251,7 @@ unsafe fn cr3_root() -> *mut u64 {
 /// publishes (P4), and never while another core is mid-walk of a table this core is
 /// freeing — that ordering is the shootdown's business.
 unsafe fn flush_tlb() {
-    cpu::write_cr3(cpu::read_cr3());
+    mmu::flush_all();
 }
 
 /// How many pages it still makes sense to knock out one by one (`invlpg`) rather than extinguishing the TLB
@@ -243,7 +271,7 @@ unsafe fn flush_range(start: u64, pages: u64) {
     if pages > INVLPG_MAX { flush_tlb(); return; }
     let mut a = start & !0xFFF;
     for _ in 0..pages {
-        cpu::invlpg(a);
+        mmu::flush_page(a);
         a += 4096;
     }
 }
@@ -276,10 +304,8 @@ unsafe fn flush_range(start: u64, pages: u64) {
 /// is treated as an `AtomicU64`, which is what a page table entry is on x86: a
 /// naturally aligned 8-byte word the hardware reads atomically.
 #[inline]
-unsafe fn install_table(slot: *mut u64, expect: u64, table: u64, extra: u64) -> bool {
-    let a = &*(slot as *const core::sync::atomic::AtomicU64);
-    a.compare_exchange(expect, table | extra, core::sync::atomic::Ordering::SeqCst,
-                       core::sync::atomic::Ordering::SeqCst).is_ok()
+unsafe fn install_table(slot: *mut Pte, expect: u64, table: u64, extra: u64) -> bool {
+    pte_cas(slot, expect, table | extra)
 }
 
 /// Create an EMPTY table of the next level in the place of a missing entry.
@@ -288,8 +314,8 @@ unsafe fn install_table(slot: *mut u64, expect: u64, table: u64, extra: u64) -> 
 ///
 /// # Safety
 /// P1 + P2 + P3, as `install_table`.
-unsafe fn new_level(slot: *mut u64, what: &str) {
-    let old = *slot;
+unsafe fn new_level(slot: *mut Pte, what: &str) {
+    let old = pte_r(slot);
     if old & PTE_P != 0 { return; }
     let t = crate::mem::alloc_frame().expect(what);
     core::ptr::write_bytes(t as *mut u8, 0, 4096);
@@ -302,8 +328,8 @@ unsafe fn new_level(slot: *mut u64, what: &str) {
 ///
 /// # Safety
 /// P1 + P2 + P3, as `install_table`.
-unsafe fn new_level_opt(slot: *mut u64) -> Option<()> {
-    let old = *slot;
+unsafe fn new_level_opt(slot: *mut Pte) -> Option<()> {
+    let old = pte_r(slot);
     if old & PTE_P != 0 { return Some(()); }
     let t = crate::mem::alloc_frame()?;
     core::ptr::write_bytes(t as *mut u8, 0, 4096);
@@ -316,14 +342,14 @@ unsafe fn new_level_opt(slot: *mut u64) -> Option<()> {
 /// # Safety
 /// P1 + P2 + P3: `e3` points at a PDPT entry of a live table. The 512 leaves are
 /// written BEFORE the CAS, so a core that sees the new PD sees it complete.
-unsafe fn split_1g(e3: *mut u64) {
-    let parent = *e3;
+unsafe fn split_1g(e3: *mut Pte) {
+    let parent = pte_r(e3);
     if parent & PTE_PS == 0 { return; }          // a neighbour managed to split it — we work with its table
     let base = parent & 0x000F_FFFF_C000_0000; // the 1G-aligned base
     let flags = parent & (INHERIT); // inherit RW/US/NX/the cacheability
-    let pd = crate::mem::alloc_frame().expect("split_1g: there is no frame") as *mut u64;
+    let pd = crate::mem::alloc_frame().expect("split_1g: there is no frame") as *mut Pte;
     for m in 0..512u64 {
-        core::ptr::write_volatile(pd.add(m as usize), (base + m * 0x20_0000) | flags | PTE_PS);
+        pte_w(pd.add(m as usize), (base + m * 0x20_0000) | flags | PTE_PS);
     }
     if !install_table(e3, parent, pd as u64, PTE_P | PTE_RW | PTE_US) {
         crate::mem::free_contig(pd as u64, 1);   // we lost the race — the neighbour's table is already in place
@@ -338,15 +364,15 @@ unsafe fn split_1g(e3: *mut u64) {
 /// P1 + P2 + P3: `e2` points at a PD entry of a live table that carries a LAZY
 /// reservation (P=0, PS+LAZY) — there are no frames behind it, so the split moves
 /// no data.
-unsafe fn split_2m_lazy(e2: *mut u64) {
-    let parent = *e2;
+unsafe fn split_2m_lazy(e2: *mut Pte) {
+    let parent = pte_r(e2);
     // A neighbour managed it: the entry is no longer "a lazy 2M leaf" but a ready table (or
     // a materialised huge page). There is nothing to split.
     if parent & (PTE_LAZY | PTE_PS) != (PTE_LAZY | PTE_PS) || parent & PTE_P != 0 { return; }
     HUGE_SPLIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let flags = parent & (PTE_LAZY | PTE_PRIV | PTE_PNONE | LAZY_W | LAZY_X); // without PS and LAZY_4K: they are about the directory entry
-    let pt = crate::mem::alloc_frame().expect("split_2m_lazy: there is no frame") as *mut u64;
-    for m in 0..512usize { core::ptr::write_volatile(pt.add(m), flags); }
+    let pt = crate::mem::alloc_frame().expect("split_2m_lazy: there is no frame") as *mut Pte;
+    for m in 0..512usize { pte_w(pt.add(m), flags); }
     if !install_table(e2, parent, pt as u64, PTE_P | PTE_RW | PTE_US) {
         crate::mem::free_contig(pt as u64, 1);
     }
@@ -357,14 +383,14 @@ unsafe fn split_2m_lazy(e2: *mut u64) {
 /// P1 + P2 + P3: `e2` points at a PD entry of a live table that carries a 2M leaf.
 /// The private/COW bits are inherited (`INHERIT`) — dropping them would make
 /// `munmap` leak the frames and `fork` skip the copy.
-unsafe fn split_2m(e2: *mut u64) {
-    let parent = *e2;
+unsafe fn split_2m(e2: *mut Pte) {
+    let parent = pte_r(e2);
     if parent & PTE_PS == 0 { return; }          // a neighbour has already split it
     let base = parent & 0x000F_FFFF_FFE0_0000; // the 2M-aligned base
     let flags = parent & (INHERIT);
-    let pt = crate::mem::alloc_frame().expect("split_2m: there is no frame") as *mut u64;
+    let pt = crate::mem::alloc_frame().expect("split_2m: there is no frame") as *mut Pte;
     for m in 0..512u64 {
-        core::ptr::write_volatile(pt.add(m as usize), (base + m * 0x1000) | flags);
+        pte_w(pt.add(m as usize), (base + m * 0x1000) | flags);
     }
     if !install_table(e2, parent, pt as u64, PTE_P | PTE_RW | PTE_US) {
         crate::mem::free_contig(pt as u64, 1);
@@ -376,25 +402,25 @@ unsafe fn split_2m(e2: *mut u64) {
 /// P1 + P2: it walks the CURRENT address space, creating the missing levels
 /// (`new_level`), and returns a pointer to the 4K entry — valid while this core
 /// keeps this CR3.
-unsafe fn pte_ptr(vaddr: u64) -> Option<*mut u64> {
+unsafe fn pte_ptr(vaddr: u64) -> Option<*mut Pte> {
     let l4 = ((vaddr >> 39) & 0x1FF) as usize;
     let l3 = ((vaddr >> 30) & 0x1FF) as usize;
     let l2 = ((vaddr >> 21) & 0x1FF) as usize;
     let l1 = ((vaddr >> 12) & 0x1FF) as usize;
     let pml4 = cr3_root();
     let e4 = pml4.add(l4);
-    if *e4 & PTE_P == 0 { return None; }
-    let pdpt = (*e4 & ADDR_MASK) as *mut u64;
+    if pte_r(e4) & PTE_P == 0 { return None; }
+    let pdpt = (pte_r(e4) & ADDR_MASK) as *mut Pte;
     let e3 = pdpt.add(l3);
-    if *e3 & PTE_P == 0 { return None; }
-    if *e3 & PTE_PS != 0 { split_1g(e3); }
-    let pd = (*e3 & ADDR_MASK) as *mut u64;
+    if pte_r(e3) & PTE_P == 0 { return None; }
+    if pte_r(e3) & PTE_PS != 0 { split_1g(e3); }
+    let pd = (pte_r(e3) & ADDR_MASK) as *mut Pte;
     let e2 = pd.add(l2);
-    if *e2 & PTE_P == 0 {
-        if *e2 & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS) { split_2m_lazy(e2); } // a lazy 2M reservation
+    if pte_r(e2) & PTE_P == 0 {
+        if pte_r(e2) & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS) { split_2m_lazy(e2); } // a lazy 2M reservation
         else { return None; }
-    } else if *e2 & PTE_PS != 0 { split_2m(e2); }
-    let pt = (*e2 & ADDR_MASK) as *mut u64;
+    } else if pte_r(e2) & PTE_PS != 0 { split_2m(e2); }
+    let pt = (pte_r(e2) & ADDR_MASK) as *mut Pte;
     Some(pt.add(l1))
 }
 
@@ -407,12 +433,12 @@ unsafe fn walk_entry(vaddr: u64) -> u64 {
     let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize,
                ((vaddr >> 21) & 0x1FF) as usize, ((vaddr >> 12) & 0x1FF) as usize];
     let mut tbl = cr3_root();
-    let mut e = *tbl.add(idx[0]);
+    let mut e = pte_r(tbl.add(idx[0]));
     for lvl in 1..4 {
         if e & PTE_P == 0 { return e; }              // it is not mapped
         if e & PTE_PS != 0 { return e; }             // a large leaf
-        tbl = (e & ADDR_MASK) as *mut u64;
-        e = *tbl.add(idx[lvl]);
+        tbl = (e & ADDR_MASK) as *mut Pte;
+        e = pte_r(tbl.add(idx[lvl]));
     }
     e
 }
@@ -427,11 +453,11 @@ unsafe fn walk_leaf(vaddr: u64) -> (u64, u64) {
     let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize,
                ((vaddr >> 21) & 0x1FF) as usize, ((vaddr >> 12) & 0x1FF) as usize];
     let mut tbl = cr3_root();
-    let mut e = *tbl.add(idx[0]);
+    let mut e = pte_r(tbl.add(idx[0]));
     for lvl in 1..4 {
         if e & PTE_P == 0 || e & PTE_PS != 0 { return (e, SPAN[lvl - 1]); }
-        tbl = (e & ADDR_MASK) as *mut u64;
-        e = *tbl.add(idx[lvl]);
+        tbl = (e & ADDR_MASK) as *mut Pte;
+        e = pte_r(tbl.add(idx[lvl]));
     }
     (e, SPAN[3])
 }
@@ -485,16 +511,16 @@ pub fn take_dirty(vaddr: u64) -> bool {
         let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize,
                    ((vaddr >> 21) & 0x1FF) as usize, ((vaddr >> 12) & 0x1FF) as usize];
         let root = current_cr3() & ADDR_MASK;
-        let e4 = *(root as *const u64).add(idx[0]); if e4 & PTE_P == 0 { return false; }
-        let e3 = *((e4 & ADDR_MASK) as *const u64).add(idx[1]); if e3 & PTE_P == 0 { return false; }
+        let e4 = pte_r((root as *const Pte).add(idx[0])); if e4 & PTE_P == 0 { return false; }
+        let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(idx[1])); if e3 & PTE_P == 0 { return false; }
         if e3 & PTE_PS != 0 { return true; } // a 1G leaf: we consider it changed (crudely, but safely)
-        let e2 = *((e3 & ADDR_MASK) as *const u64).add(idx[2]); if e2 & PTE_P == 0 { return false; }
+        let e2 = pte_r(((e3 & ADDR_MASK) as *const Pte).add(idx[2])); if e2 & PTE_P == 0 { return false; }
         if e2 & PTE_PS != 0 { return true; } // a 2M leaf (the kernel's identity region)
-        let pte = ((e2 & ADDR_MASK) as *mut u64).add(idx[3]);
-        let v = core::ptr::read_volatile(pte);
+        let pte = ((e2 & ADDR_MASK) as *mut Pte).add(idx[3]);
+        let v = pte_r(pte);
         if v & PTE_P == 0 || v & PTE_D == 0 { return false; }
-        core::ptr::write_volatile(pte, v & !PTE_D);
-        cpu::invlpg(vaddr);
+        pte_w(pte, v & !PTE_D);
+        mmu::flush_page(vaddr);
         true
     }
 }
@@ -513,49 +539,12 @@ pub fn leaf_entry(vaddr: u64) -> Option<u64> {
     if e & PTE_P == 0 { None } else { Some(e) }
 }
 
-// ── write-combining: a PAT slot for the devices' windows (A1, §5.1) ─────────
-// By default there is NO WC slot in the PAT table at all: PA0..PA7 = WB,WT,UC-,UC,WB,
-// WT,UC-,UC. A page with PCD|PWT lands in PA3 = UC, and every 8-byte write
-// into the ENA's LLQ window goes as a separate PCIe transaction (the reference ena driver
-// maps the mem BAR through devm_ioremap_wc, while the reg BAR goes through an ordinary ioremap).
-// We change ONLY PA4 (WC), PA0..PA3 stay as they are after a reset — which means that not a single
-// existing mapping (they are all in PA0..PA3) changes its type. The slot's index for a
-// 4K page = PAT(bit 7)<<2 | PCD(bit 4)<<1 | PWT(bit 3), so a WC page is
-// exactly "the PAT bit is raised, PCD/PWT are cleared".
-const MSR_PAT: u32 = 0x277;
-/// PA0..PA3 and PA5..PA7 are as after a reset, PA4 = 0x01 (write-combining).
-pub const PAT_VALUE: u64 = 0x0007_0401_0007_0406;
-const PTE_PAT_4K: u64 = 1 << 7;   // for a 4K leaf the PAT bit is the seventh one (for a 2M/1G one it is the twelfth)
+#[cfg(target_arch = "x86_64")]
+pub use mmu::{pat_init, pat_read, PAT_VALUE};
+#[cfg(target_arch = "x86_64")]
+use mmu::PTE_PAT_4K;
 
-/// Program IA32_PAT. Call it on EVERY core (otherwise one and the same page will be
-/// WC on one core and WB on another). The sequence is as in SDM 11.11.8:
-/// CD=1, wbinvd, a TLB flush, the MSR write, wbinvd, a TLB flush, CD restored.
-pub fn pat_init() {
-    // SAFETY: P5 — the PAT MSR of THIS core plus a TLB flush — the slot's meaning changes for
-    // translations already cached.
-    unsafe {
-        let flags = cpu::irq_flags();
-        cpu::irq_disable();
-        let cr0 = cpu::read_cr0();
-        cpu::write_cr0((cr0 | (1 << 30)) & !(1u64 << 29)); // CD=1, NW=0
-        cpu::wbinvd();
-        flush_tlb();
-        cpu::wrmsr(MSR_PAT, PAT_VALUE);
-        cpu::wbinvd();
-        flush_tlb();
-        cpu::write_cr0(cr0);
-        cpu::irq_restore(flags);
-    }
-}
-
-/// The current value of IA32_PAT (introspection for a test).
-pub fn pat_read() -> u64 {
-    // SAFETY: P5 — a read of this core's PAT MSR.
-    unsafe {
-        cpu::rdmsr(MSR_PAT)
-    }
-}
-
+#[cfg(target_arch = "x86_64")]
 /// Switch the window [phys, phys+len) to write-combining (a 4K granularity, the leaf
 /// is split on the way). The window's neighbouring pages do NOT change their type — in the ENA's case, in the same
 /// gigabyte there lies BAR0 with the registers, for which WC is contraindicated.
@@ -569,8 +558,8 @@ pub fn map_mmio_wc(phys: u64, len: u64) -> bool {
         let mut p = first;
         loop {
             let e = match pte_ptr(p) { Some(e) => e, None => return false };
-            let v = core::ptr::read_volatile(e);
-            core::ptr::write_volatile(e, (v & !((1 << 3) | (1 << 4))) | PTE_PAT_4K);
+            let v = pte_r(e);
+            pte_w(e, (v & !((1 << 3) | (1 << 4))) | PTE_PAT_4K);
             if p == last { break; }
             p += 0x1000;
         }
@@ -595,9 +584,9 @@ pub fn protect_none(vaddr: u64, len: u64) {
         unsafe {
             if a & 0x1F_FFFF == 0 && end - a >= 0x20_0000 {
                 if let Some(pde) = pde_ptr_existing(a) {   // a whole huge page
-                    let e = *pde;
+                    let e = pte_r(pde);
                     if e & PTE_PS != 0 && (e & PTE_P != 0 || e & PTE_LAZY != 0) {
-                        core::ptr::write_volatile(pde, (e & !PTE_P) | PTE_PNONE);
+                        pte_w(pde, (e & !PTE_P) | PTE_PNONE);
                         a += 0x20_0000;
                         continue;
                     }
@@ -607,9 +596,9 @@ pub fn protect_none(vaddr: u64, len: u64) {
             let pt = match pt_for(cr3_root() as u64, a, false) { Some(p) => p, None => { a = stop; continue; } };
             while a < stop {
                 let pte = pt.add(pt_idx(a));
-                let old = *pte;
-                if old & PTE_LAZY != 0 { core::ptr::write_volatile(pte, old | PTE_PNONE); } // a reservation: only the mark
-                else if old & PTE_P != 0 { core::ptr::write_volatile(pte, (old & !PTE_P) | PTE_PNONE); }
+                let old = pte_r(pte);
+                if old & PTE_LAZY != 0 { pte_w(pte, old | PTE_PNONE); } // a reservation: only the mark
+                else if old & PTE_P != 0 { pte_w(pte, (old & !PTE_P) | PTE_PNONE); }
                 a += 0x1000;
             }
         }
@@ -633,14 +622,14 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
             // the TLB gain would live until the very first call.
             if a & 0x1F_FFFF == 0 && end - a >= 0x20_0000 {
                 if let Some(pde) = pde_ptr_existing(a) {
-                    let e = *pde;
+                    let e = pte_r(pde);
                     let huge_present = e & PTE_P != 0 && e & PTE_PS != 0;
                     let huge_lazy = e & PTE_P == 0 && e & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS);
                     if huge_present && e & PTE_PRIV != 0 && e & PTE_COW == 0 {
                         let mut ne = (e & (ADDR_MASK | PTE_PS | PTE_PRIV)) | PTE_P | PTE_US;
                         if writable { ne |= PTE_RW; }
                         if !exec { ne |= PTE_NX; }
-                        core::ptr::write_volatile(pde, ne);
+                        pte_w(pde, ne);
                         a += 0x20_0000;
                         continue;
                     }
@@ -648,7 +637,7 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
                         let mut ne = (e & !(LAZY_W | LAZY_X | PTE_PNONE)) | PTE_LAZY | PTE_PS | PTE_PRIV;
                         if writable { ne |= LAZY_W; }
                         if exec { ne |= LAZY_X; }
-                        core::ptr::write_volatile(pde, ne);
+                        pte_w(pde, ne);
                         a += 0x20_0000;
                         continue;
                     }
@@ -659,38 +648,38 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
             while a < stop {
                 let pte = pt.add(pt_idx(a));
                 // A LAZY reservation: there is no frame yet — we correct only the FUTURE rights (and remove PROT_NONE)
-                if *pte & PTE_LAZY != 0 {
-                    let mut e = (*pte & !(LAZY_W | LAZY_X | PTE_PNONE)) | PTE_LAZY;
+                if pte_r(pte) & PTE_LAZY != 0 {
+                    let mut e = (pte_r(pte) & !(LAZY_W | LAZY_X | PTE_PNONE)) | PTE_LAZY;
                     if writable { e |= LAZY_W; }
                     if exec { e |= LAZY_X; }
-                    core::ptr::write_volatile(pte, e);
+                    pte_w(pte, e);
                     a += 0x1000;
                     continue;
                 }
                 // the page was PROT_NONE — return present and remove the mark
-                if *pte & PTE_PNONE != 0 { core::ptr::write_volatile(pte, (*pte | PTE_P) & !PTE_PNONE); }
+                if pte_r(pte) & PTE_PNONE != 0 { pte_w(pte, (pte_r(pte) | PTE_P) & !PTE_PNONE); }
                 // A COW page + a request to make it writable: first untie the COW (a copy/the ownership),
                 // otherwise a write without a fault would go into the frame shared with the child.
                 // cow_fault CHANGES the table (it may split a 2M leaf), so the write
                 // below goes by the reread pointer rather than by our cursor.
-                if writable && *pte & PTE_COW != 0 && *pte & PTE_P != 0 {
+                if writable && pte_r(pte) & PTE_COW != 0 && pte_r(pte) & PTE_P != 0 {
                     let _ = cow_fault(a);
                     if let Some(fresh) = pte_ptr(a) {
-                        let old = *fresh;
+                        let old = pte_r(fresh);
                         let mut e = (old & ADDR_MASK) | PTE_P | PTE_US | (old & (PTE_PRIV | PTE_COW));
                         if writable && old & PTE_COW == 0 { e |= PTE_RW; }
                         if !exec { e |= PTE_NX; }
-                        core::ptr::write_volatile(fresh, e);
+                        pte_w(fresh, e);
                     }
                     a += 0x1000;
                     continue;
                 }
-                let old = *pte;
+                let old = pte_r(pte);
                 let phys = old & ADDR_MASK;
                 let mut e = phys | PTE_P | PTE_US | (old & (PTE_PRIV | PTE_COW)); // we preserve PRIV/COW (fork/munmap)
                 if writable && old & PTE_COW == 0 { e |= PTE_RW; }
                 if !exec { e |= PTE_NX; }
-                core::ptr::write_volatile(pte, e);
+                pte_w(pte, e);
                 a += 0x1000;
             }
         }
@@ -706,14 +695,14 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
 /// P1 + P2: `pml4_phys` must be a page table of an address space THIS core owns
 /// (one being built, or the current one) — the walk creates the missing levels in
 /// it, so a stray value would write tables into somebody else's frames.
-unsafe fn pde_ptr_in(pml4_phys: u64, vaddr: u64) -> *mut u64 {
+unsafe fn pde_ptr_in(pml4_phys: u64, vaddr: u64) -> *mut Pte {
     let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize, ((vaddr >> 21) & 0x1FF) as usize];
-    let e4 = (pml4_phys as *mut u64).add(idx[0]);
-    if *e4 & PTE_P == 0 { new_level(e4, "pde_in: pdpt"); }
-    let e3 = ((*e4 & ADDR_MASK) as *mut u64).add(idx[1]);
-    if *e3 & PTE_P == 0 { new_level(e3, "pde_in: pd"); }
-    else if *e3 & PTE_PS != 0 { split_1g(e3); }
-    ((*e3 & ADDR_MASK) as *mut u64).add(idx[2])
+    let e4 = (pml4_phys as *mut Pte).add(idx[0]);
+    if pte_r(e4) & PTE_P == 0 { new_level(e4, "pde_in: pdpt"); }
+    let e3 = ((pte_r(e4) & ADDR_MASK) as *mut Pte).add(idx[1]);
+    if pte_r(e3) & PTE_P == 0 { new_level(e3, "pde_in: pd"); }
+    else if pte_r(e3) & PTE_PS != 0 { split_1g(e3); }
+    ((pte_r(e3) & ADDR_MASK) as *mut Pte).add(idx[2])
 }
 
 /// The PD entry for vaddr in the active AS, WITHOUT creating tables. None — there is no path.
@@ -733,30 +722,30 @@ unsafe fn pde_ptr_in(pml4_phys: u64, vaddr: u64) -> *mut u64 {
 /// have no need: what is not there need not be removed).
 /// # Safety
 /// P1 + P2, as `pde_ptr_in`; with `create` off it only reads.
-unsafe fn pt_for(pml4_phys: u64, vaddr: u64, create: bool) -> Option<*mut u64> {
+unsafe fn pt_for(pml4_phys: u64, vaddr: u64, create: bool) -> Option<*mut Pte> {
     let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize,
                ((vaddr >> 21) & 0x1FF) as usize];
-    let e4 = (pml4_phys as *mut u64).add(idx[0]);
-    if *e4 & PTE_P == 0 {
+    let e4 = (pml4_phys as *mut Pte).add(idx[0]);
+    if pte_r(e4) & PTE_P == 0 {
         if !create { return None; }
         new_level_opt(e4)?;
     }
-    let e3 = ((*e4 & ADDR_MASK) as *mut u64).add(idx[1]);
-    if *e3 & PTE_P == 0 {
+    let e3 = ((pte_r(e4) & ADDR_MASK) as *mut Pte).add(idx[1]);
+    if pte_r(e3) & PTE_P == 0 {
         if !create { return None; }
         new_level_opt(e3)?;
-    } else if *e3 & PTE_PS != 0 { split_1g(e3); }
-    let e2 = ((*e3 & ADDR_MASK) as *mut u64).add(idx[2]);
-    if *e2 & PTE_P == 0 {
-        if *e2 & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS) { split_2m_lazy(e2); } // a lazy 2M reservation
+    } else if pte_r(e3) & PTE_PS != 0 { split_1g(e3); }
+    let e2 = ((pte_r(e3) & ADDR_MASK) as *mut Pte).add(idx[2]);
+    if pte_r(e2) & PTE_P == 0 {
+        if pte_r(e2) & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS) { split_2m_lazy(e2); } // a lazy 2M reservation
         else if !create { return None; }
         else { new_level_opt(e2)?; }
-    } else if *e2 & PTE_PS != 0 { split_2m(e2); }
+    } else if pte_r(e2) & PTE_PS != 0 { split_2m(e2); }
     // REREAD rather than remember. The split and the creation of a level go through a CAS, and
     // A NEIGHBOURING core could have won: one must work with the table that
     // really stands in the entry rather than with the one we tried to install.
-    if *e2 & PTE_P == 0 { return None; }
-    Some((*e2 & ADDR_MASK) as *mut u64)
+    if pte_r(e2) & PTE_P == 0 { return None; }
+    Some((pte_r(e2) & ADDR_MASK) as *mut Pte)
 }
 
 /// The page's index inside the table (0..511).
@@ -770,14 +759,14 @@ fn chunk_end(a: u64, end: u64) -> u64 { core::cmp::min(end, (a & !0x1F_FFFF) + 0
 /// # Safety
 /// P1 + P2: like `pte_ptr`, but it creates nothing — `None` when the level is
 /// missing.
-unsafe fn pde_ptr_existing(vaddr: u64) -> Option<*mut u64> {
+unsafe fn pde_ptr_existing(vaddr: u64) -> Option<*mut Pte> {
     let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize, ((vaddr >> 21) & 0x1FF) as usize];
     let e4 = cr3_root().add(idx[0]);
-    if *e4 & PTE_P == 0 { return None; }
-    let e3 = ((*e4 & ADDR_MASK) as *mut u64).add(idx[1]);
-    if *e3 & PTE_P == 0 { return None; }
-    if *e3 & PTE_PS != 0 { return None; } // a 1G leaf of the kernel — not our case
-    Some(((*e3 & ADDR_MASK) as *mut u64).add(idx[2]))
+    if pte_r(e4) & PTE_P == 0 { return None; }
+    let e3 = ((pte_r(e4) & ADDR_MASK) as *mut Pte).add(idx[1]);
+    if pte_r(e3) & PTE_P == 0 { return None; }
+    if pte_r(e3) & PTE_PS != 0 { return None; } // a 1G leaf of the kernel — not our case
+    Some(((pte_r(e3) & ADDR_MASK) as *mut Pte).add(idx[2]))
 }
 
 /// How many huge pages (2 MB) were really given to the workload — it is visible in `stat:`.
@@ -891,7 +880,7 @@ pub fn map_lazy_pages(vaddr: u64, pages: u64, writable: bool, exec: bool, none: 
                 // the ordinary granularity: it will unfold into a table at the first
                 // touch. In both cases the entry is one instead of five hundred and twelve.
                 let huge = huge_ok((end - a) / 4096);
-                core::ptr::write_volatile(pde_ptr_in(cr3, a), e | PTE_PS | if huge { 0 } else { LAZY_4K });
+                pte_w(pde_ptr_in(cr3, a), e | PTE_PS | if huge { 0 } else { LAZY_4K });
                 if huge { HUGE_RESERVED.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
                 a += 0x20_0000;
                 continue;
@@ -899,7 +888,7 @@ pub fn map_lazy_pages(vaddr: u64, pages: u64, writable: bool, exec: bool, none: 
             // The descent over the levels is one per 2 MB, after that go 512 neighbouring entries.
             let stop = chunk_end(a, end);
             match pt_for(cr3, a, true) {
-                Some(pt) => while a < stop { core::ptr::write_volatile(pt.add(pt_idx(a)), e); a += 4096; },
+                Some(pt) => while a < stop { pte_w(pt.add(pt_idx(a)), e); a += 4096; },
                 None => return false, // there is nothing to build a table from — an honest ENOMEM
             }
         }
@@ -917,13 +906,16 @@ pub fn map_lazy_pages(vaddr: u64, pages: u64, writable: bool, exec: bool, none: 
 /// go with IF=0 (FMASK extinguishes IF): two cores simultaneously removing mappings
 /// would wait for an interrupt from each other and would jam for good. With the mailbox
 /// a waiter SERVES the foreign requests itself, without enabling the interrupts.
+#[cfg(target_arch = "x86_64")]
 static TLB_REQ: [core::sync::atomic::AtomicU64; 64] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+#[cfg(target_arch = "x86_64")]
 static TLB_DONE: [core::sync::atomic::AtomicU64; 64] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 64];
 
 /// How many times a wait for an acknowledgement ran into the time limit (the diagnostics:
 /// normally it must be zero).
+#[cfg(target_arch = "x86_64")]
 pub static SHOOT_TIMEOUT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// THE PRICE OF WAITING FOR AN ACKNOWLEDGEMENT — by time rather than only by the number of refusals.
 ///
@@ -936,21 +928,28 @@ pub static SHOOT_TIMEOUT: core::sync::atomic::AtomicU64 = core::sync::atomic::At
 /// applied to the workload's percentiles: 10 us — "unnoticeable", 100 us — "already
 /// visible in a database's p99", 1 ms — "visible with the naked eye".
 /// How many calls were not made because a neighbour is in A FOREIGN address space.
+#[cfg(target_arch = "x86_64")]
 pub static SHOOT_SKIPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 pub static SHOOT_WAITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 pub static SHOOT_WAIT_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 pub static SHOOT_MAX_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// The waits longer than 10 us / 100 us / 1 ms.
+#[cfg(target_arch = "x86_64")]
 pub static SHOOT_OVER: [core::sync::atomic::AtomicU64; 3] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 3];
 
 /// The steps' thresholds IN CYCLES, computed once. Dividing by the frequency right in
 /// the accounting is not allowed: mongod's `munmap` happens a quarter of a million times per run, and
 /// a division on the hot path would change exactly what this counter measures.
+#[cfg(target_arch = "x86_64")]
 static SHOOT_STEP_TSC: [core::sync::atomic::AtomicU64; 3] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 3];
 
 /// Account for one wait for an acknowledgement of a length of `cyc` cycles.
+#[cfg(target_arch = "x86_64")]
 fn shoot_account(cyc: u64) {
     use core::sync::atomic::Ordering::Relaxed;
     SHOOT_WAITS.fetch_add(1, Relaxed);
@@ -967,6 +966,7 @@ fn shoot_account(cyc: u64) {
     }
 }
 /// How many flushes were made at the neighbours' request (the diagnostics).
+#[cfg(target_arch = "x86_64")]
 pub static TLB_SERVED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// A CORE STANDS IN `hlt` — THERE IS NO NEED to wait for an acknowledgement from it.
@@ -989,6 +989,7 @@ pub static TLB_SERVED: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomi
 static HALTED: [core::sync::atomic::AtomicBool; 64] =
     [const { core::sync::atomic::AtomicBool::new(false) }; 64];
 /// How many times a wait for an acknowledgement was stopped by the sign "the neighbour is in hlt".
+#[cfg(target_arch = "x86_64")]
 pub static SHOOT_HALTED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// WE DO NOT CALL A STOPPED NEIGHBOUR AT ALL — it will flush the TLB itself when it wakes up.
@@ -1018,6 +1019,7 @@ pub static SHOOT_HALTED: core::sync::atomic::AtomicU64 = core::sync::atomic::Ato
 static TLB_LAZY: [core::sync::atomic::AtomicBool; 64] =
     [const { core::sync::atomic::AtomicBool::new(false) }; 64];
 /// How many calls were not made because the neighbour stood in `hlt` (it will flush by itself).
+#[cfg(target_arch = "x86_64")]
 pub static SHOOT_LAZY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// How many times a core, having woken up, extinguished the TLB by the mark.
 pub static LAZY_FLUSHES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -1070,6 +1072,7 @@ pub fn is_halted(cpu: usize) -> bool {
 
 /// Fulfil the accumulated requests for a TLB flush on THIS core.
 /// It is called from the handler of the vector 0x42 and from the wait in `shootdown`.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub extern "C" fn tlb_service() {
     use core::sync::atomic::Ordering;
@@ -1107,6 +1110,10 @@ pub extern "C" fn tlb_service() {
     TLB_SERVED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// arm64: no mailbox to serve — a neighbour's `TLBI ...IS` already reached this core.
+#[cfg(target_arch = "aarch64")]
+pub extern "C" fn tlb_service() {}
+
 /// The flush's range is ITS OWN FOR EVERY INITIATOR (see `tlb_service`).
 ///
 /// It was one per machine, and that is why it had to be kept under a common lock, while the
@@ -1116,11 +1123,14 @@ pub extern "C" fn tlb_service() {
 /// the waiting for the acknowledgements itself is 0.5 us. The rest was waiting for the lock.
 /// There is nobody to write its own slot except its owner, and it lives exactly as long as
 /// the owner waits for the acknowledgements — a lock is not needed at all.
+#[cfg(target_arch = "x86_64")]
 static SHOOT_START: [core::sync::atomic::AtomicU64; 64] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+#[cfg(target_arch = "x86_64")]
 static SHOOT_PAGES: [core::sync::atomic::AtomicU64; 64] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 64];
 /// Who asked THIS core to flush (a bit mask of the initiators).
+#[cfg(target_arch = "x86_64")]
 static TLB_PEND: [core::sync::atomic::AtomicU64; 64] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 64];
 
@@ -1183,8 +1193,10 @@ pub fn shootdown_range_auto(start: u64, pages: u64) {
 /// by the host, and the flush of its TLB is entrusted to the host (see `smp::ask_host_flush`).
 /// Telling this from `SHOOT_TIMEOUT` is obligatory: the first is the norm of a stand with
 /// the reshuffling of vCPUs, the second is a lost acknowledgement.
+#[cfg(target_arch = "x86_64")]
 pub static SHOOT_HOSTFLUSH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+#[cfg(target_arch = "x86_64")]
 fn shootdown_impl(start: u64, pages: u64, only_cr3: Option<u64>) {
     use core::sync::atomic::Ordering;
     if crate::syscall::NO_SHOOTDOWN.load(Ordering::Relaxed) { return; } // talaria.noshoot=1 — only for the diagnostics
@@ -1290,6 +1302,17 @@ fn shootdown_impl(start: u64, pages: u64, only_cr3: Option<u64>) {
     }
 }
 
+/// arm64: there is no shootdown to organise. `TLBI ...IS` is broadcast to every core of
+/// the inner-shareable domain by the hardware (docs/ARM64-PLAN.md §4.3), so the range is
+/// simply invalidated here and the other cores see it without an IPI, a mailbox or a
+/// wait. `only_cr3` (the x86 optimisation "only the cores in this space") has nothing
+/// to optimise.
+#[cfg(target_arch = "aarch64")]
+fn shootdown_impl(start: u64, pages: u64, _only_cr3: Option<u64>) {
+    // SAFETY: P4 — the entries were changed before the call; this makes every core forget them.
+    unsafe { flush_range(start, pages); }
+}
+
 /// MOVE A MAPPING WITHOUT COPYING THE DATA (`mremap`).
 ///
 /// Why this became necessary at all. Our `mremap` returned ENOMEM, and `realloc`
@@ -1329,12 +1352,12 @@ pub fn move_mapping(old: u64, new: u64, pages: u64) -> bool {
             // and the target has nothing at that address yet.
             if o & 0x1F_FFFF == 0 && n & 0x1F_FFFF == 0 && pages - i >= 512 {
                 let po = pde_ptr_in(cr3, o);
-                let e = *po;
+                let e = pte_r(po);
                 if e & PTE_PS != 0 {
                     let pn = pde_ptr_in(cr3, n);
-                    if *pn == 0 {
-                        core::ptr::write_volatile(pn, e);
-                        core::ptr::write_volatile(po, 0);
+                    if pte_r(pn) == 0 {
+                        pte_w(pn, e);
+                        pte_w(po, 0);
                         moved += 512;
                         i += 512;
                         continue;
@@ -1342,11 +1365,11 @@ pub fn move_mapping(old: u64, new: u64, pages: u64) -> bool {
                 }
             }
             let po = match pte_ptr(o) { Some(p) => p, None => { i += 1; continue } };
-            let e = *po;
+            let e = pte_r(po);
             if e != 0 {
                 let pn = pte_ptr_in(cr3, n);
-                core::ptr::write_volatile(pn, e);
-                core::ptr::write_volatile(po, 0);
+                pte_w(pn, e);
+                pte_w(po, 0);
                 moved += 1;
             }
             i += 1;
@@ -1465,13 +1488,13 @@ pub fn relazy_pages(vaddr: u64, pages: u64) {
         while a < end {
             if a & 0x1F_FFFF == 0 && end - a >= 0x20_0000 {
                 if let Some(pde) = pde_ptr_existing(a) {   // a whole huge page
-                    let e = *pde;
+                    let e = pte_r(pde);
                     if e & PTE_PS != 0 && e & PTE_PRIV != 0 && e & PTE_P != 0 {
                         let phys = e & ADDR_MASK;
                         let mut ne = PTE_LAZY | PTE_PRIV | PTE_PS;
                         if e & PTE_RW != 0 { ne |= LAZY_W; }
                         if e & PTE_NX == 0 { ne |= LAZY_X; }
-                        core::ptr::write_volatile(pde, ne);
+                        pte_w(pde, ne);
                         if crate::mem::rc_get(phys) > 1 { crate::mem::rc_drop(phys); }
                         else { crate::mem::rc_set(phys, 0); crate::mem::free_contig(phys, 512); }
                         touched = true;
@@ -1484,7 +1507,7 @@ pub fn relazy_pages(vaddr: u64, pages: u64) {
             let pt = match pt_for(cr3_root() as u64, a, false) { Some(p) => p, None => { a = stop; continue; } };
             while a < stop {
                 let pte = pt.add(pt_idx(a));
-                let e = *pte;
+                let e = pte_r(pte);
                 a += 4096;
                 if a & 0x3_FFFF == 0 { tlb_service(); } // the walk goes with IF=0 — once every 64 pages serve the neighbours' mailbox
                 if e & PTE_LAZY != 0 { continue; }                 // it is already a reservation
@@ -1494,7 +1517,7 @@ pub fn relazy_pages(vaddr: u64, pages: u64) {
                 if e & PTE_NX == 0 { ne |= LAZY_X; }
                 if e & PTE_PNONE != 0 { ne |= PTE_PNONE; }
                 release_priv_frame(e & ADDR_MASK);
-                core::ptr::write_volatile(pte, ne);
+                pte_w(pte, ne);
                 touched = true;
             }
         }
@@ -1525,7 +1548,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
         // entry in the table and one TLB line per 2 MB instead of 512. Under a hypervisor
         // that is doubly important — a TLB miss drags a nested EPT walk along with it.
         if let Some(pde) = pde_ptr_existing(a) {
-            let e = *pde;
+            let e = pte_r(pde);
             if e & PTE_P != 0 && e & PTE_PS != 0 { return true; }        // it has already been materialised by a neighbour
             if e & PTE_P == 0 && e & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS) {
                 if e & PTE_PNONE != 0 { return false; }                  // PROT_NONE — the fault is a real one
@@ -1541,12 +1564,11 @@ pub fn lazy_fault(vaddr: u64) -> bool {
                         let mut ne = fr | PTE_P | PTE_US | PTE_PS | PTE_PRIV;
                         if e & LAZY_W != 0 { ne |= PTE_RW; }
                         if e & LAZY_X == 0 { ne |= PTE_NX; }
-                        let slot = &*(pde as *const core::sync::atomic::AtomicU64);
-                        if slot.compare_exchange(e, ne, core::sync::atomic::Ordering::SeqCst, core::sync::atomic::Ordering::SeqCst).is_err() {
+                                                if !pte_cas(pde, e, ne) {
                             crate::mem::free_contig(fr, 512); // a neighbouring core managed it earlier
                         } else {
                             HUGE_GIVEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                            cpu::invlpg(base);
+                            mmu::flush_page(base);
                         }
                         return true;
                     }
@@ -1557,7 +1579,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
             }
         }
         let pte = match pte_ptr(a) { Some(p) => p, None => return false };
-        let e = *pte;
+        let e = pte_r(pte);
         // The page is already present: it was materialised by ANOTHER core while we were going into
         // the handler (or this is a stale TLB entry). The fault is not a real one — just
         // repeat the instruction. Without this branch a thread that lost the race got a
@@ -1609,12 +1631,11 @@ pub fn lazy_fault(vaddr: u64) -> bool {
         let mut ne = fr | PTE_P | PTE_US | PTE_PRIV;
         if e & LAZY_W != 0 { ne |= PTE_RW; }
         if e & LAZY_X == 0 { ne |= PTE_NX; }
-        let slot = &*(pte as *const core::sync::atomic::AtomicU64);
-        if slot.compare_exchange(e, ne, core::sync::atomic::Ordering::SeqCst, core::sync::atomic::Ordering::SeqCst).is_err() {
+                if !pte_cas(pte, e, ne) {
             crate::mem::free_contig(fr, 1); // we lost the race — the page has already been materialised by a neighbour
             return true;
         }
-        cpu::invlpg(a);
+        mmu::flush_page(a);
         // The cluster: next come pages with THE SAME rights and untouched too —
         // we take them at once, without waiting for their own faults. We do not cross the 2 MB
         // boundary (further there is another page table — an extra walk).
@@ -1623,7 +1644,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
         let mut left = LAZY_CLUSTER - 1;
         while left > 0 && b < end2m {
             let p2 = match pte_ptr(b) { Some(p) => p, None => break };
-            let e2 = *p2;
+            let e2 = pte_r(p2);
             if e2 & PTE_P != 0 || e2 & PTE_LAZY == 0 || e2 & PTE_PNONE != 0 { break; }
             if e2 & (LAZY_W | LAZY_X) != e & (LAZY_W | LAZY_X) { break; } // different rights — a different mmap
             let f2 = match crate::mem::alloc_contig_node(1, node) { Some(f) => f, None => break };
@@ -1632,11 +1653,10 @@ pub fn lazy_fault(vaddr: u64) -> bool {
             let mut n2 = f2 | PTE_P | PTE_US | PTE_PRIV;
             if e2 & LAZY_W != 0 { n2 |= PTE_RW; }
             if e2 & LAZY_X == 0 { n2 |= PTE_NX; }
-            let s2 = &*(p2 as *const core::sync::atomic::AtomicU64);
-            if s2.compare_exchange(e2, n2, core::sync::atomic::Ordering::SeqCst, core::sync::atomic::Ordering::SeqCst).is_err() {
+                        if !pte_cas(p2, e2, n2) {
                 crate::mem::free_contig(f2, 1); break; // the neighbour has already been materialised by somebody else
             }
-            cpu::invlpg(b);
+            mmu::flush_page(b);
             b += 4096; left -= 1;
         }
     }
@@ -1679,8 +1699,8 @@ pub fn guard(vaddr: u64) {
         if let Some(pte) = pte_ptr(a) {
             // PTE_GUARD marks A DELIBERATE hole in the identity: it is skipped by
             // the check of the invariant (`ident_check`), all the other holes are a defect.
-            let e = (*pte & !PTE_P) | PTE_GUARD;
-            core::ptr::write_volatile(pte, e);
+            let e = (pte_r(pte) & !PTE_P) | PTE_GUARD;
+            pte_w(pte, e);
         }
         flush_tlb();
     }
@@ -1699,7 +1719,7 @@ pub fn unmap_ident(vaddr: u64, pages: u64) {
     unsafe {
         let mut a = start;
         for _ in 0..pages {
-            if let Some(pte) = pte_ptr(a) { core::ptr::write_volatile(pte, ident_leaf(a)); }
+            if let Some(pte) = pte_ptr(a) { pte_w(pte, ident_leaf(a)); }
             a += 0x1000;
         }
         flush_range(start, pages);
@@ -1727,26 +1747,26 @@ pub fn ident_check() -> (u64, u64, u64) {
         let pml4 = cr3_root();
         let mut a = 0u64;
         while a < IDENT_HI {
-            let e4 = *pml4.add(((a >> 39) & 0x1FF) as usize);
+            let e4 = pte_r(pml4.add(((a >> 39) & 0x1FF) as usize));
             if e4 & PTE_P == 0 { holes += 512 * 512; a += 1 << 30; continue; }
-            let e3 = *(((e4 & ADDR_MASK) as *const u64).add(((a >> 30) & 0x1FF) as usize));
+            let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(((a >> 30) & 0x1FF) as usize));
             if e3 & PTE_P == 0 { holes += 512 * 512; a += 1 << 30; continue; }
             if e3 & PTE_PS != 0 { // a 1G leaf
                 if e3 & ADDR_MASK != a { shadow += 512 * 512; } else if e3 & PTE_RW == 0 { ro += 512 * 512; }
                 a += 1 << 30; continue;
             }
-            let pd = (e3 & ADDR_MASK) as *const u64;
-            let e2 = *pd.add(((a >> 21) & 0x1FF) as usize);
+            let pd = (e3 & ADDR_MASK) as *const Pte;
+            let e2 = pte_r(pd.add(((a >> 21) & 0x1FF) as usize));
             if e2 & PTE_PS != 0 || e2 & PTE_P == 0 {
                 if e2 & PTE_P == 0 { holes += 512; }
                 else if e2 & ADDR_MASK != a { shadow += 512; }
                 else if e2 & PTE_RW == 0 { ro += 512; }
                 a += 0x20_0000; continue;
             }
-            let pt = (e2 & ADDR_MASK) as *const u64;
+            let pt = (e2 & ADDR_MASK) as *const Pte;
             for l1 in 0..512usize {
                 let va = a + (l1 as u64) * 4096;
-                let e1 = *pt.add(l1);
+                let e1 = pte_r(pt.add(l1));
                 if e1 & PTE_GUARD != 0 { continue; }             // a guard page — that is how it is intended
                 if e1 & PTE_P == 0 { holes += 1; continue; }
                 if e1 & ADDR_MASK != va { if !(re > rb && va >= rb && va < re) { shadow += 1; } continue; }
@@ -1781,19 +1801,19 @@ pub fn unguard(vaddr: u64, len: u64) {
             let l2 = ((a >> 21) & 0x1FF) as usize;
             let l1 = ((a >> 12) & 0x1FF) as usize;
             let e4 = cr3_root().add(l4);
-            if *e4 & PTE_P != 0 {
-                let pdpt = (*e4 & ADDR_MASK) as *mut u64;
+            if pte_r(e4) & PTE_P != 0 {
+                let pdpt = (pte_r(e4) & ADDR_MASK) as *mut Pte;
                 let e3 = pdpt.add(l3);
-                if *e3 & PTE_P != 0 && *e3 & PTE_PS == 0 {
-                    let pd = (*e3 & ADDR_MASK) as *mut u64;
+                if pte_r(e3) & PTE_P != 0 && pte_r(e3) & PTE_PS == 0 {
+                    let pd = (pte_r(e3) & ADDR_MASK) as *mut Pte;
                     let e2 = pd.add(l2);
-                    if *e2 & PTE_P != 0 && *e2 & PTE_PS == 0 {
-                        let pt = (*e2 & ADDR_MASK) as *mut u64;
+                    if pte_r(e2) & PTE_P != 0 && pte_r(e2) & PTE_PS == 0 {
+                        let pt = (pte_r(e2) & ADDR_MASK) as *mut Pte;
                         let pte = pt.add(l1);
-                        if *pte & PTE_P == 0 && *pte & PTE_LAZY == 0 && *pte & ADDR_MASK != 0 {
+                        if pte_r(pte) & PTE_P == 0 && pte_r(pte) & PTE_LAZY == 0 && pte_r(pte) & ADDR_MASK != 0 {
                             // an extinguished 4K page: return present (RW for the kernel's needs);
                             // the guard mark is removed together with present — the frame has been reused
-                            core::ptr::write_volatile(pte, (*pte | PTE_P | PTE_RW) & !(PTE_NX | PTE_GUARD));
+                            pte_w(pte, (pte_r(pte) | PTE_P | PTE_RW) & !(PTE_NX | PTE_GUARD));
                             changed = true;
                         }
                     }
@@ -1803,42 +1823,6 @@ pub fn unguard(vaddr: u64, len: u64) {
         }
         if changed { flush_tlb(); }
     }
-}
-
-/// Enable EFER.NXE (bit 11), otherwise the NX bit in a PTE => a #GP. It is called from init().
-/// # Safety
-/// P5: it sets EFER.NXE on THIS core. It must run before any NX bit is put into a
-/// table, otherwise the bit is reserved and the entry faults.
-unsafe fn enable_nxe() {
-    const MSR_EFER: u32 = 0xC000_0080;
-    cpu::wrmsr(MSR_EFER, cpu::rdmsr(MSR_EFER) | (1 << 11));
-}
-
-/// SMEP: the processor refuses to FETCH from a user page while in ring 0.
-///
-/// Why it is worth a line of code. The kernel never executes a workload's code —
-/// it enters ring 3 by `iretq` and comes back by a syscall or a fault — so the bit
-/// costs nothing and forbids a whole class of mistakes: a call through a corrupted
-/// pointer into a page the workload has just written. Without SMEP such a jump
-/// EXECUTES; with it the machine takes a fault at the first instruction, and the
-/// dump names the address.
-///
-/// SMAP (bit 21) is NOT set, and that is by design rather than by omission: the
-/// kernel copies to and from a process's memory with plain loads and stores (see
-/// `uaccess.rs`), which is exactly what SMAP forbids. Turning it on would mean
-/// wrapping every such access in `stac`/`clac` — a different design, not a knob.
-/// `SECURITY.md` says so in the same words.
-///
-/// APs need nothing extra: they clone the BSP's CR4 (`smp::BSP_CR4`).
-///
-/// # Safety
-/// P5: a CR4 write on THIS core, before any ring 3 exists on it.
-unsafe fn enable_smep() -> bool {
-    // CPUID.(EAX=7,ECX=0):EBX bit 7 — SMEP. Ask only if leaf 7 exists at all.
-    if cpu::cpuid(0).0 < 7 { return false; }
-    if cpu::cpuid_count(7, 0).1 & (1 << 7) == 0 { return false; }
-    cpu::write_cr4(cpu::read_cr4() | (1 << 20));
-    true
 }
 
 /// Mark a range NX, PRESERVING the 2M leaves where it is aligned (less TLB pressure
@@ -1856,25 +1840,25 @@ pub fn nx_range(vaddr: u64, len: u64) {
             let l2 = ((a >> 21) & 0x1FF) as usize;
             let pml4 = cr3_root();
             let e4 = pml4.add(l4);
-            if *e4 & PTE_P == 0 { a += 0x1000; continue; }
-            let pdpt = (*e4 & ADDR_MASK) as *mut u64;
+            if pte_r(e4) & PTE_P == 0 { a += 0x1000; continue; }
+            let pdpt = (pte_r(e4) & ADDR_MASK) as *mut Pte;
             let e3 = pdpt.add(l3);
-            if *e3 & PTE_P == 0 { a += 0x1000; continue; }
-            if *e3 & PTE_PS != 0 { split_1g(e3); }
-            let pd = (*e3 & ADDR_MASK) as *mut u64;
+            if pte_r(e3) & PTE_P == 0 { a += 0x1000; continue; }
+            if pte_r(e3) & PTE_PS != 0 { split_1g(e3); }
+            let pd = (pte_r(e3) & ADDR_MASK) as *mut Pte;
             let e2 = pd.add(l2);
-            if *e2 & PTE_P == 0 { a += 0x1000; continue; }
-            if *e2 & PTE_PS != 0 {
+            if pte_r(e2) & PTE_P == 0 { a += 0x1000; continue; }
+            if pte_r(e2) & PTE_PS != 0 {
                 if a & 0x1F_FFFF == 0 && end - a >= 0x20_0000 {
-                    core::ptr::write_volatile(e2, *e2 | PTE_NX); // NX on the whole 2M leaf
+                    pte_w(e2, pte_r(e2) | PTE_NX); // NX on the whole 2M leaf
                     a += 0x20_0000; continue;
                 }
                 split_2m(e2); // a partial 2M — split it and set the rights line by line
             }
-            let pt = (*e2 & ADDR_MASK) as *mut u64;
+            let pt = (pte_r(e2) & ADDR_MASK) as *mut Pte;
             let l1 = ((a >> 12) & 0x1FF) as usize;
             let pte = pt.add(l1);
-            core::ptr::write_volatile(pte, *pte | PTE_NX);
+            pte_w(pte, pte_r(pte) | PTE_NX);
             a += 0x1000;
         }
         flush_tlb();
@@ -1913,22 +1897,22 @@ fn map_1g(phys: u64, cached: bool) -> u64 {
     // CAS.
     unsafe {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
-        let pml4 = if k != 0 { k as *mut u64 } else { cr3_root() };
+        let pml4 = if k != 0 { k as *mut Pte } else { cr3_root() };
         // The PML4 slot may be empty (the firmware's BARs lie high: under OVMF q35
         // the NVMe's 64-bit BAR moves to 0x3800_0000_0000 — that is PML4[112]) —
         // then we create a PDPT table for it.
         let e4 = pml4.add(l4);
-        if core::ptr::read_volatile(e4) & PTE_P == 0 {
+        if pte_r(e4) & PTE_P == 0 {
             let pdpt = match crate::mem::alloc_frame() { Some(f) => f, None => return 0 };
             core::ptr::write_bytes(pdpt as *mut u8, 0, 4096);
-            core::ptr::write_volatile(e4, pdpt | PTE_P | PTE_RW);
+            pte_w(e4, pdpt | PTE_P | PTE_RW);
         }
-        let pdpt = (core::ptr::read_volatile(e4) & ADDR_MASK) as *mut u64;
+        let pdpt = (pte_r(e4) & ADDR_MASK) as *mut Pte;
         let e3 = pdpt.add(l3);
-        if core::ptr::read_volatile(e3) & PTE_P == 0 {
+        if pte_r(e3) & PTE_P == 0 {
             // A 1G identity leaf: P|RW|PS (+PCD|PWT for a device's registers)
             let e = ((phys >> 30) << 30) | PTE_P | PTE_RW | PTE_PS | if cached { 0 } else { 0b1_1000 };
-            core::ptr::write_volatile(e3, e);
+            pte_w(e3, e);
             flush_tlb();
             // Slot 0 of the PML4 is the only one whose PDPT is a process's OWN (the private
             // GB0 directory is there). A window laid here after the workload's address
@@ -1952,8 +1936,8 @@ pub fn kernel_pdpt_entry(l3: usize) -> u64 {
     // SAFETY: P1 + P2 — one read of the reference kernel PDPT (a gate's introspection).
     unsafe {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
-        let pml4 = if k != 0 { k as *const u64 } else { cr3_root() as *const u64 };
-        core::ptr::read_volatile(((*pml4 & ADDR_MASK) as *const u64).add(l3 & 0x1FF))
+        let pml4 = if k != 0 { k as *const Pte } else { cr3_root() as *const Pte };
+        pte_r(((pte_r(pml4) & ADDR_MASK) as *const Pte).add(l3 & 0x1FF))
     }
 }
 
@@ -1975,10 +1959,10 @@ static AS_LIVE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::n
 /// P1 + P2: `src` is the kernel's reference PML4, `dst` a fresh frame for a new
 /// address space. Both are identity-mapped frames of 4096 bytes, and `dst` is not
 /// yet in any CR3 — nobody walks it while it is being filled.
-unsafe fn copy_kernel_pml4(src: *const u64, dst: u64) {
+unsafe fn copy_kernel_pml4(src: *const Pte, dst: u64) {
     for i in 1..512usize {
-        let e = core::ptr::read_volatile(src.add(i));
-        if e & PTE_P != 0 { core::ptr::write_volatile((dst as *mut u64).add(i), e); }
+        let e = pte_r(src.add(i));
+        if e & PTE_P != 0 { pte_w((dst as *mut Pte).add(i), e); }
     }
 }
 
@@ -1987,16 +1971,16 @@ pub fn new_address_space() -> u64 {
     // any CR3 yet, so nothing walks it while it is built.
     unsafe {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
-        let base_pml4 = if k != 0 { k as *const u64 } else { cr3_root() as *const u64 };
-        let kern_pdpt = (*base_pml4 & ADDR_MASK) as *const u64; // PML4[0] -> kernel PDPT
+        let base_pml4 = if k != 0 { k as *const Pte } else { cr3_root() as *const Pte };
+        let kern_pdpt = (pte_r(base_pml4) & ADDR_MASK) as *const Pte; // PML4[0] -> kernel PDPT
         let new_pml4 = crate::mem::alloc_frame().expect("as: pml4");
         let new_pdpt = crate::mem::alloc_frame().expect("as: pdpt");
         core::ptr::write_bytes(new_pml4 as *mut u8, 0, 4096);
         copy_kernel_pml4(base_pml4, new_pml4);
         for i in 0..512usize { // a copy of the kernel PDPT (0..3 are filled, 4.. are free for the private one)
-            core::ptr::write_volatile((new_pdpt as *mut u64).add(i), core::ptr::read_volatile(kern_pdpt.add(i)));
+            pte_w((new_pdpt as *mut Pte).add(i), pte_r(kern_pdpt.add(i)));
         }
-        core::ptr::write_volatile(new_pml4 as *mut u64, new_pdpt | PTE_P | PTE_RW | PTE_US);
+        pte_w(new_pml4 as *mut Pte, new_pdpt | PTE_P | PTE_RW | PTE_US);
         AS_LIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         new_pml4
     }
@@ -2011,9 +1995,10 @@ pub fn new_process_space() -> u64 {
     // that is what keeps a process out of the kernel's memory (the gate `isolation`).
     unsafe {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
-        let base_pml4 = if k != 0 { k as *const u64 } else { cr3_root() as *const u64 };
-        let kern_pdpt = (*base_pml4 & ADDR_MASK) as *const u64;
-        let kern_pd0 = (*kern_pdpt & ADDR_MASK) as *const u64; // PDPT[0] -> GB0 PD
+        let base_pml4 = if k != 0 { k as *const Pte } else { cr3_root() as *const Pte };
+        let kern_pdpt = (pte_r(base_pml4) & ADDR_MASK) as *const Pte;
+        let kgb = user_gb();
+        let kern_pd0 = (pte_r(kern_pdpt.add(kgb)) & ADDR_MASK) as *const Pte; // PDPT[kgb] -> the kernel's GB PD
         let pml4 = crate::mem::alloc_frame().expect("proc: pml4");
         let pdpt = crate::mem::alloc_frame().expect("proc: pdpt");
         let pd0 = crate::mem::alloc_frame().expect("proc: pd0");
@@ -2031,26 +2016,26 @@ pub fn new_process_space() -> u64 {
         // only explicitly — a `protect()` on a handed-out region (MAP_SHARED,
         // shm, a zero-syscall region), and `fork` carries it over to the child.
         for i in 0..512usize {
-            core::ptr::write_volatile((pdpt as *mut u64).add(i), core::ptr::read_volatile(kern_pdpt.add(i)));
-            let e = core::ptr::read_volatile(kern_pd0.add(i));
+            pte_w((pdpt as *mut Pte).add(i), pte_r(kern_pdpt.add(i)));
+            let e = pte_r(kern_pd0.add(i));
             if e & PTE_P != 0 && e & PTE_PS == 0 {
                 // the entry is already split into 4K ones (e.g. the kernel's heap after nx_range): a DEEP COPY of the PT,
                 // otherwise the process and the kernel would share one PT -> a map_leaf in this region would spoil the shared one.
-                let src_pt = (e & ADDR_MASK) as *const u64;
+                let src_pt = (e & ADDR_MASK) as *const Pte;
                 let new_pt = crate::mem::alloc_frame().expect("proc: pt-copy");
                 for j in 0..512usize {
-                    let v = core::ptr::read_volatile(src_pt.add(j));
+                    let v = pte_r(src_pt.add(j));
                     let v = if v & PTE_PRIV == 0 { v & !PTE_US } else { v };
-                    core::ptr::write_volatile((new_pt as *mut u64).add(j), v);
+                    pte_w((new_pt as *mut Pte).add(j), v);
                 }
-                core::ptr::write_volatile((pd0 as *mut u64).add(i), (new_pt & ADDR_MASK) | (e & 0xFFF));
+                pte_w((pd0 as *mut Pte).add(i), (new_pt & ADDR_MASK) | (e & 0xFFF));
             } else {
                 let e = if e & PTE_P != 0 && e & PTE_PRIV == 0 { e & !PTE_US } else { e };
-                core::ptr::write_volatile((pd0 as *mut u64).add(i), e); // a 2M identity (supervisor) or empty
+                pte_w((pd0 as *mut Pte).add(i), e); // a 2M identity (supervisor) or empty
             }
         }
-        core::ptr::write_volatile(pdpt as *mut u64, pd0 | PTE_P | PTE_RW | PTE_US); // the private GB0 PD
-        core::ptr::write_volatile(pml4 as *mut u64, pdpt | PTE_P | PTE_RW | PTE_US);
+        pte_w((pdpt as *mut Pte).add(kgb), pd0 | PTE_P | PTE_RW | PTE_US); // the private PD of the kernel's GB
+        pte_w(pml4 as *mut Pte, pdpt | PTE_P | PTE_RW | PTE_US);
         AS_LIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         pml4
     }
@@ -2060,20 +2045,20 @@ pub fn new_process_space() -> u64 {
 /// tables and splitting the large leaves (1G/2M) right in that AS.
 /// # Safety
 /// P1 + P2, as `pde_ptr_in`, down to the 4K level.
-unsafe fn pte_ptr_in(pml4_phys: u64, vaddr: u64) -> *mut u64 {
+unsafe fn pte_ptr_in(pml4_phys: u64, vaddr: u64) -> *mut Pte {
     let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize,
                ((vaddr >> 21) & 0x1FF) as usize, ((vaddr >> 12) & 0x1FF) as usize];
-    let e4 = (pml4_phys as *mut u64).add(idx[0]);
-    if *e4 & PTE_P == 0 { new_level(e4, "pte_in: pdpt"); }
-    let e3 = ((*e4 & ADDR_MASK) as *mut u64).add(idx[1]);
-    if *e3 & PTE_P == 0 { new_level(e3, "pte_in: pd"); }
-    else if *e3 & PTE_PS != 0 { split_1g(e3); }
-    let e2 = ((*e3 & ADDR_MASK) as *mut u64).add(idx[2]);
-    if *e2 & PTE_P == 0 {
-        if *e2 & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS) { split_2m_lazy(e2); } // a lazy 2M reservation
+    let e4 = (pml4_phys as *mut Pte).add(idx[0]);
+    if pte_r(e4) & PTE_P == 0 { new_level(e4, "pte_in: pdpt"); }
+    let e3 = ((pte_r(e4) & ADDR_MASK) as *mut Pte).add(idx[1]);
+    if pte_r(e3) & PTE_P == 0 { new_level(e3, "pte_in: pd"); }
+    else if pte_r(e3) & PTE_PS != 0 { split_1g(e3); }
+    let e2 = ((pte_r(e3) & ADDR_MASK) as *mut Pte).add(idx[2]);
+    if pte_r(e2) & PTE_P == 0 {
+        if pte_r(e2) & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS) { split_2m_lazy(e2); } // a lazy 2M reservation
         else { new_level(e2, "pte_in: pt"); }
-    } else if *e2 & PTE_PS != 0 { split_2m(e2); }
-    ((*e2 & ADDR_MASK) as *mut u64).add(idx[3])
+    } else if pte_r(e2) & PTE_PS != 0 { split_2m(e2); }
+    ((pte_r(e2) & ADDR_MASK) as *mut Pte).add(idx[3])
 }
 
 /// Map the 4K page vaddr->phys in A GIVEN space with full rights
@@ -2089,7 +2074,7 @@ pub fn map_leaf_shared(pml4_phys: u64, vaddr: u64, phys: u64, writable: bool, us
         if writable { fl |= PTE_RW; }
         if user { fl |= PTE_US; }
         if !exec { fl |= PTE_NX; }
-        core::ptr::write_volatile(pte, (phys & ADDR_MASK) | fl);
+        pte_w(pte, (phys & ADDR_MASK) | fl);
     }
 }
 
@@ -2102,7 +2087,7 @@ pub fn map_leaf(pml4_phys: u64, vaddr: u64, phys: u64, writable: bool, user: boo
         if user { fl |= PTE_US; }
         if !exec { fl |= PTE_NX; }
         fl |= PTE_PRIV; // mark it private (fork/COW tells the private ones from the kernel identity)
-        core::ptr::write_volatile(pte, (phys & ADDR_MASK) | fl);
+        pte_w(pte, (phys & ADDR_MASK) | fl);
     }
 }
 
@@ -2126,10 +2111,10 @@ pub fn phys_of_in(pml4_phys: u64, vaddr: u64) -> Option<u64> {
     // SAFETY: P1 + P2 — a read-only walk of the address space `pml4_phys`, which the caller owns.
     unsafe {
         let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize, ((vaddr >> 21) & 0x1FF) as usize, ((vaddr >> 12) & 0x1FF) as usize];
-        let e4 = *(pml4_phys as *const u64).add(idx[0]); if e4 & PTE_P == 0 { return None; }
-        let e3 = *((e4 & ADDR_MASK) as *const u64).add(idx[1]); if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { return None; }
-        let e2 = *((e3 & ADDR_MASK) as *const u64).add(idx[2]); if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { return None; }
-        let e1 = *((e2 & ADDR_MASK) as *const u64).add(idx[3]); if e1 & PTE_P == 0 || e1 & PTE_PRIV == 0 { return None; }
+        let e4 = pte_r((pml4_phys as *const Pte).add(idx[0])); if e4 & PTE_P == 0 { return None; }
+        let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(idx[1])); if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { return None; }
+        let e2 = pte_r(((e3 & ADDR_MASK) as *const Pte).add(idx[2])); if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { return None; }
+        let e1 = pte_r(((e2 & ADDR_MASK) as *const Pte).add(idx[3])); if e1 & PTE_P == 0 || e1 & PTE_PRIV == 0 { return None; }
         Some(e1 & ADDR_MASK)
     }
 }
@@ -2139,10 +2124,10 @@ pub fn or_perms_in(pml4_phys: u64, vaddr: u64, writable: bool, exec: bool) {
     // the caller owns.
     unsafe {
         let pte = pte_ptr_in(pml4_phys, vaddr);
-        let mut e = *pte;
+        let mut e = pte_r(pte);
         if writable { e |= PTE_RW; }
         if exec { e &= !PTE_NX; }
-        core::ptr::write_volatile(pte, e);
+        pte_w(pte, e);
     }
 }
 /// Map the 4K page vaddr->phys in A GIVEN space (executable).
@@ -2160,16 +2145,18 @@ pub fn map_in(pml4_phys: u64, vaddr: u64, phys: u64, writable: bool, user: bool)
 /// and the kernel stack it runs on must be mapped in the new one (it is: the kernel
 /// half is shared).
 pub unsafe fn switch(pml4_phys: u64) {
-    cpu::write_cr3(pml4_phys);
+    mmu::set_root(pml4_phys);
 }
+
+/// The identity gigabyte mapped by 2M leaves — the one with the kernel's image, where the
+/// user identity region lives (`init`) and which a process's space gets a private copy of
+/// (`new_process_space`). GB0 on x86, the RAM's first gigabyte on arm64.
+fn user_gb() -> usize { (crate::mem::kernel_lo() >> 30) as usize }
 
 /// The current CR3 (the active PML4's physical address + the flags).
 pub fn kernel_cr3() -> u64 { KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed) }
 
-pub fn current_cr3() -> u64 {
-    // SAFETY: P5 — a read of this core's CR3.
-    unsafe { cpu::read_cr3() }
-}
+pub fn current_cr3() -> u64 { mmu::root() }
 
 /// Clone an address space (a fork's memory): it creates a new AS and COPIES
 /// src's private pages (an eager copy; COW is an optimisation for later). The kernel part
@@ -2181,17 +2168,17 @@ pub fn fork_address_space(src_pml4: u64) -> u64 {
     // the caller (`fork` runs with the parent's threads stopped at this point), and the
     // child's table is not in any CR3 yet.
     unsafe {
-        let src_pdpt = (*(src_pml4 as *const u64) & ADDR_MASK) as *const u64;
+        let src_pdpt = (pte_r(src_pml4 as *const Pte) & ADDR_MASK) as *const Pte;
         for l3 in 4..512usize { // the private region (the kernel has slots 0..3)
-            let e3 = *src_pdpt.add(l3);
+            let e3 = pte_r(src_pdpt.add(l3));
             if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; }
-            let pd = (e3 & ADDR_MASK) as *const u64;
+            let pd = (e3 & ADDR_MASK) as *const Pte;
             for l2 in 0..512usize {
-                let e2 = *pd.add(l2);
+                let e2 = pte_r(pd.add(l2));
                 if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { continue; }
-                let pt = (e2 & ADDR_MASK) as *const u64;
+                let pt = (e2 & ADDR_MASK) as *const Pte;
                 for l1 in 0..512usize {
-                    let e1 = *pt.add(l1);
+                    let e1 = pte_r(pt.add(l1));
                     if e1 & PTE_P == 0 { continue; }
                     let vaddr = ((l3 as u64) << 30) | ((l2 as u64) << 21) | ((l1 as u64) << 12);
                     let np = crate::mem::alloc_frame().expect("fork: page");
@@ -2238,37 +2225,37 @@ pub fn fork_cow_space(src: u64) -> u64 {
     // SAFETY: P1 + P2 + P3 — as `fork_address_space`, but the leaves are shared read-only (COW);
     // the reference counting of the frames is `mem`'s business.
     unsafe {
-        let src_pml4 = src as *const u64;
+        let src_pml4 = src as *const Pte;
         for l4 in 0..512usize {
-            let e4 = *src_pml4.add(l4);
+            let e4 = pte_r(src_pml4.add(l4));
             if e4 & PTE_P == 0 { continue; }
-            let pdpt = (e4 & ADDR_MASK) as *mut u64;
+            let pdpt = (e4 & ADDR_MASK) as *mut Pte;
             for l3 in 0..512usize {
-                let e3 = *pdpt.add(l3);
+                let e3 = pte_r(pdpt.add(l3));
                 if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; }
-                let pd = (e3 & ADDR_MASK) as *mut u64;
+                let pd = (e3 & ADDR_MASK) as *mut Pte;
                 for l2 in 0..512usize {
-                    let mut e2 = *pd.add(l2);
+                    let mut e2 = pte_r(pd.add(l2));
                     // A huge page of the workload: our COW is page-by-page, so
                     // before a fork we exchange it for 512 entries. A lazy 2M reservation
                     // is copied to the child as it is — there are no frames behind it.
                     if e2 & PTE_PS != 0 && e2 & PTE_PRIV != 0 {
-                        if e2 & PTE_P != 0 { split_2m(pd.add(l2)); e2 = *pd.add(l2); }
+                        if e2 & PTE_P != 0 { split_2m(pd.add(l2)); e2 = pte_r(pd.add(l2)); }
                         else {
                             let vaddr2 = ((l4 as u64) << 39) | ((l3 as u64) << 30) | ((l2 as u64) << 21);
-                            core::ptr::write_volatile(pde_ptr_in(dst, vaddr2), e2);
+                            pte_w(pde_ptr_in(dst, vaddr2), e2);
                             continue;
                         }
                     }
                     if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { continue; }
-                    let pt = (e2 & ADDR_MASK) as *mut u64;
+                    let pt = (e2 & ADDR_MASK) as *mut Pte;
                     for l1 in 0..512usize {
                         let e1p = pt.add(l1);
-                        let e1 = *e1p;
+                        let e1 = pte_r(e1p);
                         let vaddr = ((l4 as u64) << 39) | ((l3 as u64) << 30) | ((l2 as u64) << 21) | ((l1 as u64) << 12);
                         // A LAZY reservation has no frame: the child inherits it as a reservation
                         // (it will get its own zeroes at the first touch — Linux's semantics)
-                        if e1 & PTE_LAZY != 0 { core::ptr::write_volatile(pte_ptr_in(dst, vaddr), e1); continue; }
+                        if e1 & PTE_LAZY != 0 { pte_w(pte_ptr_in(dst, vaddr), e1); continue; }
                         if e1 & PTE_P == 0 { continue; }
                         if e1 & PTE_PRIV == 0 {
                             // Not private: identity memory. The one HANDED OUT to the workload
@@ -2276,7 +2263,7 @@ pub fn fork_cow_space(src: u64) -> u64 {
                             // PostgreSQL keeps its shared buffers that way; the rest of the window in
                             // a process's AS is closed (see `new_process_space`).
                             if e1 & PTE_US != 0 && vaddr < (1u64 << 30) && e1 & ADDR_MASK == vaddr {
-                                core::ptr::write_volatile(pte_ptr_in(dst, vaddr), e1);
+                                pte_w(pte_ptr_in(dst, vaddr), e1);
                             }
                             continue;
                         }
@@ -2285,8 +2272,8 @@ pub fn fork_cow_space(src: u64) -> u64 {
                         // COW would give a write into the frame shared with the child (PostgreSQL: an mprotect on the heap).
                         // The untying of the COW happens at a write #PF (cow_fault) or at an mprotect(RW) (protect).
                         let cow = (e1 & !PTE_RW) | PTE_COW;
-                        core::ptr::write_volatile(e1p, cow);                 // the parent's side
-                        core::ptr::write_volatile(pte_ptr_in(dst, vaddr), cow); // the child's side (the same phys)
+                        pte_w(e1p, cow);                 // the parent's side
+                        pte_w(pte_ptr_in(dst, vaddr), cow); // the child's side (the same phys)
                         crate::mem::rc_share(e1 & ADDR_MASK);
                     }
                 }
@@ -2311,24 +2298,24 @@ pub fn cow_fault(vaddr: u64) -> bool {
     // from making two copies.
     unsafe {
         if let Some(pte) = pte_ptr(a) {
-            let e = *pte;
+            let e = pte_r(pte);
             if e & PTE_P != 0 && e & PTE_COW != 0 && e & PTE_RW == 0 {
                 let phys = e & ADDR_MASK;
                 let keep = e & (PTE_US | PTE_NX | PTE_PRIV); // preserve US/NX/PRIV
                 if crate::mem::rc_get(phys) <= 1 {
                     // the last co-owner -> we make it writable IN PLACE (without a copy, without an orphan)
-                    core::ptr::write_volatile(pte, phys | PTE_P | PTE_RW | keep);
+                    pte_w(pte, phys | PTE_P | PTE_RW | keep);
                     crate::mem::rc_set(phys, 0);
                 } else {
                     // there are other co-owners -> a private copy, the original has one reference less.
                     // The copy comes from the node OF THE ONE WHO WRITES: the page moves to it forever.
                     let np = crate::mem::alloc_contig_node(1, crate::affinity::my_node()).expect("cow: page");
                     core::ptr::copy_nonoverlapping(phys as *const u8, np as *mut u8, 4096);
-                    core::ptr::write_volatile(pte, (np & ADDR_MASK) | PTE_P | PTE_RW | keep);
+                    pte_w(pte, (np & ADDR_MASK) | PTE_P | PTE_RW | keep);
                     crate::mem::rc_drop(phys);
                     COW_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
-                cpu::invlpg(a);
+                mmu::flush_page(a);
                 return true;
             }
         }
@@ -2380,7 +2367,7 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
             // splitting it into 512 entries only to throw them away at once.
             if a & 0x1F_FFFF == 0 && end - a >= 0x20_0000 {
                 if let Some(pde) = pde_ptr_existing(a) {
-                    let e = *pde;
+                    let e = pte_r(pde);
                     if e & PTE_PS != 0 && e & PTE_PRIV != 0 {
                         // A LAZY reservation has no frame — there is nothing to free.
                         // Without this check a reservation marked PROT_NONE (and it is
@@ -2397,7 +2384,7 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
                             else { crate::mem::rc_set(phys, 0); crate::mem::free_contig(phys, 512); }
                         }
                         // Instead of a hole there is the original identity leaf without U/S (see ident_leaf).
-                        core::ptr::write_volatile(pde, ident_leaf_2m(a));
+                        pte_w(pde, ident_leaf_2m(a));
                         a += 0x20_0000;
                         continue;
                     }
@@ -2407,8 +2394,8 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
             let pt = match pt_for(cr3_root() as u64, a, false) { Some(p) => p, None => { a = stop; continue; } };
             while a < stop {
                 let pte = pt.add(pt_idx(a));
-                let e = *pte;
-                if e & PTE_LAZY != 0 { core::ptr::write_volatile(pte, ident_leaf(a)); } // a reservation without a frame — just remove it
+                let e = pte_r(pte);
+                if e & PTE_LAZY != 0 { pte_w(pte, ident_leaf(a)); } // a reservation without a frame — just remove it
                 else if e & (PTE_P | PTE_PNONE) != 0 { // present OR PROT_NONE (there is a frame behind it)
                     if e & PTE_P != 0 { present_gone = true; }
                     let phys = e & ADDR_MASK;
@@ -2416,7 +2403,7 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
                     // In the identity window it is the return of a supervisor leaf (the kernel will still need the frame at
                     // this address), above the window it is the former non-present stub,
                     // by which protect()/unguard() will give a mapping again.
-                    core::ptr::write_volatile(pte, ident_leaf(a));
+                    pte_w(pte, ident_leaf(a));
                 }
                 a += 0x1000;
                 if a & 0x3_FFFF == 0 { tlb_service(); } // the walk goes with IF=0 — once every 64 pages serve the neighbours' mailbox
@@ -2449,16 +2436,16 @@ pub fn find_phys_in(pml4: u64, phys: u64) -> Option<(u64, u64)> {
     // SAFETY: P1 + P2 — a read-only search over the tables of `pml4_phys`, which the caller owns.
     unsafe {
         for l4 in 0..512usize {
-            let e4 = *((pml4 as *const u64).add(l4)); if e4 & PTE_P == 0 { continue; }
+            let e4 = pte_r((pml4 as *const Pte).add(l4)); if e4 & PTE_P == 0 { continue; }
             let p3 = e4 & ADDR_MASK;
             for l3 in 0..512usize {
-                let e3 = *((p3 as *const u64).add(l3)); if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; }
+                let e3 = pte_r((p3 as *const Pte).add(l3)); if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; }
                 let pd = e3 & ADDR_MASK;
                 for l2 in 0..512usize {
-                    let e2 = *((pd as *const u64).add(l2)); if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { continue; }
+                    let e2 = pte_r((pd as *const Pte).add(l2)); if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { continue; }
                     let pt = e2 & ADDR_MASK;
                     for l1 in 0..512usize {
-                        let e1 = *((pt as *const u64).add(l1));
+                        let e1 = pte_r((pt as *const Pte).add(l1));
                         let va = ((l4 as u64) << 39) | ((l3 as u64) << 30) | ((l2 as u64) << 21) | ((l1 as u64) << 12);
                         if e1 & PTE_P != 0 && e1 & ADDR_MASK == phys && (e1 & PTE_PRIV != 0 || va != phys) { return Some((va, e1)); }
                     }
@@ -2474,7 +2461,7 @@ pub fn find_phys_in(pml4: u64, phys: u64) -> Option<(u64, u64)> {
 /// otherwise a walk would follow freed frames.
 unsafe fn free_pt(pt: u64) {
     for l1 in 0..512usize {
-        let e1 = *((pt as *const u64).add(l1));
+        let e1 = pte_r((pt as *const Pte).add(l1));
         if e1 & PTE_PRIV == 0 || e1 & PTE_LAZY != 0 { continue; } // identity/shared ones are not ours; LAZY — there is no frame
         if e1 & (PTE_P | PTE_PNONE) == 0 { continue; }            // a PROT_NONE page holds a frame — free it
         release_priv_frame(e1 & ADDR_MASK);
@@ -2485,7 +2472,7 @@ unsafe fn free_pt(pt: u64) {
 /// P1 + P4, as `free_pt`, one level up.
 unsafe fn free_pd(pd: u64) {
     for l2 in 0..512usize {
-        let e2 = *((pd as *const u64).add(l2));
+        let e2 = pte_r((pd as *const Pte).add(l2));
         if e2 & PTE_PS != 0 {
             // A huge page OF THE WORKLOAD (PRIV) — its 2 MB must be returned; a 2M leaf
             // of the kernel (identity) is shared, we do not touch it. Behind a lazy reservation there are no
@@ -2545,21 +2532,21 @@ pub fn free_address_space(pml4: u64) {
     // SAFETY: P1 + P2 — the walk that collects the frames to free; no core walks this table any
     // more (the APs have been moved to the kernel's CR3).
     unsafe {
-        let kpml4 = if kern != 0 { kern as *const u64 } else { core::ptr::null() };
-        let kpdpt = if kpml4.is_null() { core::ptr::null() } else { (*kpml4 & ADDR_MASK) as *const u64 };
+        let kpml4 = if kern != 0 { kern as *const Pte } else { core::ptr::null() };
+        let kpdpt = if kpml4.is_null() { core::ptr::null() } else { (pte_r(kpml4) & ADDR_MASK) as *const Pte };
         for l4 in 0..512usize {
-            let e4 = *((pml4 as *const u64).add(l4));
+            let e4 = pte_r((pml4 as *const Pte).add(l4));
             if e4 & PTE_P == 0 { continue; }
             // A copied entry of the kernel's PML4: the PDPT behind it is shared entirely.
-            if !kpml4.is_null() && e4 == *kpml4.add(l4) { continue; }
+            if !kpml4.is_null() && e4 == pte_r(kpml4.add(l4)) { continue; }
             let pdpt = e4 & ADDR_MASK;
             for l3 in 0..512usize {
-                let e3 = *((pdpt as *const u64).add(l3));
+                let e3 = pte_r((pdpt as *const Pte).add(l3));
                 if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; } // a 1G leaf of the kernel (GB1-3) — shared
                 // A directory copied from the kernel PDPT (GB1-3, split for
                 // a device's window) is shared. The process's GB0 PD is a copy, it has its own
                 // entry, and it is freed together with the private region's PD.
-                if l4 == 0 && !kpdpt.is_null() && e3 == *kpdpt.add(l3) { continue; }
+                if l4 == 0 && !kpdpt.is_null() && e3 == pte_r(kpdpt.add(l3)) { continue; }
                 free_pd(e3 & ADDR_MASK);
             }
             crate::mem::free_contig(pdpt, 1);
@@ -2589,15 +2576,15 @@ pub fn as_footprint(pml4: u64) -> (u64, u64, u64, u64) {
     // SAFETY: P1 + P2 — a read-only walk over an address space (`top`/`ps` introspection).
     unsafe {
         for l4 in 0..256usize {
-            let e4 = *((pml4 as *const u64).add(l4));
+            let e4 = pte_r((pml4 as *const Pte).add(l4));
             if e4 & PTE_P == 0 { continue; }
             let pdpt = e4 & ADDR_MASK;
             for l3 in 0..512usize {
-                let e3 = *((pdpt as *const u64).add(l3));
+                let e3 = pte_r((pdpt as *const Pte).add(l3));
                 if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; } // a 1G leaf — shared with the kernel
                 let pd = e3 & ADDR_MASK;
                 for l2 in 0..512usize {
-                    let e2 = *((pd as *const u64).add(l2));
+                    let e2 = pte_r((pd as *const Pte).add(l2));
                     if e2 & PTE_PS != 0 {
                         if e2 & PTE_PRIV == 0 { continue; }
                         if e2 & PTE_P != 0 { res += 512; huge += 512;
@@ -2611,7 +2598,7 @@ pub fn as_footprint(pml4: u64) -> (u64, u64, u64, u64) {
                     }
                     let pt = e2 & ADDR_MASK;
                     for l1 in 0..512usize {
-                        let e1 = *((pt as *const u64).add(l1));
+                        let e1 = pte_r((pt as *const Pte).add(l1));
                         if e1 & PTE_PRIV == 0 { continue; }
                         if e1 & PTE_P != 0 {
                             res += 1;
@@ -2633,12 +2620,12 @@ pub fn virt_to_phys(vaddr: u64) -> u64 {
     unsafe {
         let l4 = ((vaddr >> 39) & 0x1FF) as usize; let l3 = ((vaddr >> 30) & 0x1FF) as usize;
         let l2 = ((vaddr >> 21) & 0x1FF) as usize; let l1 = ((vaddr >> 12) & 0x1FF) as usize;
-        let e4 = *cr3_root().add(l4); if e4 & PTE_P == 0 { return vaddr; }
-        let e3 = *((e4 & ADDR_MASK) as *const u64).add(l3); if e3 & PTE_P == 0 { return vaddr; }
+        let e4 = pte_r(cr3_root().add(l4)); if e4 & PTE_P == 0 { return vaddr; }
+        let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(l3)); if e3 & PTE_P == 0 { return vaddr; }
         if e3 & PTE_PS != 0 { return (e3 & 0x000F_FFFF_C000_0000) | (vaddr & 0x3FFF_FFFF); }
-        let e2 = *((e3 & ADDR_MASK) as *const u64).add(l2); if e2 & PTE_P == 0 { return vaddr; }
+        let e2 = pte_r(((e3 & ADDR_MASK) as *const Pte).add(l2)); if e2 & PTE_P == 0 { return vaddr; }
         if e2 & PTE_PS != 0 { return (e2 & 0x000F_FFFF_FFE0_0000) | (vaddr & 0x1F_FFFF); }
-        let e1 = *((e2 & ADDR_MASK) as *const u64).add(l1); if e1 & PTE_P == 0 { return vaddr; }
+        let e1 = pte_r(((e2 & ADDR_MASK) as *const Pte).add(l1)); if e1 & PTE_P == 0 { return vaddr; }
         (e1 & ADDR_MASK) | (vaddr & 0xFFF)
     }
 }

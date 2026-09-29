@@ -7,6 +7,7 @@ pub mod cat;     // Intel CAT: the L3 masks and the class per core (MSRs)
 pub mod cpu;     // the privileged instructions, one wrapper each
 pub mod crypto;  // AES-128-GCM on AES-NI + PCLMULQDQ
 pub mod ioapic;  // the I/O APIC: a GSI -> a vector on the BSP
+pub mod mmu;     // the page-table descriptor as the MMU reads it, CR3, the TLB, the PAT
 pub mod percpu;  // the per-CPU block through GS.base
 pub mod pmu;     // the performance counters through MSRs + rdpmc
 pub mod vga;     // the legacy text window at 0xB8000
