@@ -92,6 +92,7 @@ port's progress meter.
 ```sh
 kernel/build-aarch64.sh     # -> target/aarch64-talaria/release/talaria (ELF) and talaria.img (the raw Image)
 kernel/runq-aarch64.sh 15   # QEMU virt, TCG on an x86 host (docker image talaria-qemu-aarch64), 15 s of console
+kernel/test-aarch64.sh      # the bring-up's gate: one 4-core boot, 25 deterministic assertions on its verdicts
 ```
 
 The arm64 vDSO (`kernel/user/vdso/vdso-aarch64.S`: `__kernel_clock_gettime`,

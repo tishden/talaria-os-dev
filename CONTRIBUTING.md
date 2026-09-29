@@ -27,6 +27,7 @@ make -C kernel/user all && (cd kernel && python3 mkfs.py)   # regression binarie
 (cd kernel && cargo -Z json-target-spec build --release)    # toolchain pinned in rust-toolchain.toml
 (cd kernel && cargo clippy -Zjson-target-spec --release -- -D warnings)
 kernel/build-aarch64.sh                                     # the arm64 kernel (docs/ARM64-PLAN.md): it must still build
+kernel/test-aarch64.sh                                      # the arm64 bring-up gate under TCG (25 assertions, ~10 s)
 (cd kernel && cargo clippy -Zjson-target-spec --release --target aarch64-talaria.json -- -D warnings)
 (cd kernel-unit && cargo test && cargo clippy --all-targets -- -D warnings)
 kernel/test.sh          # QEMU regression: "TOTAL: ... FAIL=0"

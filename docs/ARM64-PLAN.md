@@ -665,6 +665,12 @@ audit's path).
 
 ## 6. The regression on two architectures
 
+**Today** the arm64 gate is `kernel/test-aarch64.sh`: one boot of the bring-up on `virt`
+with four cores and 25 deterministic assertions on the verdict lines it prints (the tree,
+the allocator, the tables, the dirty bit, the GIC, the tick, the secondaries, the IPIs,
+the EL0 probe, the vDSO from EL0, and no trap anywhere) — CI runs it under TCG. When the
+shared modes come over, it folds into `test.sh` as below.
+
 `kernel/test.sh` gains `TAL_ARCH=x86_64|aarch64` (default: the host's), which
 selects the kernel path, the QEMU binary, the machine type (`microvm`/`q35` vs
 `virt,gic-version=3,its=on`), the firmware for the UEFI block (OVMF vs
