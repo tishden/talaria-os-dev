@@ -281,8 +281,8 @@ static STAT_BUILD_TSC: AtomicU64 = AtomicU64::new(0);
 /// 25 KB over a polled UART: every byte waits for THRE and costs a VMEXIT, and all of
 /// that with IF=0. A measurement: mongodb insert (gp3, SMP=4, 5000/s) with `talaria.stat=`
 /// gave a maximum of 417-510 ms and a p99.999 of 353 ms, and without it a maximum of 16.7 ms.
-/// For half a year that stall counted as "the WiredTiger journal's preallocation" and stood in
-/// the TODO as the workload's tail. Now the tick only SCHEDULES a snapshot, while it is printed by
+/// For half a year that stall counted as "the WiredTiger journal's preallocation" and was
+/// written down as the workload's tail. Now the tick only SCHEDULES a snapshot, while it is printed by
 /// a core that has nothing to do (`stat_drain` in `sched::ap_loop`): there IF=1,
 /// there is no task on the core, and the slow printing holds nobody up.
 #[inline]

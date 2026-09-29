@@ -103,7 +103,7 @@ pub fn init(start_info: u64) {
         // LOUDLY, WHEN THE MACHINE CANNOT SEE ITS MEMORY. On the stand (c6i.xlarge, 8 GB)
         // the allocator sees 3021 MB, and it is from THAT number that `ext2::cache_pick` takes
         // a sixteenth for the block cache (180 MB against Linux's page cache
-        // over the whole machine). For three sessions that stood in the TODO as "known", and
+        // over the whole machine). For three sessions that stood as a "known" item, and
         // not a single boot line said anything about it.
         let seen = (END.load(Ordering::Relaxed) - NEXT.load(Ordering::Relaxed)) / 1048576;
         if total_ram / 1048576 > seen * 3 / 2 {

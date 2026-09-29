@@ -343,6 +343,12 @@ the same JDK and the same class:
 | scaling across 4 cores | parity | parity |
 | throughput where it hits memory (sieve, allocation) | 10 % / 26 % behind | — |
 
+The 4-core speedup is **bimodal between runs**: 3.6-4.0x, with about a third of
+the runs on a lower mode of 2.4-2.6x, on the same kernel and the same binary — it
+is the thread layout that is drawn, not the parallelism that is missing. The gate
+in `kernel/validate.sh` therefore asserts a floor of 2.2x: it is there to catch the
+ABSENCE of scaling, not to win a lottery.
+
 **ClickHouse 25.8.33.6** (the official binary, `clickhouse local`) executes
 queries — configuration, planner, vectorised engine, aggregation and GROUP BY
 over millions of rows. On four cores it is mostly parity (7 of 12 cases; losses

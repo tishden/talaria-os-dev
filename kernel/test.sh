@@ -1853,7 +1853,7 @@ assert "fsyncconc: the neighbour: operations [0-9]+, the worst [0-9.]+ ms, stall
 # core. On one core "zero stalls for the neighbour" is NOT guaranteed: the owner of the FS
 # lock is recognised by the CORE'S NUMBER and cannot yield, while a barrier under the lock
 # on a gp3 throttle lasts up to ~170 ms (1 run out of 30 — a stall of the neighbour of
-# 169 ms); the gate here judges the files' content (see the TODO).
+# 169 ms); the gate here judges the files' content (open, by name: docs/ROADMAP.md §2.9).
 q4=$(bootd4gp3 "talaria.test=fsyncconc talaria.smp=1" /img/disk_fsbig.img)
 for i in $(seq 1 180); do sleep 1; grep -aq "summary: the tasks by their wait\|panic" /tmp/o.log 2>/dev/null && break; done
 sleep 2
@@ -2446,7 +2446,7 @@ assert "SHMWAKE: the inter-VM RTT through ivshmem .*p50=[0-9]{2,5} ns.* -> OK" "
 kill $q $QPONG 2>/dev/null; wait $q $QPONG 2>/dev/null
 rm -f /dev/shm/talshmwake
 
-echo "== the batching of the virtio notify: fastflood (TODO §8) =="
+echo "== the batching of the virtio notify: fastflood (DEVELOPMENT-GUIDE §6b) =="
 rm -f /tmp/o.log
 qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 2 -overcommit cpu-pm=on -m 512 \
   -kernel "/w/$K" -append "console=ttyS0 talaria.mode=fastflood talaria.fast=1" -display none -serial file:/tmp/o.log -no-reboot \

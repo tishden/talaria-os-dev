@@ -851,7 +851,7 @@ unsafe fn ring3_expect_fault(rip: u64, rsp: u64) -> u64 {
     CRASH_VEC.load(Ordering::SeqCst)
 }
 
-/// A self-check of the memory protection (TODO item 1). It loads a real musl binary and checks
+/// A self-check of the memory protection. It loads a real musl binary and checks
 /// that the loader set W^X per segment (.text=R-X, .data=RW-NX), a guard page and
 /// an NX stack; then LIVE #PFs: (1) executing an NX page, (2) a write into RO .text.
 pub fn wxorx_test(elf: &[u8]) -> ! {

@@ -1445,7 +1445,9 @@ fn io_one(lba: usize, buf: *mut u8, len: usize, write: bool) -> bool {
 /// The moment of THE START of the last barrier and the number of merged requests (see `blk_flush`).
 static FLUSH_STARTED_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// The barriers whose command was lost (the disk did not answer within 10 s): the durability is
-/// NOT promised. Until it is carried through to an EIO at fsync — it is open in the TODO; it is counted and printed.
+/// NOT promised: `fsync` answers EIO only when a WRITE failed (`WRITE_FAILED`), and a lost
+/// barrier does not set it — it is only counted here and printed in `stat:`.
+/// Open, by name: `docs/ROADMAP.md` §2.9.
 pub static FLUSH_LOST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static DEV_FL_MERGED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 

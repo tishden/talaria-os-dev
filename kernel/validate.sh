@@ -173,8 +173,8 @@ if ls "$REPO/services/jvm/build/jdk-21"* >/dev/null 2>&1; then
     OKJ=$(echo "$OUT" | grep -ac "openjdk version\|RESULT info cores")
     DONE=$(echo "$OUT" | grep -ac "BENCH DONE")
     # The threshold of the speedup is 2.2x rather than 3.0x: the measured distribution is
-    # bimodal (3.6-4.0x or 2.4-2.6x, about a third of the runs on the lower mode — see the
-    # TODO, "The JVM's speedup on four cores"). The gate must catch the ABSENCE of
+    # bimodal (3.6-4.0x or 2.4-2.6x, about a third of the runs on the lower mode —
+    # docs/MEASUREMENTS.md §7). The gate must catch the ABSENCE of
     # parallelism rather than lose a lottery of the layout.
     if [ "${OKJ:-0}" -ge 1 ] && [ "${DONE:-0}" -ge 1 ] && [ -n "$SPD" ] && [ -n "$PP" ] \
        && awk "BEGIN{exit !($SPD > 2.2)}" && awk "BEGIN{exit !($PP < 10)}"; then
