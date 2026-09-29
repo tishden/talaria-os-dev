@@ -94,6 +94,12 @@ kernel/build-aarch64.sh     # -> target/aarch64-talaria/release/talaria (ELF) an
 kernel/runq-aarch64.sh 15   # QEMU virt, TCG on an x86 host (docker image talaria-qemu-aarch64), 15 s of console
 ```
 
+The arm64 vDSO (`kernel/user/vdso/vdso-aarch64.S`: `__kernel_clock_gettime`,
+`__kernel_gettimeofday`, `__kernel_clock_getres`, the `__kernel_rt_sigreturn` trampoline)
+is assembled by `build.rs` with a cross compiler — `aarch64-linux-gnu-gcc` or
+`VDSO_CC_AARCH64=` — and without one the kernel still builds, with an empty image and
+a warning: a degraded kernel, not a broken build.
+
 ---
 
 ## 3. The boot flow
@@ -171,8 +177,22 @@ The point where a new mode is added is `selftest/` or `runmode.rs` (§10.2).
 |------|------:|-----------------|------------------|
 | `main.rs` | 867 | ONLY the machine's bring-up: from the bootloader's entry to the choice of the mode; it ends with a `runmode::run(...)` | `rust_main` |
 | `arch/mod.rs`, `arch/x86_64/mod.rs` | ~40 | the architecture boundary (`docs/ARM64-PLAN.md` §4.1): what has `asm!`, a register layout or an ABI constant lives under `arch/<name>/` and is reached through this one surface, chosen by `cfg(target_arch)` at compile time — no trait objects. The shared modules above it name the machine only through `crate::arch::cpu` and the modules re-exported here (`percpu`, `boot`, ...) | `cpu`, `percpu`, `boot`, `ioapic`, `vga`, `pmu`, `cat`, `crypto` |
-| `arch/x86_64/cpu.rs` | ~160 | the privileged instructions, one wrapper each, with the `options(...)` the inline blocks used to carry: interrupt masking and the one-instruction `sti;hlt` / `sti;mwait` windows (W4 of `sync.rs`), MSRs, CPUID, CR0–CR4, `invlpg`, `wbinvd`, XCR0, port I/O, `rdtsc`, MONITOR, the triple-fault reboot | `irq_enable`, `irq_disable`, `irq_flags`, `halt_forever`, `rdmsr`, `wrmsr`, `cpuid`, `read_cr3`, `write_cr3`, `invlpg`, `inb`, `outb`, `rdtsc` |
-| `arch/aarch64/` | ~900 | the arm64 port, phase 1 (`docs/ARM64-PLAN.md` §5): `boot.rs` (the Linux `Image` header and the entry: EL2→EL1, `.bss`, FP/SIMD, the stack), `mmu.rs` (the early identity map: one TTBR0 table of 1 GiB blocks, MAIR indices), `trap.rs` (sixteen vectors that print ESR/FAR/ELR and halt), `uart.rs` (a polled PL011 and `println!`), `dtb.rs` (the flattened device tree → RAM, bootargs, the console, the GIC/ITS, the timer PPIs, PSCI, the cores, virtio-mmio, ECAM; pure, host-tested against the stand's own tree in `kernel-unit/fixtures/`), `gic.rs` (GICv3: the distributor, a redistributor per core found by affinity, the `ICC_*` CPU interface, SGIs as IPIs), `timer.rs` (the generic timer as a deadline tick), `psci.rs` (`CPU_ON`/`SYSTEM_OFF` through `hvc` or `smc`), `kmain.rs` (the banner, the tree → `hvm_start_info` translation so `mem::init`/`read_cmdline` can come over unchanged, the phase-2 proof: the tick, the secondaries, an IPI), `cpu.rs` (the same vocabulary as x86's) | `rust_main_aarch64`, `rust_ap_main`, `dtb::parse`, `mmu::early_enable`, `trap::init`, `gic::init_cpu`, `psci::cpu_on` |
+| `arch/x86_64/mmu.rs` | ~110 | the descriptor as the x86-64 MMU reads it (`enc`/`dec` are the identity), CR3 as the root, the TLB, EFER.NXE/CR0.WP/SMEP once, the PAT (write-combining for the ENA LLQ window), the identity layout of the four gigabytes | `enc`, `dec`, `root`, `set_root`, `flush_all`, `flush_page`, `init_hw`, `gb_kind`, `pat_init`, `pat_read`, `PAT_VALUE` |
+- **Two MMUs, one module.** The tables are computed in a CANONICAL descriptor format —
+  x86-64's bits: present 0, RW 1, U/S 2, PWT/PCD 3-4, the large-leaf bit 7, NX 63, the
+  OS bits 9-11 and 52-55 — and every access to an entry goes through `pte_r`/`pte_w`/
+  `pte_cas`, which translate with `arch::mmu::{enc, dec}` (the identity on x86-64, the
+  AArch64 stage-1 descriptor on arm64: AP bits, UXN/PXN, MAIR index, the software bits
+  55-58). An entry's type is `Pte`, not `u64`, so a raw `*slot` does not compile: no
+  access can miss the translation. The root register, the TLB, the feature checks and the
+  one-time enables are `arch::mmu` too (`root`, `set_root`, `flush_all`, `flush_page`,
+  `has_1g`, `init_hw`); the IPI shootdown and the TLB mailbox are x86-only (`cfg`), an
+  arm64 `flush_page` is broadcast by the hardware (`TLBI ...IS`).
+- `init()` builds a PML4+a PDPT (a 1G identity); the kernel's gigabyte (`user_gb()`: GB0 on
+  x86, the RAM's first gigabyte on arm64) → a PD with 512×2M (for a per-page protection),
+  the other three by what `arch::mmu::gb_kind` says they are (RAM on 1G, or a device hole).
+ the privileged instructions, one wrapper each, with the `options(...)` the inline blocks used to carry: interrupt masking and the one-instruction `sti;hlt` / `sti;mwait` windows (W4 of `sync.rs`), MSRs, CPUID, CR0–CR4, `invlpg`, `wbinvd`, XCR0, port I/O, `rdtsc`, MONITOR, the triple-fault reboot | `irq_enable`, `irq_disable`, `irq_flags`, `halt_forever`, `rdmsr`, `wrmsr`, `cpuid`, `read_cr3`, `write_cr3`, `invlpg`, `inb`, `outb`, `rdtsc` |
+| `arch/aarch64/` | ~900 | the arm64 port, phase 1 (`docs/ARM64-PLAN.md` §5): `boot.rs` (the Linux `Image` header and the entry: EL2→EL1, `.bss`, FP/SIMD, the stack), `mmu.rs` (the early identity map: one TTBR0 table of 1 GiB blocks, MAIR indices), `trap.rs` (sixteen vectors: the IRQ ones save the frame, dispatch by INTID and `eret`; the EL0 sync one answers an `svc` and diagnoses a fault; the rest print ESR/FAR/ELR and halt), `uart.rs` (a polled PL011 and `println!`), `dtb.rs` (the flattened device tree → RAM, bootargs, the console, the GIC/ITS, the timer PPIs, PSCI, the cores, virtio-mmio, ECAM; pure, host-tested against the stand's own tree in `kernel-unit/fixtures/`), `mmu.rs` (the AArch64 stage-1 descriptor for `paging.rs`'s canonical format — `enc`/`dec` — TTBR0 as the root, broadcast `TLBI`, the early 4-level identity map), `percpu.rs` (the `PerCpu` block through `TPIDR_EL1`, x86's field offsets), `icache.rs` (`dc cvau`/`ic ivau` after the kernel writes code the workload executes), `abi.rs` (the arm64 syscall numbers → the internal, x86-64 ones: 160 rows derived from the two toolchains' headers, host-tested; 29 x86 calls have no arm64 number), `pending.rs` (THE LIST OF DEBTS: the stand-ins for neighbours not yet ported — `metrics`, `acpi`, `tsc`, `trace`, `sched`, `affinity`, `vdso` — one file that must shrink), `gic.rs` (GICv3: the distributor, a redistributor per core found by affinity, the `ICC_*` CPU interface, SGIs as IPIs), `timer.rs` (the generic timer as a deadline tick), `psci.rs` (`CPU_ON`/`SYSTEM_OFF` through `hvc` or `smc`), `kmain.rs` (the banner, the tree → `hvm_start_info` translation so `mem::init`/`read_cmdline` can come over unchanged, the phase-2 proof: the tick, the secondaries, an IPI), `cpu.rs` (the same vocabulary as x86's) | `rust_main_aarch64`, `rust_ap_main`, `dtb::parse`, `mmu::early_enable`, `trap::init`, `gic::init_cpu`, `psci::cpu_on` |
 | `cmdline.rs` | 739 | the parsing of the command line by TOKENS (not by substring): a mode's name is compared as a whole | `value`, `has`, `flag`, `num`, `test_is`, `mode_is`, `test_name`, `selftest` |
 | `selftest/` | ~3260 | the built-in regression `talaria.test=<name>`, by theme: `platform`/`storage`/`memory`/`process`/`concur`/`netsvc` | `selftest::run(cmdline)` |
 | `runmode.rs` | 569 | the production modes `talaria.mode=<name>`: the shell, the supervisor, a workload by a manifest, the servers, the datapath, the control plane on the BSP | `run`, `open_nic`, `run_datapath`, `nic_handoff_put` |
@@ -288,7 +308,19 @@ the four bytes of alignment in the `prpsinfo` note).
 
 ### The page tables
 
-- `init()` builds a PML4+a PDPT (a 1G identity), the GB0 → a PD with 512×2M (for a per-page protection).
+- **Two MMUs, one module.** The tables are computed in a CANONICAL descriptor format —
+  x86-64's bits: present 0, RW 1, U/S 2, PWT/PCD 3-4, the large-leaf bit 7, NX 63, the
+  OS bits 9-11 and 52-55 — and every access to an entry goes through `pte_r`/`pte_w`/
+  `pte_cas`, which translate with `arch::mmu::{enc, dec}` (the identity on x86-64, the
+  AArch64 stage-1 descriptor on arm64: AP bits, UXN/PXN, MAIR index, the software bits
+  55-58). An entry's type is `Pte`, not `u64`, so a raw `*slot` does not compile: no
+  access can miss the translation. The root register, the TLB, the feature checks and the
+  one-time enables are `arch::mmu` too (`root`, `set_root`, `flush_all`, `flush_page`,
+  `has_1g`, `init_hw`); the IPI shootdown and the TLB mailbox are x86-only (`cfg`), an
+  arm64 `flush_page` is broadcast by the hardware (`TLBI ...IS`).
+- `init()` builds a PML4+a PDPT (a 1G identity); the kernel's gigabyte (`user_gb()`: GB0 on
+  x86, the RAM's first gigabyte on arm64) → a PD with 512×2M (for a per-page protection),
+  the other three by what `arch::mmu::gb_kind` says they are (RAM on 1G, or a device hole).
 - `pte_ptr(vaddr)` is the walker that splits the large leaves along the way (`split_1g`,
   `split_2m`; the sub-entries inherit the physical base+the flags). `walk_entry` is a read without
   a split. `query(vaddr) -> (present, writable, user, exec)`.

@@ -9,7 +9,7 @@
 //! `arch::` is compiled for this target yet.
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use super::{cpu, dtb, gic, mmu, psci, timer, trap, uart};
+use super::{cpu, dtb, gic, mmu, percpu, psci, timer, trap, uart};
 
 /// A secondary core's stack (its PSCI context is the stack's top) and its "I am up"
 /// mark. The BSP's stack is `boot_stack` in boot.rs.
@@ -133,8 +133,30 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
         match s.psci { Some(dtb::Psci::Hvc) => "hvc", Some(dtb::Psci::Smc) => "smc", None => "none" });
     if let Some(e) = s.ecam { crate::println!("    pcie ecam at {:#x} (+{:#x})", e.base, e.size); }
     let si = start_info_from(tree, &s);
-    let cl = match s.bootargs { Some(b) => core::str::from_utf8(&tree[b.off..b.off + b.len]).unwrap_or("?"), None => "" };
-    crate::println!("talaria: start_info at {:#x} ({} memmap entries), cmdline = \"{}\"", si, s.nmem, cl);
+    crate::println!("talaria: start_info at {:#x} ({} memmap entries)", si, s.nmem);
+
+    // ── the first shared modules: the command line, the frame allocator, the page tables ──
+    let cmdline = crate::read_cmdline(si);
+    crate::println!("talaria: cmdline = \"{}\"", cmdline);
+    crate::mem::init(si);
+    for _ in 0..3 { if let Some(f) = crate::mem::alloc_frame() { crate::println!("talaria: alloc_frame -> {:#x}", f); } }
+    crate::println!("talaria: free frames = {}", crate::mem::free_frames());
+    crate::paging::init();
+    // The tables just built are what the core runs on now: prove it with a page whose rights
+    // change under us. A fresh frame is identity-mapped RW for the kernel; `protect_none`
+    // must make it absent, `protect` present again — through `enc` on every write.
+    if let Some(f) = crate::mem::alloc_frame() {
+        unsafe { core::ptr::write_volatile(f as *mut u64, 0x5EED_0000_0000_0001); }
+        let (p0, w0, _, _) = crate::paging::query(f);
+        crate::paging::protect_none(f, 4096);
+        let (p1, _, _, _) = crate::paging::query(f);
+        crate::paging::protect(f, 4096, true, false);
+        let (p2, w2, _, _) = crate::paging::query(f);
+        let back = unsafe { core::ptr::read_volatile(f as *const u64) };
+        crate::println!("talaria: paging probe on {:#x}: present/rw {}/{} -> PROT_NONE present {} -> restored present/rw {}/{}, the word {} ({})",
+            f, p0, w0, p1, p2, w2, if back == 0x5EED_0000_0000_0001 { "survived" } else { "was LOST" },
+            if p0 && w0 && !p1 && p2 && w2 && back == 0x5EED_0000_0000_0001 { "as expected" } else { "NOT as expected" });
+    }
 
     // ── phase 2 under the bring-up's own control: the GIC, the tick, the other cores, an IPI ──
     if let Some(p) = s.psci { psci::set_conduit(p == dtb::Psci::Hvc); }
@@ -187,8 +209,7 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     }
     unsafe { cpu::irq_disable(); }
     timer::stop();
-    crate::println!("talaria: arm64 phases 1-2 stop here — the kernel above arch/ is not compiled for this target yet (docs/ARM64-PLAN.md §5)");
-    cpu::halt_forever()
+    el0_probe()
 }
 
 /// A secondary core, from `ap_start` (boot.rs): the same map, vectors and GIC state
@@ -215,3 +236,66 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     crate::println!("PANIC: {}", info);
     cpu::halt_irq_off_forever()
 }
+
+/// Phase 3's first step (docs/ARM64-PLAN.md §4.5), proved with no ELF and no libc: a
+/// dozen instructions written into a fresh frame — three `svc`s that expect `x0 = x8 + 1`
+/// back, then a `brk` — run at EL0 with a stack of their own. The kernel's identity leaves
+/// of the RAM gigabyte are user-accessible and executable (`paging::init`, the U/S region),
+/// so the frame is reachable from EL0 as it is; the instruction cache is synchronised
+/// after the write (`icache::sync`), which TCG would forgive and a core would not.
+fn el0_probe() -> ! {
+    let (Some(code), Some(stack)) = (crate::mem::alloc_frame(), crate::mem::alloc_frame()) else {
+        crate::println!("talaria: el0 probe: no frame");
+        cpu::halt_forever()
+    };
+    // The probe, assembled here so that no hand-written word can be off by a bit:
+    //   mov x8, #100; svc; cmp x0, #101; b.ne wrong
+    //   mov x8, #200; svc; cmp x0, #201; b.ne wrong
+    //   mov x8, #300; svc; cmp x0, #301; b.ne wrong
+    //   brk #0 (the end)          wrong: brk #1
+    let probe: [u32; 14] = [
+        movz(8, 100), SVC0, cmp_imm(101), b_ne(13 - 3),
+        movz(8, 200), SVC0, cmp_imm(201), b_ne(13 - 7),
+        movz(8, 300), SVC0, cmp_imm(301), b_ne(13 - 11),
+        brk(0), brk(1),
+    ];
+    unsafe {
+        for (i, w) in probe.iter().enumerate() { core::ptr::write_volatile((code as *mut u32).add(i), *w); }
+    }
+    super::icache::sync(code, 4 * probe.len() as u64);
+    percpu::init_tpidr(cpu::cpu_index());
+    crate::println!("talaria: el0 probe: code at {:#x}, stack at {:#x} — three svc round trips, then a brk", code, stack + 4096);
+    trap::EL0_RETURN.store(el0_probe_done as *const () as usize as u64, Ordering::Relaxed);
+    // Into EL0: SPSR = EL0t with DAIF masked (no tick while the probe runs), ELR = the code,
+    // SP_EL0 = the stack. The `eret` never returns here — the probe ends in a fatal `brk`.
+    unsafe {
+        core::arch::asm!(
+            "msr sp_el0, {sp}",
+            "msr elr_el1, {pc}",
+            "msr spsr_el1, {ps}",
+            "eret",
+            sp = in(reg) stack + 4096, pc = in(reg) code, ps = in(reg) 0x3C0u64, options(noreturn)
+        );
+    }
+}
+
+/// Where `brk #0` from the probe lands (trap.rs, `EL0_RETURN`): the count of round trips
+/// says whether every `svc` came back with the right answer — a wrong one would have
+/// ended in `brk #1`, which is fatal.
+extern "C" fn el0_probe_done() -> ! {
+    let n = trap::SVCS.load(Ordering::Relaxed);
+    crate::println!("talaria: el0 probe: back in EL1 — {} svc round trip(s), ended by brk #0 ({})", n, if n == 3 { "as expected" } else { "NOT the 3 expected" });
+    crate::println!("talaria: arm64 phases 1-3(a) stop here — the kernel above arch/ is not compiled for this target yet (docs/ARM64-PLAN.md §5)");
+    cpu::halt_forever()
+}
+
+// The five encodings the probe needs (the ARM ARM, C6.2): MOVZ, SVC, SUBS (cmp), B.cond, BRK.
+const SVC0: u32 = 0xD400_0001;
+/// `movz x<rd>, #imm16`
+fn movz(rd: u32, imm16: u32) -> u32 { 0xD280_0000 | (imm16 & 0xFFFF) << 5 | (rd & 31) }
+/// `cmp x0, #imm12` = `subs xzr, x0, #imm12`
+fn cmp_imm(imm: u32) -> u32 { 0xF100_001F | (imm & 0xFFF) << 10 }
+/// `b.ne .+4*words`
+fn b_ne(words: u32) -> u32 { 0x5400_0001 | (words & 0x7FFFF) << 5 }
+/// `brk #imm16`
+fn brk(imm16: u32) -> u32 { 0xD420_0000 | (imm16 & 0xFFFF) << 5 }
