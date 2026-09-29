@@ -52,7 +52,7 @@ pub mod elfhdr;
 pub mod elfnote;
 #[path = "../../kernel/src/jbd2.rs"]
 pub mod jbd2;
-#[path = "../../kernel/src/crypto.rs"]
+#[path = "../../kernel/src/arch/x86_64/crypto.rs"]
 pub mod crypto;
 
 #[path = "../../kernel/src/placement.rs"]

@@ -51,18 +51,18 @@ macro_rules! user_elf {
 
 mod arch;     // the machine: everything with `asm!`, a register layout or an ABI constant (docs/ARM64-PLAN.md §4.1)
 #[cfg(target_arch = "x86_64")]
-mod boot;
+use arch::boot;
 #[cfg(target_arch = "x86_64")]
 #[macro_use]
 mod serial;
 #[cfg(target_arch = "x86_64")]
-mod vga;
+use arch::vga;
 #[cfg(target_arch = "x86_64")]
 mod hal;
 #[cfg(target_arch = "x86_64")]
 mod cmdline;
 #[cfg(target_arch = "x86_64")]
-mod crypto;
+use arch::crypto;
 #[cfg(target_arch = "x86_64")]
 mod idt;
 #[cfg(target_arch = "x86_64")]
@@ -92,7 +92,7 @@ mod sync;
 #[cfg(target_arch = "x86_64")]
 mod waitpred; // the predicates of a wait on a word: the sleeper's side and the waker's, wrap-safe
 #[cfg(target_arch = "x86_64")]
-mod percpu;
+use arch::percpu;
 #[cfg(target_arch = "x86_64")]
 mod fastpath;
 #[cfg(target_arch = "x86_64")]
@@ -138,7 +138,7 @@ mod filed;    // uploading/downloading files over TCP (an rsync-alike)
 #[cfg(target_arch = "x86_64")]
 mod imds;
 #[cfg(target_arch = "x86_64")]
-mod ioapic;
+use arch::ioapic;
 #[cfg(target_arch = "x86_64")]
 mod netprof;
 #[cfg(target_arch = "x86_64")]
@@ -168,11 +168,11 @@ mod ctlplane;
 #[cfg(target_arch = "x86_64")]
 mod obs;
 #[cfg(target_arch = "x86_64")]
-mod pmu;
+use arch::pmu;
 #[cfg(target_arch = "x86_64")]
 mod cellman;
 #[cfg(target_arch = "x86_64")]
-mod cat;
+use arch::cat;
 #[cfg(target_arch = "x86_64")]
 mod netdev;   // the network device model: the NetDev trait + the driver table
 #[cfg(target_arch = "x86_64")]
