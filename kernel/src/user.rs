@@ -393,6 +393,26 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
 const BIG_STACK_FRAMES: u64 = 2048;      // an 8 MB process stack (PostgreSQL: max_stack_depth 2 MB + headroom)
 const BIG_HEAP_FRAMES: u64 = 16384;      // a 64 MB brk heap of the process (the rest is mmap)
 
+/// THE SIZE OF THE WORKLOAD'S MAIN STACK, BYTES — the one `getrlimit(RLIMIT_STACK)` must answer.
+///
+/// It is not one number: `mode=proc` gets 8 MB (`BIG_STACK_FRAMES`) and `mode=cell` 32 MB
+/// (`DT_STACK_FRAMES`), while the embedded demo modes get kilobytes. Reporting a constant
+/// meant reporting 32 MB to PostgreSQL, whose `max_stack_depth` is checked against exactly
+/// this limit — that is, offering it four times the room it has. So the number is RECORDED
+/// where the stack is actually mapped and read back from there.
+pub static USTACK_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The limit to report: what was really mapped, and the cell's size while nothing has
+/// been mapped yet (the kernel's own threads ask before a workload exists).
+pub fn stack_limit() -> u64 {
+    match USTACK_BYTES.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => DT_STACK_FRAMES * 4096,
+        n => n,
+    }
+}
+#[inline]
+fn note_stack(frames: u64) { USTACK_BYTES.store(frames * 4096, core::sync::atomic::Ordering::Relaxed); }
+
 /// Run a PROCESS from the disk (a large binary, argv+envp, auxv) in its own AS under the scheduler:
 /// fork/COW, signals, fd tables (proc.rs). The path for fork workloads (the PostgreSQL postmaster).
 ///
@@ -454,6 +474,7 @@ pub unsafe fn run_disk(path: *const u8, args: &[&[u8]]) -> ! {
     if RD_KSTACK == 0 { RD_KSTACK = crate::sched::alloc_kstack().unwrap(); }
     let kstack = RD_KSTACK;
     let stack_frames: u64 = 8192; // a 32 MB stack (large C++ software keeps big objects on the stack)
+    note_stack(stack_frames);
     if RD_STACK == 0 { RD_STACK = crate::mem::alloc_contig(stack_frames).unwrap(); }
     let ub = RD_STACK;
     crate::paging::unguard(ub, stack_frames * 4096); // after a restart: return present (harden_stack set a guard)
@@ -589,6 +610,7 @@ pub fn basename(path: &[u8]) -> &[u8] {
 unsafe fn run_disk_threaded_identity(path: *const u8, args: &[&[u8]], envs: &[&[u8]]) -> ! {
     use core::sync::atomic::Ordering;
     let kmain = crate::sched::alloc_kstack().unwrap();
+    note_stack(DT_STACK_FRAMES);
     if DT_STACK == 0 { DT_STACK = crate::mem::alloc_contig(DT_STACK_FRAMES).unwrap(); }
     let ub = DT_STACK;
     let ustack_top = ub + DT_STACK_FRAMES * 4096;
@@ -630,6 +652,7 @@ pub unsafe fn run_threaded(elf: &[u8]) -> ! {
     let kmain = crate::sched::alloc_kstack().unwrap();
     let ub = crate::mem::alloc_frame().unwrap();
     for _ in 0..15 { crate::mem::alloc_frame().unwrap(); } // 16 frames (a 64 KB stack for the main thread)
+    note_stack(16);
     let ustack_top = ub + 16 * 4096;
     setup_gdt(kmain);
     crate::syscall::init();
@@ -772,6 +795,7 @@ pub fn run(elf: &[u8]) -> ! {
     // the user's stack: several frames
     let ub = crate::mem::alloc_frame().unwrap();
     for _ in 0..7 { crate::mem::alloc_frame().unwrap(); } // 8 frames in a row (a 32 KB stack)
+    note_stack(8);
     let ustack_top = ub + 8 * 4096;
     // SAFETY: L1 + L2 + L3 + L4 — the launch path on the boot core: the stack frames
     // have just been allocated (RW identity), the ELF is an embedded one, and the block
@@ -955,6 +979,7 @@ unsafe fn map_proc_heap(pml4: u64) -> (u64, u64) {
 /// # Safety
 /// L3, as `map_proc_heap`.
 unsafe fn map_proc_stack(pml4: u64, sframes: u64) -> (u64, u64) {
+    note_stack(sframes); // what RLIMIT_STACK must answer for the process about to run on it
     // The workload's stack comes from the same node as its heap and its threads (255 = there is one node
     // or no layout is set: then this is exactly the former alloc_contig).
     let sbase = crate::mem::alloc_contig_node(sframes, crate::affinity::launch_node()).expect("exec: stack");

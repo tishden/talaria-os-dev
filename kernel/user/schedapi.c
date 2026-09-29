@@ -15,6 +15,12 @@
  *    We check that QUERY gives out a non-empty mask and that the command itself works.
  * 3) the binding to cores: sched_setaffinity/getaffinity go there and back, while a
  *    non-existent core is rejected rather than accepted silently.
+ * 4) getrlimit does not promise room that is not there. RLIMIT_NOFILE used to be the
+ *    literal 1024 while the fd table holds 256 rows: an application that sizes itself by
+ *    the limit meets an EMFILE at a quarter of it, minutes later and far from this call.
+ *    We open descriptors until the refusal and demand that the first refusal come AT the
+ *    announced limit; and that raising the limit above it be refused rather than granted
+ *    with a zero.
  *
  * musl static, -Wl,-Ttext-segment=0x10000000.
  */
@@ -27,6 +33,7 @@
 #include <errno.h>
 #include <sys/syscall.h>
 #include <time.h>
+#include <sys/resource.h>
 
 static int fails = 0;
 static void chk(int ok, const char *what) {
@@ -101,6 +108,39 @@ int main(void) {
     CPU_SET(63, &bad);             /* there is no core 63 on the stand */
     chk(sched_setaffinity(0, sizeof bad, &bad) != 0,
         "the binding to a non-existent core has been rejected rather than accepted silently");
+
+    /* ── 4) the limits are the truth ────────────────────────────────────────── */
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) { printf("schedapi: FAIL getrlimit(NOFILE)\n"); fails++; }
+    else {
+        long lim = (long)rl.rlim_cur;
+        printf("schedapi: RLIMIT_NOFILE announced %ld\n", lim);
+        /* dup(0) takes a ROW of the descriptor table and nothing else — no second table
+         * behind it whose own ceiling could arrive first and make this test lie about
+         * which wall it hit. 0/1/2 are already taken, so the table gives out lim-3 rows
+         * and the next call must be an EMFILE. A limit larger than that is a promise the
+         * kernel cannot keep; a smaller one hides rows the application is entitled to. */
+        long opened = 0;
+        int last = 0;
+        for (long i = 0; i < lim + 8; i++) {
+            int fd = dup(0);
+            if (fd < 0) { last = errno; break; }
+            opened++;
+        }
+        printf("schedapi: dup(0) gave out %ld rows, then errno=%d\n", opened, last);
+        chk(opened == lim - 3 && last == EMFILE,
+            "RLIMIT_NOFILE is exactly the wall of the descriptor table (0/1/2 are already taken)");
+        for (int fd = 3; fd < 3 + (int)opened; fd++) close(fd);
+
+        struct rlimit up = rl;
+        up.rlim_cur = up.rlim_max = rl.rlim_max * 4;
+        chk(setrlimit(RLIMIT_NOFILE, &up) != 0,
+            "raising RLIMIT_NOFILE above the table is refused rather than granted with a zero");
+    }
+    struct rlimit st;
+    chk(getrlimit(RLIMIT_STACK, &st) == 0 && st.rlim_cur >= 64 * 1024 && st.rlim_cur <= 32u * 1024 * 1024,
+        "RLIMIT_STACK is the stack that was really mapped, not a constant");
+    printf("schedapi: RLIMIT_STACK announced %lu bytes\n", (unsigned long)st.rlim_cur);
 
     printf("schedapi: %s\n", fails ? "FAILED" : "ALL OK");
     fflush(stdout);

@@ -78,8 +78,8 @@ jobs:
       - uses: actions/checkout@v4
       # GitHub's Linux runners expose /dev/kvm, so the real thing can boot here. What
       # runs is the DETERMINISTIC part (TAL_CI=1): ring 3, the FS and the journal, the
-      # process model, the operator's side — about 175 assertions in ~7 minutes. What
-      # does not: the network probes, the latency gates and the boot-image chains
+      # process model, the operator's side — 181 assertions plus 16 host checks in
+      # ~7 minutes. What does not: the network probes, the latency gates and the boot-image chains
       # (bios/tboot/UEFI). On a shared runner those judge the neighbour rather than the
       # kernel — they stay the local gate described in CONTRIBUTING.md.
       - name: KVM is available

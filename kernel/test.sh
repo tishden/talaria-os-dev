@@ -1776,7 +1776,7 @@ qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 4 -m 2048 -ov
   -drive id=d0,file=/img/disk_ext2.img,format=raw,if=none -device virtio-blk-device,drive=d0 >/tmp/q.log 2>&1 & q4=$!
 assert_slow "2 MB huge pages=[1-9][0-9]*" "huge: with talaria.huge=2 the large pages are REALLY handed out (rather than only reserved)"; stopq $q4
 q4=$(bootd4 "talaria.test=schedapi talaria.smp=4" /img/disk_ext2.img); sleep 12
-assert "schedapi: ALL OK" "schedapi: the scheduler's contract — yield GIVES the core to the neighbour, membarrier puts a barrier, the binding to the cores goes there and back"; stopq $q4
+assert "schedapi: ALL OK" "schedapi: the scheduler's contract — yield GIVES the core to the neighbour, membarrier puts a barrier, the binding to the cores goes there and back, and getrlimit announces the wall that is really there (dup(0) hits EMFILE exactly at RLIMIT_NOFILE, a raise is refused)"; stopq $q4
 # A file LARGER than the block cache is the only place where the eviction of dirty pages
 # goes on all the time, and the only gate that catches the race for the path buffer: before
 # the fix `fsbigrace` on four cores failed EVERY time, on one it was always green.
