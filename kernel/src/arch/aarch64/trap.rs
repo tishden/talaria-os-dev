@@ -190,6 +190,9 @@ extern "C" fn trap(kind: u64, f: &Frame) -> ! {
 
 /// SVCs taken from EL0, for the bring-up's proof.
 pub static SVCS: AtomicU64 = AtomicU64::new(0);
+/// What a probe reported with `brk #2` (x8, x9).
+pub static PROBE_X8: AtomicU64 = AtomicU64::new(0);
+pub static PROBE_X9: AtomicU64 = AtomicU64::new(0);
 /// Where a `brk #0` from EL0 returns the machine to (a kernel function, entered at EL1h
 /// on the kernel stack the `eret` into EL0 left): the bring-up's probe sets it, so that
 /// its deliberate end is not a halt. 0 — a `brk` from EL0 is fatal, as any other fault.
@@ -209,6 +212,14 @@ extern "C" fn sync_el0(kind: u64, f: &mut Frame) {
         return;
     }
     let back = EL0_RETURN.swap(0, Ordering::Relaxed);
+    if ec == 0x3C && f.esr & 0xFFFF == 2 && back != 0 {
+        // `brk #2`: the probe reports two words (x8, x9) and resumes the kernel.
+        PROBE_X8.store(f.x[8], Ordering::Relaxed);
+        PROBE_X9.store(f.x[9], Ordering::Relaxed);
+        f.elr = back;
+        f.spsr = 0x3C5;
+        return;
+    }
     if ec == 0x3C && f.esr & 0xFFFF == 0 && back != 0 {
         // `brk #0` with a continuation: resume the kernel there, at EL1h, interrupts masked.
         f.elr = back;

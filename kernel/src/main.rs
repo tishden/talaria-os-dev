@@ -55,16 +55,16 @@ macro_rules! user_elf {
     ($p:literal) => { &[] };
 }
 
+#[macro_use]
 mod arch;     // the machine: everything with `asm!`, a register layout or an ABI constant (docs/ARM64-PLAN.md §4.1)
 // arm64: the modules that have come over name neighbours that have not — the stand-ins are
 // listed in ONE file, `arch/aarch64/pending.rs`, and that file must shrink (docs/ARM64-PLAN.md §5).
 #[cfg(target_arch = "aarch64")]
-use arch::pending::{acpi, affinity, metrics, sched, trace, tsc, vdso};
+use arch::pending::{acpi, affinity, metrics, sched, trace, tsc};
 #[cfg(target_arch = "x86_64")]
 use arch::boot;
 #[cfg(target_arch = "x86_64")]
-#[macro_use]
-mod serial;
+use arch::serial;
 #[cfg(target_arch = "x86_64")]
 use arch::vga;
 #[cfg(target_arch = "x86_64")]
@@ -73,7 +73,7 @@ mod cmdline;
 #[cfg(target_arch = "x86_64")]
 use arch::crypto;
 #[cfg(target_arch = "x86_64")]
-mod idt;
+use arch::idt;
 #[cfg(target_arch = "x86_64")]
 mod l1;
 mod paging;
@@ -93,7 +93,7 @@ mod mem;
 #[cfg(target_arch = "x86_64")]
 mod acpi;
 #[cfg(target_arch = "x86_64")]
-mod smp;
+use arch::smp;
 #[cfg(target_arch = "x86_64")]
 mod sync;
 #[cfg(target_arch = "x86_64")]
@@ -128,7 +128,7 @@ mod jbd2;     // the JBD2 log's format: the header of a block and the tags of a 
 #[cfg(target_arch = "x86_64")]
 mod proc;
 #[cfg(target_arch = "x86_64")]
-mod gdb;
+use arch::gdb;
 #[cfg(target_arch = "x86_64")]
 mod supervise;
 #[cfg(target_arch = "x86_64")]
@@ -154,10 +154,9 @@ mod netcfg;   // addresses, routes, DHCP: the network configuration as a model r
 #[cfg(target_arch = "x86_64")]
 mod routes;
 #[cfg(target_arch = "x86_64")]
-mod tsc;
+use arch::tsc;
 #[cfg(target_arch = "x86_64")]
 mod clock;
-#[cfg(target_arch = "x86_64")]
 mod vdso;
 #[cfg(target_arch = "x86_64")]
 mod uaccess;

@@ -38,6 +38,14 @@ pub fn init() {
         crate::println!("vdso: the image of {} bytes is shorter than {} — the vDSO is switched off", IMAGE.len(), load);
         return;
     }
+    // The image must export the clock call a libc will look for; an image that does not
+    // (a wrong version script, a cross compiler that produced something else) is not a
+    // vDSO, and a process would rather have none than one it cannot use.
+    let Some(clock) = symbol(crate::arch::VDSO_CLOCK_SYMBOL) else {
+        crate::println!("vdso: the image has no {} — the vDSO is switched off",
+            core::str::from_utf8(crate::arch::VDSO_CLOCK_SYMBOL).unwrap_or("?"));
+        return;
+    };
     let fr = match crate::mem::alloc_contig(PAGES) { Some(f) => f, None => return };
     unsafe {
         core::ptr::write_bytes(fr as *mut u8, 0, load);
@@ -45,7 +53,45 @@ pub fn init() {
     }
     BASE.store(fr, Ordering::SeqCst);
     crate::tsc::publish_vdso_now(); // the clock's parameters go at once, before the first discipline
-    crate::println!("vdso: the clock in user space is up (2 pages, the data at {:#x})", VADDR + 4096);
+    crate::println!("vdso: the clock in user space is up (2 pages, the data at {:#x}, {} at +{:#x})", VADDR + 4096,
+        core::str::from_utf8(crate::arch::VDSO_CLOCK_SYMBOL).unwrap_or("?"), clock);
+}
+
+/// The offset of an exported symbol in the image (`__vdso_clock_gettime` on x86,
+/// `__kernel_clock_gettime` on arm64), from the `.dynsym`/`.dynstr` sections the linker
+/// keeps in the file — a caller adds `VADDR`. `None` if the image has no such symbol
+/// or is not the ELF we built. Used by the arm64 EL0 probe; a libc finds the same
+/// symbols by itself through `AT_SYSINFO_EHDR`.
+pub fn symbol(name: &[u8]) -> Option<u64> {
+    let img = IMAGE;
+    let rd16 = |o: usize| img.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let rd32 = |o: usize| img.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let rd64 = |o: usize| img.get(o..o + 8).map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]));
+    if img.get(0..4)? != b"\x7fELF" { return None; }
+    let shoff = rd64(0x28)? as usize;
+    let shentsize = rd16(0x3A)? as usize;
+    let shnum = rd16(0x3C)? as usize;
+    const SHT_DYNSYM: u32 = 11;
+    for i in 0..shnum {
+        let sh = shoff + i * shentsize;
+        if rd32(sh + 4)? != SHT_DYNSYM { continue; }
+        let sym_off = rd64(sh + 0x18)? as usize;
+        let sym_size = rd64(sh + 0x20)? as usize;
+        let link = rd32(sh + 0x28)? as usize;
+        let str_off = rd64(shoff + link * shentsize + 0x18)? as usize;
+        let str_size = rd64(shoff + link * shentsize + 0x20)? as usize;
+        let strtab = img.get(str_off..str_off + str_size)?;
+        let mut o = sym_off;
+        while o + 24 <= sym_off + sym_size {
+            let st_name = rd32(o)? as usize;
+            let st_value = rd64(o + 8)?;
+            let n = strtab.get(st_name..)?;
+            let n = &n[..n.iter().position(|&b| b == 0).unwrap_or(n.len())];
+            if n == name && st_value != 0 { return Some(st_value); }
+            o += 24;
+        }
+    }
+    None
 }
 
 /// Map the vDSO into a process's address space: the code — R+X, the data — R.

@@ -26,3 +26,6 @@ pub mod psci;
 pub mod timer;
 pub mod trap;
 pub mod uart;
+
+/// The vDSO symbol a libc looks for on this architecture; `vdso::init` refuses an image without it.
+pub const VDSO_CLOCK_SYMBOL: &[u8] = b"__kernel_clock_gettime";

@@ -127,3 +127,19 @@ pub fn elr_el1() -> u64 { let v: u64; unsafe { core::arch::asm!("mrs {}, elr_el1
 pub fn sctlr_el1() -> u64 { let v: u64; unsafe { core::arch::asm!("mrs {}, sctlr_el1", out(reg) v, options(nomem, nostack)); } v }
 #[inline(always)]
 pub fn ttbr0_el1() -> u64 { let v: u64; unsafe { core::arch::asm!("mrs {}, ttbr0_el1", out(reg) v, options(nomem, nostack)); } v }
+
+/// Let EL0 read `CNTVCT_EL0` and `CNTFRQ_EL0` (`CNTKCTL_EL1.EL0VCTEN`): the vDSO's clock.
+pub unsafe fn enable_el0_counter() {
+    let mut v: u64;
+    core::arch::asm!("mrs {}, cntkctl_el1", out(reg) v, options(nomem, nostack));
+    v |= 1 << 1;
+    core::arch::asm!("msr cntkctl_el1, {}", "isb", in(reg) v, options(nomem, nostack));
+}
+
+/// Does this core manage the access flag and the dirty state in hardware (FEAT_HAFDBS:
+/// `ID_AA64MMFR1_EL1.HAFDBS` >= 2 — the dirty state, not only the access flag)?
+pub fn has_hw_dirty() -> bool {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, id_aa64mmfr1_el1", out(reg) v, options(nomem, nostack)); }
+    (v & 0xF) >= 2
+}

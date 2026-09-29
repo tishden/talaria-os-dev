@@ -145,6 +145,10 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     // The tables just built are what the core runs on now: prove it with a page whose rights
     // change under us. A fresh frame is identity-mapped RW for the kernel; `protect_none`
     // must make it absent, `protect` present again — through `enc` on every write.
+    crate::vdso::init();
+    crate::vdso::map_into(crate::paging::kernel_cr3());
+    unsafe { cpu::enable_el0_counter(); }
+    dirty_probe();
     if let Some(f) = crate::mem::alloc_frame() {
         unsafe { core::ptr::write_volatile(f as *mut u64, 0x5EED_0000_0000_0001); }
         let (p0, w0, _, _) = crate::paging::query(f);
@@ -285,6 +289,81 @@ fn el0_probe() -> ! {
 extern "C" fn el0_probe_done() -> ! {
     let n = trap::SVCS.load(Ordering::Relaxed);
     crate::println!("talaria: el0 probe: back in EL1 — {} svc round trip(s), ended by brk #0 ({})", n, if n == 3 { "as expected" } else { "NOT the 3 expected" });
+    vdso_probe()
+}
+
+/// The vDSO from EL0: `__kernel_clock_gettime(CLOCK_MONOTONIC, &ts)` called through the
+/// image mapped at `vdso::VADDR`, the result reported with `brk #2`. The kernel brackets
+/// the call with two readings of its own clock: the vDSO's answer must lie between them.
+fn vdso_probe() -> ! {
+    let Some(off) = crate::vdso::symbol(b"__kernel_clock_gettime") else {
+        crate::println!("talaria: vdso probe: no __kernel_clock_gettime in the image (an empty vDSO — no aarch64 cross compiler at build time?)");
+        finish()
+    };
+    let entry = crate::vdso::VADDR + off;
+    let (Some(code), Some(stack)) = (crate::mem::alloc_frame(), crate::mem::alloc_frame()) else { finish() };
+    //   sub sp, sp, #16; mov x0, #1; mov x1, sp; x9 = entry (movz/movk x4); blr x9
+    //   ldp x8, x9, [sp]; brk #2
+    let probe: [u32; 11] = [
+        0xD10043FF,                         // sub sp, sp, #16
+        movz(0, 1),                          // mov x0, #1 (CLOCK_MONOTONIC)
+        0x910003E1,                          // mov x1, sp
+        movz(9, (entry & 0xFFFF) as u32),
+        movk(9, ((entry >> 16) & 0xFFFF) as u32, 1),
+        movk(9, ((entry >> 32) & 0xFFFF) as u32, 2),
+        movk(9, ((entry >> 48) & 0xFFFF) as u32, 3),
+        0xD63F0120,                          // blr x9
+        0xA94027E8,                          // ldp x8, x9, [sp]
+        brk(2),
+        brk(1),
+    ];
+    unsafe { for (i, w) in probe.iter().enumerate() { core::ptr::write_volatile((code as *mut u32).add(i), *w); } }
+    super::icache::sync(code, 4 * probe.len() as u64);
+    trap::EL0_RETURN.store(vdso_probe_done as *const () as usize as u64, Ordering::Relaxed);
+    let hz = cpu::counter_hz();
+    let base = super::pending::tsc::VDSO_BASE.load(Ordering::Relaxed);
+    let before = cpu::counter().wrapping_sub(base) as u128 * 1_000_000_000 / hz as u128;
+    PROBE_BEFORE.store(before as u64, Ordering::Relaxed);
+    crate::println!("talaria: vdso probe: __kernel_clock_gettime at {:#x} (the image at {:#x}), calling it from EL0", entry, crate::vdso::VADDR);
+    unsafe {
+        core::arch::asm!("msr sp_el0, {sp}", "msr elr_el1, {pc}", "msr spsr_el1, {ps}", "eret",
+            sp = in(reg) stack + 4096, pc = in(reg) code, ps = in(reg) 0x3C0u64, options(noreturn));
+    }
+}
+static PROBE_BEFORE: AtomicU64 = AtomicU64::new(0);
+
+extern "C" fn vdso_probe_done() -> ! {
+    let hz = cpu::counter_hz();
+    let base = super::pending::tsc::VDSO_BASE.load(Ordering::Relaxed);
+    let after = (cpu::counter().wrapping_sub(base) as u128 * 1_000_000_000 / hz as u128) as u64;
+    let before = PROBE_BEFORE.load(Ordering::Relaxed);
+    let (sec, nsec) = (trap::PROBE_X8.load(Ordering::Relaxed), trap::PROBE_X9.load(Ordering::Relaxed));
+    let got = sec.wrapping_mul(1_000_000_000).wrapping_add(nsec);
+    crate::println!("talaria: vdso probe: EL0 read {}.{:09} s; the kernel's clock around the call: {} .. {} ns ({})",
+        sec, nsec, before, after, if nsec < 1_000_000_000 && got >= before && got <= after { "as expected" } else { "NOT inside the bracket" });
+    finish()
+}
+
+/// The dirty bit on a 4K page: hardware DBM where the core has it (`TCR.HD`), else the
+/// conservative "always dirty". Split a fresh frame's 2M leaf, arm the page, write, and
+/// ask `take_dirty` twice.
+fn dirty_probe() {
+    let Some(f) = crate::mem::alloc_frame() else { return; };
+    crate::paging::protect(f, 4096, true, false);           // the 2M leaf -> a 4K page of its own
+    let armed = !crate::paging::take_dirty(f) || !crate::paging::take_dirty(f); // drain whatever the split inherited
+    unsafe { core::ptr::write_volatile(f as *mut u64, 1); }
+    let d1 = crate::paging::take_dirty(f);
+    let d2 = crate::paging::take_dirty(f);
+    unsafe { core::ptr::write_volatile(f as *mut u64, 2); }
+    let d3 = crate::paging::take_dirty(f);
+    let hw = mmu::hw_dirty_on();
+    let ok = if hw { armed && d1 && !d2 && d3 } else { d1 && d2 && d3 };
+    crate::println!("talaria: dirty probe on {:#x}: {} — after a write {}, again {}, after another write {} ({})",
+        f, if hw { "hardware DBM (TCR.HD)" } else { "no FEAT_HAFDBS: conservative, always dirty" }, d1, d2, d3,
+        if ok { "as expected" } else { "NOT as expected" });
+}
+
+fn finish() -> ! {
     crate::println!("talaria: arm64 phases 1-3(a) stop here — the kernel above arch/ is not compiled for this target yet (docs/ARM64-PLAN.md §5)");
     cpu::halt_forever()
 }
@@ -297,5 +376,7 @@ fn movz(rd: u32, imm16: u32) -> u32 { 0xD280_0000 | (imm16 & 0xFFFF) << 5 | (rd 
 fn cmp_imm(imm: u32) -> u32 { 0xF100_001F | (imm & 0xFFF) << 10 }
 /// `b.ne .+4*words`
 fn b_ne(words: u32) -> u32 { 0x5400_0001 | (words & 0x7FFFF) << 5 }
+/// `movk x<rd>, #imm16, lsl #(16*hw)`
+fn movk(rd: u32, imm16: u32, hw: u32) -> u32 { 0xF280_0000 | (hw & 3) << 21 | (imm16 & 0xFFFF) << 5 | (rd & 31) }
 /// `brk #imm16`
 fn brk(imm16: u32) -> u32 { 0xD420_0000 | (imm16 & 0xFFFF) << 5 }
