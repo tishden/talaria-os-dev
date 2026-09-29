@@ -50,6 +50,17 @@ jobs:
       - name: Clippy
         working-directory: kernel
         run: cargo clippy -Zjson-target-spec --release --no-default-features --target aarch64-talaria.json -- -D warnings
+      # The bring-up's gate under TCG (docs/ARM64-PLAN.md §6): deterministic, so a hosted
+      # runner can judge it. The raw Image needs an AArch64 objcopy; QEMU comes from the
+      # stand image (the same Fedora 40 pin as the x86 stand).
+      - name: AArch64 objcopy and the arm64 stand image
+        run: |
+          sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
+          docker build -t talaria-qemu-aarch64 -f services/docker/Dockerfile.qemu-aarch64 services/docker
+      - name: The raw Image
+        run: kernel/build-aarch64.sh
+      - name: The bring-up gate (QEMU virt, TCG, 4 cores)
+        run: kernel/test-aarch64.sh
 
   kernel-full:
     name: kernel (with selftest binaries)
