@@ -293,7 +293,7 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
         // a small value meant exactly one thing — `%fs:0` had read as garbage.
         // To see that, someone else's binary had to be disassembled; one
         // number in the crash line answers the same question at once.
-        let fsb = unsafe { crate::syscall::rdmsr(0xC000_0100) };
+        let fsb = unsafe { super::cpu::rdmsr(0xC000_0100) };
         // READ ONLY THROUGH THE TABLES. Dereferencing `fs:0` directly is impossible: if
         // FS points into unmapped memory (and that is exactly what we suspect), the result is
         // AN ERROR INSIDE THE ERROR HANDLER, that is a double one and the machine's death

@@ -82,19 +82,7 @@ pub fn try_read(addr: u64, need_user: bool) -> Option<u64> {
     unsafe {
         core::ptr::write_volatile(hit_slot(cpu), 0);
         let s = fixup_slot(cpu);
-        core::arch::asm!(
-            "lea {t}, [rip + 2f]",   // where to return if the load fails
-            "mov [{s}], {t}",
-            "xor {v:e}, {v:e}",      // on the failed path the value must be zero
-            "mov {v}, [{a}]",
-            "2:",
-            "mov qword ptr [{s}], 0",
-            t = out(reg) _,
-            s = in(reg) s,
-            v = out(reg) v,
-            a = in(reg) addr,
-            options(nostack),
-        );
+        v = crate::arch::unwind::guarded_load(addr, s);
         if core::ptr::read_volatile(hit_slot(cpu)) != 0 { return None; }
     }
     Some(v)

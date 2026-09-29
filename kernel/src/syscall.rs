@@ -428,27 +428,8 @@ fn path_eq_prefix(ptr: u64, pat: &[u8]) -> bool {
 }
 const HEAP_FRAMES: u64 = 32768; // a 128 MB heap for brk (for large C++ software)
 
-const MSR_EFER: u32 = 0xC000_0080;
-const MSR_STAR: u32 = 0xC000_0081;
-const MSR_LSTAR: u32 = 0xC000_0082;
-const MSR_FMASK: u32 = 0xC000_0084;
 
-/// # Safety
-/// S4: it reads a model-specific register of THIS core; the caller must know the
-/// register exists on this CPU (an unknown MSR is a #GP).
-pub unsafe fn rdmsr(msr: u32) -> u64 {
-    let (lo, hi): (u32, u32);
-    core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nostack, preserves_flags));
-    (hi as u64) << 32 | lo as u64
-}
-/// # Safety
-/// S4: it writes a model-specific register of THIS core. The caller must know the
-/// register and the value — a wrong MSR is a #GP at best and a silently different
-/// machine at worst.
-unsafe fn wrmsr(msr: u32, val: u64) {
-    core::arch::asm!("wrmsr", in("ecx") msr, in("eax") val as u32, in("edx") (val >> 32) as u32,
-        options(nostack, preserves_flags));
-}
+use crate::arch::cpu::{rdmsr, wrmsr};
 
 /// The frame of a syscall's arguments (the push order in the stub).
 ///
@@ -460,20 +441,10 @@ pub struct Frame { pub nr: u64, pub a1: u64, pub a2: u64, pub a3: u64, pub a4: u
 /// Set up SYSCALL: STAR (the selectors), LSTAR (the handler), FMASK, EFER.SCE.
 /// kcs/kss are the kernel CS/SS; STAR[63:48] sets the user selectors for sysret.
 pub fn init() {
-    unsafe extern "C" { fn syscall_entry(); }
     // SAFETY: S4 — the SYSCALL MSRs of THIS core (STAR/LSTAR/FMASK, EFER.SCE). They are
     // armed once per core, before it ever enters ring 3, so nothing is using them yet.
     unsafe {
-        // STAR: [47:32]=the kernel CS (SS=+8); [63:48]=the base for the sysret user (CS=+16, SS=+8)
-        // GDT (user.rs): 0x08 kcode, 0x10 kdata, 0x18 ucode32, 0x20 udata, 0x28 ucode64
-        // sysret: user CS = 0x18+16=0x28 (|3), SS = 0x18+8=0x20 (|3). STAR[63:48]=0x18|3=0x1B
-        let star: u64 = (0x1Bu64 << 48) | (0x08u64 << 32);
-        wrmsr(MSR_STAR, star);
-        wrmsr(MSR_LSTAR, syscall_entry as *const () as u64);
-        wrmsr(MSR_FMASK, 0x200); // clear IF at the entry into a syscall
-        let efer: u32;
-        core::arch::asm!("rdmsr", in("ecx") MSR_EFER, out("eax") efer, out("edx") _);
-        wrmsr(MSR_EFER, (efer | 1) as u64); // SCE
+        crate::arch::syscall_entry::init_msrs();
         // The common brk heap is allocated ONCE (restarts of the workload by the supervisor
         // reuse the region — without a leak of 128 MB per restart); brk is reset to the base.
         let mut hb = HEAP_BASE.load(Ordering::SeqCst);
@@ -1752,7 +1723,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         // SAFETY: S4 — `sti; hlt; cli` on THIS core: `rt_sigsuspend` waits for a signal, and
         // the window with interrupts open is exactly one instruction wide, so a signal that
         // arrives cannot be missed between the check above and the `hlt`.
-        130 => { if crate::proc::sig_pending() { (-4i64) as u64 } else { unsafe { core::arch::asm!("sti; hlt; cli", options(nostack, preserves_flags)); }
+        130 => { if crate::proc::sig_pending() { (-4i64) as u64 } else { unsafe { crate::arch::cpu::irq_enable_halt_disable(); }
             (-4i64) as u64 } } // rt_sigsuspend
         273 => 0, // set_robust_list -> ok (sigaltstack is implemented above)
         334 => ENOSYS, // rseq: not supported (glibc switches rseq off at an ENOSYS; a "success" without updating the area would break sched_getcpu)
@@ -2433,7 +2404,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         }
         // SAFETY: S4 — `pause`: as `rt_sigsuspend` above, the interrupt window is one
         // instruction wide, so a signal cannot slip between the check and the `hlt`.
-        34 => { loop { if crate::proc::sig_pending() { return (-4i64) as u64; } unsafe { core::arch::asm!("sti; hlt; cli", options(nostack, preserves_flags)); }
+        34 => { loop { if crate::proc::sig_pending() { return (-4i64) as u64; } unsafe { crate::arch::cpu::irq_enable_halt_disable(); }
             } } // pause — until a signal
         1000 => { // talaria_fastmap -> the base of the shared region (ring 3's access is explicit, in this AS)
             let r = crate::fastpath::region();
@@ -2770,15 +2741,7 @@ pub fn deliver_exception_signal(f: &mut crate::idt::ExcFrame, sig: u64, cr2: u64
 /// So here we do not return into the syscall's stub but put a full set of registers
 /// and a hardware iret frame on the stack ourselves — exactly as Linux does.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn sig_iret(regs: *const u64) -> ! {
-    core::arch::asm!(
-        "mov rsp, rdi",
-        "pop rax", "pop rbx", "pop rcx", "pop rdx", "pop rsi", "pop rdi", "pop rbp",
-        "pop r8", "pop r9", "pop r10", "pop r11", "pop r12", "pop r13", "pop r14", "pop r15",
-        "iretq",
-        in("rdi") regs, options(noreturn)
-    );
-}
+unsafe extern "C" fn sig_iret(regs: *const u64) -> ! { crate::arch::syscall_entry::sig_iret(regs) }
 
 /// rt_sigreturn: the restorer calls syscall(15), rsp = the frame's base (after the ret).
 fn sigreturn(f: &mut Frame) -> u64 {
@@ -2929,60 +2892,4 @@ fn sysv_shmctl(id: u64, cmd: u64, buf: u64) -> i64 {
     }
 }
 
-core::arch::global_asm!(r#"
-.section .text
-.global syscall_entry
-syscall_entry:
-    /* syscall: nr=rax, args=rdi,rsi,rdx,r10,r8,r9; rcx=ret rip, r11=ret rflags. IF=0 (FMASK).
-       Per-CPU through GS.base (percpu.rs, always the kernel's): gs:0=the ursp scratch, gs:8=kstack_top
-       (= this core's TSS.rsp0), gs:16=sig_newrsp. We switch to the task's kernel stack. */
-    mov %rsp, %gs:0
-    mov %gs:8, %rsp
-    pushq %gs:0                 /* Frame.ursp */
-    push %r15           /* callee-saved: it is inherited by a fork child / a signal's frame */
-    push %r14
-    push %r13
-    push %r12
-    push %rbp
-    push %rbx           /* save the callee-saved rbx (we use it for the align) */
-    push %r11           /* ret rflags */
-    push %rcx           /* ret rip */
-    push %r9            /* a6 */
-    push %r8            /* a5 */
-    push %r10           /* a4 */
-    push %rdx           /* a3 */
-    push %rsi           /* a2 */
-    push %rdi           /* a1 */
-    push %rax           /* nr  -> the top = &Frame */
-    mov %rsp, %rdi      /* rust_syscall(&Frame) */
-    mov %rsp, %rbx      /* save the frame's pointer */
-    sub $512, %rsp
-    and $-16, %rsp      /* the fxsave area (16-aligned) = (rbx-512)&~15 */
-    fxsave (%rsp)       /* the user's SSE/x87 state: the kernel is built with SSE and clobbers xmm */
-    mov %rsp, %r12
-    call rust_syscall
-    fxrstor (%r12)      /* restore (or the state substituted by sigreturn/the signal delivery) */
-    mov %rbx, %rsp      /* restore the frame; rax = the return value */
-    add $8, %rsp        /* discard the nr */
-    pop %rdi
-    pop %rsi
-    pop %rdx
-    pop %r10
-    pop %r8
-    pop %r9
-    pop %rcx            /* ret rip */
-    pop %r11            /* ret rflags */
-    pop %rbx
-    pop %rbp
-    pop %r12
-    pop %r13
-    pop %r14
-    pop %r15
-    cmpq $0, %gs:16             /* the signal's delivery / sigreturn: substitute the user rsp */
-    je 1f
-    mov %gs:16, %rsp
-    movq $0, %gs:16
-    jmp 2f
-1:  pop %rsp            /* back onto the user stack (Frame.ursp) */
-2:  sysretq
-"#, options(att_syntax));
+// `syscall_entry` — the SYSCALL stub — is `arch::syscall_entry` (x86-64 asm).
