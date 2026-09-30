@@ -418,7 +418,22 @@ the others land in a panic that prints `ESR`. The frame pushed by the stubs is
 `x0..x30, sp_el0, elr_el1, spsr_el1, esr_el1, far_el1` (37 words) — it plays
 `ExcFrame` for `idt::handle` AND `Frame` for `rust_syscall`: on arm64 they can
 be ONE structure, which removes today's two layouts (`idt::ExcFrame`,
-`syscall::Frame`, and `gdb::Frame` that mirrors them). The sync-exception
+`syscall::Frame`, and `gdb::Frame` that mirrors them).
+
+*Done on the x86 side (2026-09-30):* `syscall::Frame` is now
+`arch::syscall_entry::Frame`, and the shared `syscall.rs` reads it by NEUTRAL names
+only — `nr`, `a1..a6`, `pc`, `flags`, `usp`; the callee-saved registers (rbx, rbp,
+r12..r15 on x86) are read by nobody outside `arch::signal`, which holds the whole
+of the `ucontext`/`gregs` layout, the fork child's and the core dump's register
+picks, and the `rt_sigreturn` restore (`arch/x86_64/signal.rs`). The dispatcher's
+copy with translated arguments is `Frame::with_args`. So the arm64 `Frame` is a
+struct with the SAME leading field names, and its SVC stub simply stores in that
+order: x8 → `nr`, x0..x5 → `a1..a6`, `elr_el1` → `pc`, `spsr_el1` → `flags`,
+x19..x29 → the callee-saved slots, `sp_el0` → `usp`, and the rest of the file
+(x6, x7, x9..x18, x30) in trailing slots — the Linux arm64 contract preserves EVERY
+register but x0 across `svc` (musl's wrapper clobbers only x0 and memory), so a
+full save is owed anyway, and only the ORDER is the port's choice. The signal
+delivery's writes into `a1..a3` and `pc` then land in x0..x2 and `elr` for free. The sync-exception
 handler dispatches on `ESR.EC`: `0x15` SVC → `rust_syscall`; `0x20/0x24` data
 and instruction aborts from EL0 → the page-fault path with `FAR` as CR2 and the
 `ISS.WnR` bit as the write flag; `0x07` FP/SIMD trap (if lazy FPU is ever
@@ -798,10 +813,10 @@ Items 1-3 are in the tree; item 4 is the open design work.
 3. **The timing lines already printed are made judgeable under KVM** — done:
    `TAL_KVM=1 kernel/test-aarch64.sh` requires 49-51 ticks in 50 ms (TCG gives 48-49),
    and the gate runs the four probes as four more boots (36 assertions in all).
-4. **The dev-box work that does not need the stand goes on in parallel**: the
-   `arch/x86_64/signal.rs` extraction (the x86 `ucontext`/`gregs`, `fork_regs`,
-   `exit_uregs`, `sigreturn`) and the neutral `Frame` — phase 3's design item, with its
-   own x86 regression.
+4. **The dev-box work that does not need the stand goes on in parallel** — done
+   while the stand came up: the `arch/x86_64/signal.rs` extraction (the x86
+   `ucontext`/`gregs`, `fork_regs`, `exit_uregs`, `sigreturn`, the fault-kind decode)
+   and the neutral `Frame` (§4.5), each with its own x86 regression.
 
 ### 9.2. On the stand (one bring-up, 3-4 hours)
 

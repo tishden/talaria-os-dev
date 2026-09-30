@@ -431,13 +431,11 @@ const HEAP_FRAMES: u64 = 32768; // a 128 MB heap for brk (for large C++ software
 
 use crate::arch::cpu::{rdmsr, wrmsr};
 
-/// The frame of a syscall's arguments (the push order in the stub).
-///
-/// The frame lies on the task's KERNEL stack (the stub switches rsp away from the
-/// user stack); `ursp` is the user's rsp at the entry.
-#[repr(C)]
-pub struct Frame { pub nr: u64, pub a1: u64, pub a2: u64, pub a3: u64, pub a4: u64, pub a5: u64, pub a6: u64, pub rip: u64, pub rflags: u64, pub rbx: u64,
-    pub rbp: u64, pub r12: u64, pub r13: u64, pub r14: u64, pub r15: u64, pub ursp: u64 }
+/// The frame of a syscall's arguments: what the entry stub saved, in the stub's push order.
+/// The struct is the architecture's (`arch::syscall_entry::Frame`); the shared code here reads
+/// the number, the six arguments, `pc`, `flags` and `usp` — the rest (the callee-saved
+/// registers a fork child and a signal frame inherit) only through `arch::signal`.
+pub use crate::arch::syscall_entry::Frame;
 /// Set up SYSCALL: STAR (the selectors), LSTAR (the handler), FMASK, EFER.SCE.
 /// kcs/kss are the kernel CS/SS; STAR[63:48] sets the user selectors for sysret.
 pub fn init() {
@@ -1050,7 +1048,7 @@ fn stop_if_dead(fr: &Frame) {
     if !crate::sched::task_alive(t) {
         // Where the thread stood IN USER SPACE — for a core dump: its saved
         // context after this point is the exit path in the kernel rather than its own code.
-        crate::sched::set_exit_uregs(t, [fr.rip, fr.ursp, fr.rbp, fr.rbx, fr.r12, fr.r13, fr.r14, fr.r15, fr.rflags, fr.nr]);
+        crate::sched::set_exit_uregs(t, crate::arch::signal::exit_uregs(fr));
         crate::sched::exit_current_code(crate::sched::exit_code_of(t));
     }
 }
@@ -1066,7 +1064,7 @@ extern "C" fn rust_syscall(f: *mut Frame) -> u64 {
         // the diagnostics have no place in the hot path that they themselves measure.
         SYS_COUNT[fr.nr as usize].fetch_add(1, Ordering::Relaxed);
         let t0 = crate::tsc::rdtsc();
-        LAST_SYS[crate::sched::current_id()].store((fr.nr << 48) | (fr.rip & 0xFFFF_FFFF_FFFF), Ordering::Relaxed);
+        LAST_SYS[crate::sched::current_id()].store((fr.nr << 48) | (fr.pc & 0xFFFF_FFFF_FFFF), Ordering::Relaxed);
         LAST_ARG0[crate::sched::current_id()].store(fr.a1, Ordering::Relaxed);
         let r = rust_syscall_inner(fr);
         SYS_TICKS[fr.nr as usize].fetch_add(crate::tsc::rdtsc().wrapping_sub(t0), Ordering::Relaxed);
@@ -1076,7 +1074,7 @@ extern "C" fn rust_syscall(f: *mut Frame) -> u64 {
         return r;
     }
     let me = crate::sched::current_id();
-    LAST_SYS[me].store((fr.nr << 48) | (fr.rip & 0xFFFF_FFFF_FFFF), Ordering::Relaxed);
+    LAST_SYS[me].store((fr.nr << 48) | (fr.pc & 0xFFFF_FFFF_FFFF), Ordering::Relaxed);
     LAST_ARG0[me].store(fr.a1, Ordering::Relaxed);
     LAST_SYS_T0[me].store(crate::tsc::rdtsc(), Ordering::Relaxed);
     let r = rust_syscall_inner(fr);
@@ -1114,8 +1112,7 @@ fn rust_syscall_inner(raw: &mut Frame) -> u64 {
         return e;
     }
     // the translation user fd -> an internal handle (the process's fd table)
-    let mut g = Frame { nr, a1: args[0], a2: args[1], a3: args[2], a4: args[3], a5: args[4], a6: args[5], rip: raw.rip, rflags: raw.rflags, rbx: raw.rbx,
-        rbp: raw.rbp, r12: raw.r12, r13: raw.r13, r14: raw.r14, r15: raw.r15, ursp: raw.ursp };
+    let mut g = raw.with_args(nr, args);
     if a1_is_fd(nr) { g.a1 = crate::proc::tr(args[0]) as u64; }
     if nr == 233 { g.a3 = crate::proc::tr(args[2]) as u64; }
     if nr == 9 && args[3] & 0x20 == 0 { g.a5 = crate::proc::tr(args[4]) as u64; }
@@ -1147,7 +1144,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         if left > 0 {
             IRR_TRACE.store(left - 1, Ordering::Relaxed);
             crate::println!("a12: the syscall {} rflags={:#x} (IF={}) IRR={} ISR={} the timer's ticks={}",
-                f.nr, f.rflags, (f.rflags >> 9) & 1,
+                f.nr, f.flags, (f.flags >> 9) & 1,
                 crate::smp::irr_pending(crate::idt::TIMER_VECTOR as u8),
                 crate::smp::isr_pending(crate::idt::TIMER_VECTOR as u8),
                 crate::sched::HW_TICKS.load(Ordering::Relaxed));
@@ -1334,11 +1331,10 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 crate::sched::set_comm(t, &name[..n]);
                 if let Some(cpu) = crate::affinity::on_set_name(t, &name[..n]) {
                     if cpu != crate::percpu::cpu_id() && crate::sched::sched_cpu(cpu) {
-                        let mut gp = [0u64; 15];
-                        gp[1] = f.rbx; gp[6] = f.rbp; gp[11] = f.r12; gp[12] = f.r13; gp[13] = f.r14; gp[14] = f.r15;
+                        let gp = crate::arch::signal::callee_saved(f);
                         // SAFETY: S3 — `sched::migrate_current_to`'s own contract; here it holds:
                         // the current task, on its kernel stack, with its CR3 active.
-                        unsafe { crate::sched::migrate_current_to(cpu, f.rip, f.ursp, f.rflags, gp, fpu_area(raw)); }
+                        unsafe { crate::sched::migrate_current_to(cpu, f.pc, f.usp, f.flags, gp, fpu_area(raw)); }
                     }
                 }
             }
@@ -1902,13 +1898,12 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             let want = (mask & crate::percpu::ONLINE.load(Ordering::SeqCst)).trailing_zeros() as usize;
             if cur_cpu != 0 || want == 0 { return 0; }     // a move only from the BSP (a PoC)
             // The context of the return from THIS syscall (rax=0) moves onto the AP; the callee-saved ones come from the Frame.
-            let mut gp = [0u64; 15];
-            gp[1] = f.rbx; gp[6] = f.rbp; gp[11] = f.r12; gp[12] = f.r13; gp[13] = f.r14; gp[14] = f.r15;
+            let gp = crate::arch::signal::callee_saved(f);
             // IMPORTANT: fpu_area comes from the REAL frame (raw) rather than from the copy g (dispatch
             // passes a copy for the fd translation; the address arithmetic over it is garbage)
             // SAFETY: S3 — `sched::migrate_current_to`'s own contract; here it holds: the current
             // task, on its kernel stack, with its CR3 active.
-            unsafe { crate::sched::migrate_current_to(want, f.rip, f.ursp, f.rflags, gp, fpu_area(raw)); }
+            unsafe { crate::sched::migrate_current_to(want, f.pc, f.usp, f.flags, gp, fpu_area(raw)); }
         }
         204 => { // sched_getaffinity(pid, len, mask*) — the cores where the thread IS ALLOWED to live
             // This is what the workload counts nproc/hardware_concurrency by and starts
@@ -2225,11 +2220,11 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         57 => { // fork — A PROCESS with a full copy of the address space
             if !THREADED.load(Ordering::SeqCst) { return (-38i64) as u64; } // only under the scheduler (ENOSYS)
             let child_cr3 = crate::paging::fork_cow_space(crate::paging::current_cr3()); // a COW clone
-            let parent_user_rsp = raw.ursp; // the user's rsp at the entry
+            let parent_user_rsp = raw.usp; // the user's rsp at the entry
             let kstack = crate::sched::alloc_kstack().unwrap();
             // SAFETY: S3 — `sched::spawn_process_regs`'s own contract; here it holds: the current
             // task, on its kernel stack, with its CR3 active.
-            let idx = unsafe { crate::sched::spawn_process_regs(f.rip, parent_user_rsp, f.rflags, kstack, child_cr3, fork_regs(f)) };
+            let idx = unsafe { crate::sched::spawn_process_regs(f.pc, parent_user_rsp, f.flags, kstack, child_cr3, fork_regs(f)) };
             // The task table's ceiling is AN HONEST REFUSAL (as with a clone thread below).
             // Previously fork went past the check and wrote past the boundary of the kernel's arrays.
             if idx == usize::MAX {
@@ -2251,7 +2246,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             // child inherits it.
             crate::sched::set_fsbase(idx, unsafe { rdmsr(0xC000_0100) }); // the parent's TLS
             crate::sched::set_fpu(idx, fpu_area(raw)); // the parent's FPU/SSE state
-            crate::fr::record(crate::fr::USER, f.rip); // the child starts with rax=0 at the return point
+            crate::fr::record(crate::fr::USER, f.pc); // the child starts with rax=0 at the return point
             crate::sched::publish(idx); // the task is assembled entirely — now it may be scheduled
             (idx + 1) as u64 // to the parent -> the child's pid
         }
@@ -2260,11 +2255,11 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             if flags & 0x0000_0100 == 0 { // there is no CLONE_VM -> this is a fork (musl's fork = a clone(SIGCHLD))
                 if !THREADED.load(Ordering::SeqCst) { return (-38i64) as u64; }
                 let child_cr3 = crate::paging::fork_cow_space(crate::paging::current_cr3());
-                let cstack = if f.a2 != 0 { f.a2 } else { raw.ursp }; // child_stack or the parent's rsp
+                let cstack = if f.a2 != 0 { f.a2 } else { raw.usp }; // child_stack or the parent's rsp
                 let kstack = crate::sched::alloc_kstack().unwrap();
                 // SAFETY: S3 — `sched::spawn_process_regs`'s own contract; here it holds: the
                 // current task, on its kernel stack, with its CR3 active.
-                let idx = unsafe { crate::sched::spawn_process_regs(f.rip, cstack, f.rflags, kstack, child_cr3, fork_regs(f)) };
+                let idx = unsafe { crate::sched::spawn_process_regs(f.pc, cstack, f.flags, kstack, child_cr3, fork_regs(f)) };
                 if idx == usize::MAX {   // the task table's ceiling — an EAGAIN, see fork(57)
                     crate::mem::free_contig(kstack - crate::sched::KSTACK_PAGES * 4096, crate::sched::KSTACK_PAGES);
                     crate::sched::queue_dead_space(child_cr3);
@@ -2284,7 +2279,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
                 // dispatch.
                 if flags & 0x0100_0000 != 0 && f.a4 != 0 { unsafe { core::ptr::write(f.a4 as *mut i32, 0); } } // CHILD_SETTID -> 0 in the child (its AS)
-                crate::fr::record(crate::fr::USER, f.rip);
+                crate::fr::record(crate::fr::USER, f.pc);
                 crate::sched::publish(idx);
                 return tid as u64;
             }
@@ -2298,7 +2293,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             let mut gp = [0u64; 15]; gp[8] = func; // rax=0 (the return in the child), r9=func
             // SAFETY: S3 — `sched::spawn_user_ctx`'s own contract; here it holds: the current task,
             // on its kernel stack, with its CR3 active.
-            let idx = unsafe { crate::sched::spawn_user_ctx(f.rip, cstack, f.rflags, fsbase, kstack, gp) };
+            let idx = unsafe { crate::sched::spawn_user_ctx(f.pc, cstack, f.flags, fsbase, kstack, gp) };
             // WHAT MUST BE RETURNED IS THE WHOLE STACK AND FROM ITS BASE. `alloc_kstack` returns
             // THE TOP (`base + KSTACK_PAGES*4096`), while here FOUR pages were freed
             // at the address "the top minus 16 KB" — that is, a foreign
@@ -2426,22 +2421,10 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
 }
 
 
-/// The fork child's registers in the order [rax,rbx,rcx,rdx,rsi,rdi,rbp,r8..r15]: a copy of the parent's at the entry
-/// into the syscall (rax=0 — the fork's return in the child; rcx/r11 = rip/rflags as with a sysret).
-fn fork_regs(f: &Frame) -> [u64; 15] {
-    [0, f.rbx, f.rip, f.a3, f.a2, f.a1, f.rbp, f.a5, f.a6, f.a4, f.rflags, f.r12, f.r13, f.r14, f.r15]
-}
 // ── the signals: the delivery at the exit from a syscall and rt_sigreturn ─────────
-// The new user rsp for the sysret stub and the ursp scratch are per-CPU (percpu.rs, gs:16/gs:0).
-// A siginfo(128) + a ucontext(936) + AN XSAVE AREA (1024 @ +1088, aligned to 64) + headroom.
-// The area is exactly XSAVE rather than fxsave: the workload has AVX enabled, and a signal handler
-// is free to clobber YMM entirely. While only the low 128 bits lay in the frame, the JVM's JIT code
-// returned from a handler with FOREIGN upper halves of the registers — a silent
-// corruption of data that surfaced as a crash of the garbage collector during the walk over the roots.
-const SIGFRAME: u64 = 2560;
-const SIGFPU_OFF: u64 = 1088; // the offset of the XSAVE area in the frame (the base is a multiple of 64)
-/// The fxsave area of the current syscall (the stub puts it under the frame: (rbx-512)&~15).
-fn fpu_area(f: &Frame) -> u64 { ((f as *const Frame as u64) - 512) & !0xF }
+// The LAYOUT of the frame (siginfo, ucontext, gregs, the FPU area) and the register names are
+// the architecture's, in `arch::signal`; here is the policy — the same on x86-64 and arm64.
+use crate::arch::signal::{fork_regs, fpu_area, SIGFRAME, SIGFRAME_ALIGN, SIGINFO_SIZE, UC_SIGMASK, UC_STACK};
 /// The signals whose default action is "terminate AND WRITE A DUMP"
 /// (Linux: SIGQUIT/ILL/ABRT/FPE/SEGV/BUS/SYS/TRAP/XCPU/XFSZ). For the rest
 /// (for example SIGTERM, SIGKILL, SIGINT) no dump is written — the process was killed from the outside,
@@ -2481,18 +2464,7 @@ fn deliver_signals(f: &mut Frame, ret: u64) -> u64 {
                     crate::sched::exit_all(sig as i32);
                     crate::sched::drain_proc(1000);
                     if fatal_dumps(sig) {
-                        // A syscall's frame does not carry all the registers (the caller-saved ones
-                        // are clobbered by the call), so we assemble an ExcFrame from what
-                        // there is: rip/rsp/rbp/rflags and the callee-saved ones. For
-                        // the analysis of the memory and the stack that is enough, while lying
-                        // with garbage in the other fields is not allowed — they are zeroes.
-                        let ef = crate::idt::ExcFrame {
-                            r15: f.r15, r14: f.r14, r13: f.r13, r12: f.r12,
-                            r11: 0, r10: 0, r9: 0, r8: 0,
-                            rbp: f.rbp, rdi: 0, rsi: 0, rdx: 0, rcx: 0, rbx: f.rbx, rax: 0,
-                            vec: 0, err: 0, rip: f.rip, cs: 0x2B, rflags: f.rflags,
-                            rsp: f.ursp, ss: 0x23,
-                        };
+                        let ef = crate::arch::signal::excframe_of_syscall(f);
                         crate::coredump::dump_process(&ef, sig as u32);
                     }
                     crate::proc::exit_cleanup(p);
@@ -2504,14 +2476,14 @@ fn deliver_signals(f: &mut Frame, ret: u64) -> u64 {
         // the frame goes on the USER stack below the red zone (the kernel executes the syscall on its own kernel stack; a write into
         // a COW page of the stack will give a ring-0 #PF -> a cow_fault by CR0.WP)
         let cur = crate::sched::current_id();
-        let usp = if flags & 0x0800_0000 != 0 && altstack_top(cur) != 0 { altstack_top(cur) } else { f.ursp };
-        let base = (usp - 128 - SIGFRAME) & !0x3F;
+        let usp = if flags & 0x0800_0000 != 0 && altstack_top(cur) != 0 { altstack_top(cur) } else { f.usp };
+        let base = (usp - 128 - SIGFRAME) & !(SIGFRAME_ALIGN - 1);
         let sp = base - 8;
         if !crate::paging::user_writable(sp, SIGFRAME + 8) {
             crate::println!("[signal] there is no room for the frame of the signal {} at t{} (rsp={:#x}) — it is skipped", sig, cur, usp);
             continue;
         }
-        let si = base; let uc = base + 128;
+        let si = base; let uc = base + SIGINFO_SIZE;
         // SAFETY: S1 — the caller hands in an address of the process's memory that `uaccess::gate`
         // has already validated.
         unsafe {
@@ -2519,29 +2491,19 @@ fn deliver_signals(f: &mut Frame, ret: u64) -> u64 {
             core::ptr::write_unaligned(sp as *mut u64, restorer);
             core::ptr::write_unaligned(si as *mut i32, sig as i32);            // si_signo
             core::ptr::write_unaligned((si + 8) as *mut i32, 0);               // si_code SI_USER
-            let g = (uc + 40) as *mut u64; // gregs
             let t = crate::sched::current_id();
-            *g.add(0) = f.a5; *g.add(1) = f.a6; *g.add(2) = f.a4; *g.add(3) = f.rflags;
-            *g.add(4) = f.r12; *g.add(5) = f.r13; *g.add(6) = f.r14; *g.add(7) = f.r15; *g.add(10) = f.rbp;
-            *g.add(8) = f.a1; *g.add(9) = f.a2; *g.add(11) = f.rbx; *g.add(12) = f.a3; *g.add(13) = ret; *g.add(14) = f.rip;
-            *g.add(15) = usp; *g.add(16) = f.rip; *g.add(17) = f.rflags; *g.add(18) = 0x2b;
-            // SA_RESTART: an interrupted (-EINTR) restartable syscall is repeated after the handler (rip-2 = the `syscall`, rax = the nr)
-            if ret as i64 == -4 && flags & 0x1000_0000 != 0 && matches!(f.nr, 0 | 1 | 17 | 18 | 19 | 20 | 43 | 288 | 61 | 44 | 45 | 46 | 47 | 42) {
-                *g.add(13) = f.nr; *g.add(16) = f.rip - 2;
-            }
+            // SA_RESTART: an interrupted (-EINTR) restartable syscall is repeated after the handler
+            // (the return lands on the `syscall` instruction itself, the number back in the result register)
+            let restart = ret as i64 == -4 && flags & 0x1000_0000 != 0 && matches!(f.nr, 0 | 1 | 17 | 18 | 19 | 20 | 43 | 288 | 61 | 44 | 45 | 46 | 47 | 42);
             let old_mask = crate::proc::sigmask_of(t);
-            *g.add(21) = old_mask;
-            core::ptr::write_unaligned((uc + 296) as *mut u64, old_mask); // uc_sigmask
+            crate::arch::signal::write_syscall_context(uc, f, ret, usp, restart, old_mask);
+            core::ptr::write_unaligned((uc + UC_SIGMASK) as *mut u64, old_mask); // uc_sigmask
             let mut nm = old_mask | mask; if flags & 0x4000_0000 == 0 { nm |= 1u64 << (sig - 1); } // !SA_NODEFER
             crate::proc::set_sigmask(t, nm);
             // The FPU/SSE/AVX state of the interrupted code -> into the frame (uc_mcontext.fpregs)
-            let fp = base + SIGFPU_OFF;
-            crate::sched::fpu_save(fp as *mut u8);
-            core::ptr::copy_nonoverlapping(fpu_area(f) as *const u8, fp as *mut u8, 512);
-            core::ptr::write_unaligned((uc + 224) as *mut u64, fp); // fpregs
-            crate::percpu::set_sig_newrsp(sp);
+            crate::arch::signal::write_fpu(base, uc, fpu_area(f));
         }
-        f.a1 = sig; f.a2 = si; f.a3 = uc; f.rip = h;
+        crate::arch::signal::enter_handler_syscall(f, sig, si, uc, h, sp);
         return ret;
     }
 }
@@ -2626,11 +2588,12 @@ fn sigtrace(f: &crate::idt::ExcFrame, sig: u64, cr2: u64, t: usize, delivered: b
     SIGTRACE.store(left - 1, Relaxed);
     let nm = crate::sched::comm(t); let nl = crate::sched::comm_len(t);
     let (present, rw, us, _) = crate::paging::query(cr2);
+    let (_pf, no_page, write, _ifetch) = crate::arch::signal::fault_kind(f);
     crate::println!("[signal] the signal {} to the thread t{} \"{}\" on the core {}: the address {:#x}, the rip {:#x}, the err {:#x} ({}, {}) -> {}",
         sig, t, core::str::from_utf8(&nm[..nl]).unwrap_or("?"), crate::percpu::cpu_id(),
-        cr2, f.rip, f.err,
-        if f.err & 1 == 0 { "there is no page" } else { "a violation of the rights" },
-        if f.err & 2 != 0 { "a write" } else { "a read" },
+        cr2, crate::arch::signal::exc_pc(f), crate::arch::signal::fault_err(f),
+        if no_page { "there is no page" } else { "a violation of the rights" },
+        if write { "a write" } else { "a read" },
         if delivered { "to the handler" } else { "FATALLY" });
     // What the kernel sees in the tables RIGHT NOW. A divergence with err is the main evidence:
     // "there is no page" at the processor and present with us mean a stale TLB.
@@ -2649,11 +2612,12 @@ pub fn deliver_exception_signal(f: &mut crate::idt::ExcFrame, sig: u64, cr2: u64
             FATALTRACE.store(left - 1, Relaxed);
             // query returns (present, rw, us, EXECUTABLE) — the fourth one is NX-removed.
             let (present, _rw, _us, exec) = crate::paging::query(cr2);
+            let (_pf, no_page, write, ifetch) = crate::arch::signal::fault_kind(f);
             crate::println!("[fault] the signal {} to the thread t{}: the rip {:#x}, the address {:#x}, the err {:#x} ({}{}{}) -> to the workload's handler",
-                sig, t, f.rip, cr2, f.err,
-                if f.err & 1 == 0 { "there is no page" } else { "a violation of the rights" },
-                if f.err & 0x10 != 0 { ", an instruction fetch" } else if f.err & 2 != 0 { ", a write" } else { ", a read" },
-                if present && !exec && f.err & 0x10 != 0 { ", the page is NOT EXECUTABLE" } else { "" });
+                sig, t, crate::arch::signal::exc_pc(f), cr2, crate::arch::signal::fault_err(f),
+                if no_page { "there is no page" } else { "a violation of the rights" },
+                if ifetch { ", an instruction fetch" } else if write { ", a write" } else { ", a read" },
+                if present && !exec && ifetch { ", the page is NOT EXECUTABLE" } else { "" });
             crate::println!("[fault] the core {}, the task was running on c{}", crate::percpu::cpu_id(), crate::sched::cpu_of(t));
             crate::sched::dump_push_log();
         }
@@ -2663,8 +2627,9 @@ pub fn deliver_exception_signal(f: &mut crate::idt::ExcFrame, sig: u64, cr2: u64
     if restorer == 0 { return false; }                          // without a restorer there is no return from the handler
     if crate::proc::sigmask_of(t) & (1u64 << (sig - 1)) != 0 { return false; } // it is blocked — that is fatal (as in Linux)
     let on_alt = flags & 0x0800_0000 != 0 && altstack_top(t) != 0; // SA_ONSTACK
-    let mut usp = if on_alt { altstack_top(t) } else { f.rsp };
-    let mut base = (usp - 128 - SIGFRAME) & !0x3F;
+    let user_sp = crate::arch::signal::exc_sp(f);
+    let mut usp = if on_alt { altstack_top(t) } else { user_sp };
+    let mut base = (usp - 128 - SIGFRAME) & !(SIGFRAME_ALIGN - 1);
     // The frame MUST LAND. If there is no room on the thread's stack (the typical case is
     // a stack overflow: below rsp the guard page begins), we try
     // the alternative stack even if the handler did not ask for SA_ONSTACK: there is nowhere
@@ -2677,16 +2642,16 @@ pub fn deliver_exception_signal(f: &mut crate::idt::ExcFrame, sig: u64, cr2: u64
             let nm = crate::sched::comm(t); let nl = crate::sched::comm_len(t);
             crate::println!("[signal] there is no room for the frame of the signal {} at the thread \"{}\" (t{}, rsp={:#x}, the alt stack={:#x}, the page at \
                 rsp: {}) — the signal is fatal",
-                sig, core::str::from_utf8(&nm[..nl]).unwrap_or("?"), t, f.rsp, alt,
-                match crate::paging::page_kind(f.rsp) { 0 => "none at all", 1 => "PROT_NONE (the workload's guard)", 2 => "a lazy reservation", _ => "an \
+                sig, core::str::from_utf8(&nm[..nl]).unwrap_or("?"), t, user_sp, alt,
+                match crate::paging::page_kind(user_sp) { 0 => "none at all", 1 => "PROT_NONE (the workload's guard)", 2 => "a lazy reservation", _ => "an \
                     ordinary one" });
             return false;
         }
         usp = alt;
-        base = (usp - 128 - SIGFRAME) & !0x3F;
+        base = (usp - 128 - SIGFRAME) & !(SIGFRAME_ALIGN - 1);
     }
     let sp = base - 8;
-    let si = base; let uc = base + 128;
+    let si = base; let uc = base + SIGINFO_SIZE;
     // SAFETY: S1 — the caller hands in an address of the process's memory that `uaccess::gate` has
     // already validated.
     unsafe {
@@ -2694,67 +2659,34 @@ pub fn deliver_exception_signal(f: &mut crate::idt::ExcFrame, sig: u64, cr2: u64
         core::ptr::write_unaligned(sp as *mut u64, restorer);
         core::ptr::write_unaligned(si as *mut i32, sig as i32);              // si_signo
         // si_code: for a #PF it is SEGV_MAPERR (there is no page) / SEGV_ACCERR (there are no rights)
-        let si_code: i32 = match sig { 11 if f.vec == 14 => if f.err & 1 != 0 { 2 } else { 1 },
-            4 => 2 /*ILL_ILLOPN*/, 8 => 1 /*FPE_INTDIV*/, _ => 0x80 /*SI_KERNEL*/ };
+        let (si_code, addr) = crate::arch::signal::exception_siginfo(f, sig, cr2);
         core::ptr::write_unaligned((si + 8) as *mut i32, si_code);
-        let addr = if f.vec == 14 { cr2 } else { f.rip };
         core::ptr::write_unaligned((si + 16) as *mut u64, addr);             // si_addr
-        let g = (uc + 40) as *mut u64;                                       // uc_mcontext.gregs
-        *g.add(0) = f.r8; *g.add(1) = f.r9; *g.add(2) = f.r10; *g.add(3) = f.r11;
-        *g.add(4) = f.r12; *g.add(5) = f.r13; *g.add(6) = f.r14; *g.add(7) = f.r15;
-        *g.add(8) = f.rdi; *g.add(9) = f.rsi; *g.add(10) = f.rbp; *g.add(11) = f.rbx;
-        *g.add(12) = f.rdx; *g.add(13) = f.rax; *g.add(14) = f.rcx; *g.add(15) = f.rsp;
-        *g.add(16) = f.rip; *g.add(17) = f.rflags; *g.add(18) = f.cs;
-        *g.add(19) = f.err; *g.add(20) = f.vec; *g.add(22) = cr2;            // ERR / TRAPNO / CR2
         let old_mask = crate::proc::sigmask_of(t);
-        *g.add(21) = old_mask;
-        core::ptr::write_unaligned((uc + 296) as *mut u64, old_mask);        // uc_sigmask
+        crate::arch::signal::write_exception_context(uc, f, cr2, old_mask);  // gregs + ERR/TRAPNO/CR2
+        core::ptr::write_unaligned((uc + UC_SIGMASK) as *mut u64, old_mask); // uc_sigmask
         // uc_stack (ss_sp/ss_flags/ss_size) — the JVM's handler reads it
-        core::ptr::write_unaligned((uc + 16) as *mut u64, ALT_SP[t]);
-        core::ptr::write_unaligned((uc + 24) as *mut i32, if on_alt { 1 } else { 0 });
-        core::ptr::write_unaligned((uc + 32) as *mut u64, ALT_SIZE[t]);
+        core::ptr::write_unaligned((uc + UC_STACK) as *mut u64, ALT_SP[t]);
+        core::ptr::write_unaligned((uc + UC_STACK + 8) as *mut i32, if on_alt { 1 } else { 0 });
+        core::ptr::write_unaligned((uc + UC_STACK + 16) as *mut u64, ALT_SIZE[t]);
         let mut nm = old_mask | mask;
         if flags & 0x4000_0000 == 0 { nm |= 1u64 << (sig - 1); } // !SA_NODEFER
         crate::proc::set_sigmask(t, nm);
-        // The full FPU/AVX state: xsave takes the LIVE registers (the upper halves of YMM
-        // the kernel does not touch — it is built without AVX), while the low 128 bits on top we copy
-        // from the stub's area: there they are "before" the entry into the kernel, while in the registers they are already ours.
-        let fp = base + SIGFPU_OFF;
-        crate::sched::fpu_save(fp as *mut u8);
-        core::ptr::copy_nonoverlapping(fpu as *const u8, fp as *mut u8, 512);
-        core::ptr::write_unaligned((uc + 224) as *mut u64, fp);              // uc_mcontext.fpregs
+        // The full FPU/AVX state of the interrupted code (uc_mcontext.fpregs)
+        crate::arch::signal::write_fpu(base, uc, fpu);
         if on_alt { ALT_ON[t] = true; }
     }
-    f.rdi = sig; f.rsi = si; f.rdx = uc;
-    f.rip = h; f.rsp = sp;
+    crate::arch::signal::enter_handler_exception(f, sig, si, uc, h, sp);
     true
 }
 
-/// The return from a signal handler goes THROUGH AN IRETQ rather than through a sysret.
-///
-/// A `sysretq` physically cannot restore the context entirely: it REQUIRES that
-/// the return address lie in rcx and the flags in r11. For an ordinary syscall that is
-/// lawful (the `syscall` instruction destroys them anyway, the ABI allows that), but
-/// `rt_sigreturn` returns not into the syscall's point but into ARBITRARY interrupted
-/// code. Giving it rcx and r11 with foreign values means spoiling two live
-/// registers.
-///
-/// For the JVM that was not a theory. HotSpot catches a SIGSEGV at EVERY safepoint poll
-/// and at every implicit null check — that is, in the middle of JIT code, where all the registers
-/// are busy. After the return the code continued with spoiled rcx/r11: if
-/// a reference to an object lay there, either the JIT code itself fell (`ConcurrentHashMap.putVal`)
-/// or later the garbage collector during the walk over the roots. The failure looked "random" and
-/// was caught once in ten runs.
-///
-/// So here we do not return into the syscall's stub but put a full set of registers
-/// and a hardware iret frame on the stack ourselves — exactly as Linux does.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn sig_iret(regs: *const u64) -> ! { crate::arch::syscall_entry::sig_iret(regs) }
-
 /// rt_sigreturn: the restorer calls syscall(15), rsp = the frame's base (after the ret).
+/// The mask and the alternate-stack flag are ours; the registers and the FPU state go back
+/// through `arch::signal::sigreturn`, which on x86-64 returns THROUGH AN IRETQ rather than a
+/// sysret (the reasons — rcx/r11 and the JVM's JIT — are told there).
 fn sigreturn(f: &mut Frame) -> u64 {
-    let base = f.ursp; // the rsp after the restorer's ret = the frame's base
-    let uc = base + 128;
+    let base = f.usp; // the rsp after the restorer's ret = the frame's base
+    let uc = base + SIGINFO_SIZE;
     let t = crate::sched::current_id();
     // SAFETY: S2 — the alternate signal stack (`ALT_*`): indexed by the task, written only by that
     // task.
@@ -2762,41 +2694,8 @@ fn sigreturn(f: &mut Frame) -> u64 {
     // SAFETY: S1 — the caller hands in an address of the process's memory that `uaccess::gate` has
     // already validated.
     unsafe {
-        let g = (uc + 40) as *const u64;
-        crate::proc::set_sigmask(t, core::ptr::read_unaligned((uc + 296) as *const u64));
-        // The FPU/AVX goes from the frame straight into the registers; the syscall's stub will not reach us any more,
-        // so its fxrstor does not get in our way either.
-        let fp = core::ptr::read_unaligned((uc + 224) as *const u64);
-        if fp != 0 { crate::sched::fpu_restore(fp as *const u8); }
-        // The full set in the order in which `sig_iret` takes it off, and after it —
-        // the hardware iret frame: rip, cs, rflags, rsp, ss.
-        let mut r = [0u64; 20];
-        r[0] = *g.add(13);            // rax
-        r[1] = *g.add(11);            // rbx
-        r[2] = *g.add(14);            // rcx  — the very one that was lost
-        r[3] = *g.add(12);            // rdx
-        r[4] = *g.add(9);             // rsi
-        r[5] = *g.add(8);             // rdi
-        r[6] = *g.add(10);            // rbp
-        r[7] = *g.add(0);             // r8
-        r[8] = *g.add(1);             // r9
-        r[9] = *g.add(2);             // r10
-        r[10] = *g.add(3);            // r11  — and this one
-        r[11] = *g.add(4);            // r12
-        r[12] = *g.add(5);            // r13
-        r[13] = *g.add(6);            // r14
-        r[14] = *g.add(7);            // r15
-        r[15] = *g.add(16);           // rip
-        r[16] = 0x2B;                 // cs (user code64 DPL3)
-        r[17] = (*g.add(17) & 0x3F_7FD5) | 0x202; // rflags: IF=1, we do not let the garbage bits through
-        r[18] = *g.add(15);           // rsp
-        r[19] = 0x23;                 // ss (user data DPL3)
-        // The array must survive the change of rsp, so we put it on the kernel stack
-        // ABOVE the current top — where the stub will no longer return.
-        let top = crate::sched::kstack_top(t);
-        let dst = ((top - 256) & !0xF) as *mut u64;
-        core::ptr::copy_nonoverlapping(r.as_ptr(), dst, 20);
-        sig_iret(dst as *const u64)
+        crate::proc::set_sigmask(t, core::ptr::read_unaligned((uc + UC_SIGMASK) as *const u64));
+        crate::arch::signal::sigreturn(uc, crate::sched::kstack_top(t))
     }
 }
 /// A poll with the translation of the fds user->handle in place (and back).
