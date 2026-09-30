@@ -59,7 +59,9 @@ pub fn lapic_enable() {
 }
 /// Ending an interrupt is the IRQ vector's job on arm64 (`trap::irq` writes `ICC_EOIR1`
 /// for every INTID it acknowledged), so the explicit call the x86 handlers make is nothing here.
-pub fn lapic_eoi() {}
+/// # Safety
+/// The x86 twin is `unsafe extern "C"`; the callers keep their blocks.
+pub unsafe fn lapic_eoi() {}
 
 /// The cores the device tree (later: the MADT) named, in the order they were listed; the
 /// boot core is logical 0 whatever its affinity.
@@ -148,6 +150,14 @@ pub fn timer_armed_on(c: usize) -> bool { c < MAXCPU && TIMER_PERIOD[c].load(Ord
 /// The period THIS core's vector re-arms with (the tick handler asks).
 pub fn period_here() -> u64 { TIMER_PERIOD[me()].load(Ordering::Relaxed) }
 
+/// What the tick vector re-arms with: the scheduler's period, else the bring-up's
+/// `TICK_NS`; 0 while a borrowed one-shot is out (`timer_tick_reload` re-arms).
+pub fn rearm_period_ns() -> u64 {
+    let c = me();
+    if TIMER_ONESHOT[c].load(Ordering::Relaxed) != 0 || TIMER_REM[c].load(Ordering::Relaxed) != 0 { return 0; }
+    let p = TIMER_PERIOD[c].load(Ordering::Relaxed);
+    if p != 0 { p } else { trap::TICK_NS.load(Ordering::Relaxed) }
+}
 /// Lend the tick's timer to a one-shot deadline (`sched`'s TSC-deadline waits): remember
 /// what was left of the current period.
 pub fn timer_borrow() {
@@ -209,12 +219,25 @@ pub fn slice_selftest() -> bool {
     crate::println!("slice-test: {}", if ok { "ALL OK" } else { "FAILED" });
     ok
 }
+/// A one-shot at the counter value `target` on the tick's PPI: the timer's compare value.
+/// The IRQ vector tells a borrowed one-shot from the tick by `TIMER_ONESHOT`... it does not
+/// need to: a sleeper wakes on ANY interrupt and re-checks its word, and `lapic_timer_restore`
+/// puts the period back.
+/// # Safety
+/// W3 — the caller has borrowed the timer (`timer_borrow`) and will give it back.
+pub unsafe fn deadline_arm(target: u64) {
+    let now = cpu::counter();
+    timer::arm_ticks(target.saturating_sub(now).max(1));
+}
+/// # Safety
+/// As `deadline_arm`.
+pub unsafe fn deadline_disarm() { timer::stop(); }
+
 /// The GIC's pending and active bits for an INTID — what the x86 code asks the IRR/ISR.
 pub fn irr_pending(vector: u8) -> bool { gic::is_pending(vector as u32) }
 pub fn isr_pending(vector: u8) -> bool { gic::is_active(vector as u32) }
 /// The LAPIC register window does not exist; the diagnostics that peek at it read zeros.
 pub fn lapic_peek(_reg: u64) -> u32 { 0 }
-pub fn lapic_poke(_reg: u64, _val: u32) {}
 
 /// `talaria.smp=N`: bring the secondaries up under the scheduler (mode 2).
 pub fn start_from_cmdline(cmdline: &str) {

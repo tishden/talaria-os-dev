@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 import struct, sys, os
 SECTOR = 512
-files = [
-    ("hello.txt", "Hello from the Talaria disk! (virtio-blk + TFS1)\n".encode()),
-    ("mhello", open("user/mhello", "rb").read()),
-    ("epsrv", open("user/epsrv", "rb").read()),
-    ("memhog", open("user/memhog", "rb").read()),
-]
+# mkfs.py <image> [user-dir]: the binaries come from user/ (x86-64) or user/aarch64/ (the arm64
+# set, built by `make -C user aarch64`); one that is not built is left out with a note, so a
+# partial arm64 set still gives a disk for the tests that do not need it.
+udir = sys.argv[2] if len(sys.argv) > 2 else "user"
+files = [("hello.txt", "Hello from the Talaria disk! (virtio-blk + TFS1)\n".encode())]
+for name in ("mhello", "epsrv", "memhog"):
+    path = os.path.join(udir, name)
+    if os.path.exists(path): files.append((name, open(path, "rb").read()))
+    else: print(f"mkfs.py: {path} is not built — left out of the image", file=sys.stderr)
 lba = 1
 entries = b""
 body = b""

@@ -96,6 +96,42 @@ pub fn cpuid(leaf: u32) -> (u32, u32, u32, u32) { cpuid_count(leaf, 0) }
 /// CPUID leaf `leaf`, sub-leaf `sub`: (eax, ebx, ecx, edx). The intrinsic saves
 /// and restores rbx, which LLVM reserves.
 #[inline(always)]
+/// What the core offers a waiter (sync.rs's tiers): (a line monitor for ring 0 — MONITOR/MWAIT,
+/// a user-mode timed wait — WAITPKG, AMD's MONITORX, a deadline timer — TSC-deadline).
+pub fn wait_caps() -> (bool, bool, bool, bool) {
+    let (_, _, c1, _) = cpuid_count(1, 0);
+    let (_, _, c7, _) = cpuid_count(7, 0);
+    let (_, _, c8, _) = cpuid_count(0x8000_0001, 0);
+    (c1 & (1 << 3) != 0, c7 & (1 << 5) != 0, c8 & (1 << 29) != 0, c1 & (1 << 24) != 0)
+}
+/// Lift the ceiling of a user `umwait` (IA32_UMWAIT_CONTROL: no TSC quanta limit, C0.2 allowed).
+/// # Safety
+/// W3 — this core's MSR, once at the tier's init.
+pub unsafe fn umwait_unlimit() { wrmsr(0xE1, 0); }
+/// The thread-pointer of the workload's current thread: FS.base here, `TPIDR_EL0` on arm64.
+/// # Safety
+/// S4/C1 — this core's register, on a context switch or a `set_tid_address`-class call.
+pub unsafe fn set_tls_base(v: u64) { wrmsr(0xC000_0100, v); }
+/// # Safety
+/// As `set_tls_base`.
+pub unsafe fn tls_base() -> u64 { rdmsr(0xC000_0100) }
+/// The faulting address of the last data/instruction abort on this core (CR2 here, FAR_EL1 on arm64).
+pub fn fault_addr() -> u64 { unsafe { read_cr2() } }
+/// Reset the machine, by every means the platform has, and never return.
+pub fn reset_machine() -> ! {
+    unsafe {
+        // 0xCF9 = PCI reset control: 0x0E — a full reset. If the firmware does not
+        // support it, the keyboard controller, then a triple fault through an empty IDT.
+        outb(0xCF9, 0x0E);
+        let mut n = 0u64;
+        while n < 100_000_000 { core::hint::spin_loop(); n += 1; }
+        outb(0x64, 0xFE);
+        n = 0;
+        while n < 100_000_000 { core::hint::spin_loop(); n += 1; }
+        triple_fault()
+    }
+}
+
 pub fn cpuid_count(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
     let r = core::arch::x86_64::__cpuid_count(leaf, sub);
     (r.eax, r.ebx, r.ecx, r.edx)

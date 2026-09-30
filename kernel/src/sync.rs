@@ -51,7 +51,6 @@ pub fn mode_name(m: u8) -> &'static str {
     match m { MODE_WAITPKG => "waitpkg(umwait)", MODE_MWAITX => "mwaitx", MODE_MWAIT => "mwait(ring0)", _ => "hlt+ipi" }
 }
 
-fn cpuid(leaf: u32, sub: u32) -> (u32, u32, u32, u32) { cpu::cpuid_count(leaf, sub) }
 
 /// The TSC-deadline LAPIC timer (for the timeouts of sleep on an AP without a periodic tick).
 static TSC_DL: AtomicBool = AtomicBool::new(false);
@@ -69,13 +68,10 @@ pub fn force_mode(m: u8) {
 
 /// The detection at boot: pick the best available mode, allow a long umwait.
 pub fn init() {
-    let (_, _, c1, _) = cpuid(1, 0);
-    let monitor = c1 & (1 << 3) != 0; // CPUID.1:ECX.MONITOR
-    TSC_DL.store(c1 & (1 << 24) != 0, Ordering::SeqCst); // CPUID.1:ECX.TSC-Deadline
-    let (_, _, c7, _) = cpuid(7, 0);
-    let waitpkg = c7 & (1 << 5) != 0; // CPUID.7.0:ECX.WAITPKG
-    let (_, _, c8, _) = cpuid(0x8000_0001, 0);
-    let mwaitx = c8 & (1 << 29) != 0; // CPUID.80000001:ECX.MONITORX (AMD)
+    // The machine's word on the tiers: MONITOR/MWAIT (the exclusive monitor + WFE on arm64),
+    // WAITPKG, MONITORX, and a deadline timer for the timed sleeps.
+    let (monitor, waitpkg, mwaitx, deadline) = cpu::wait_caps();
+    TSC_DL.store(deadline, Ordering::SeqCst);
     let mut m = if waitpkg { MODE_WAITPKG } else if mwaitx { MODE_MWAITX } else if monitor { MODE_MWAIT } else { MODE_HLT };
     // A12: `talaria.sync=hlt|mwait` — a forced wait tier.
     //
@@ -94,7 +90,7 @@ pub fn init() {
         // IA32_UMWAIT_CONTROL: [31:2] the max TSC quanta (0 = no limit), bit0 = the prohibition of C0.2 (0 = allowed)
         // SAFETY: W3 — IA32_UMWAIT_CONTROL (0xE1) of THIS core: the ceiling of a user
         // `umwait` is cleared so that tier 1 does not wake by a timeout of its own.
-        unsafe { cpu::wrmsr(0xE1, 0); }
+        unsafe { cpu::umwait_unlimit(); }
     }
     crate::println!("sync: the wait mode is {} (monitor={} waitpkg={} mwaitx={})",
         mode_name(m), monitor as u8, waitpkg as u8, mwaitx as u8);
@@ -1102,8 +1098,8 @@ fn wake_impl(addr: u64, maxn: usize, leader: usize, allow_switch: bool) -> usize
     n
 }
 
-// The TSC-deadline LAPIC timer (LVT timer mode 10b, the WAKE vector — only an EOI).
-const IA32_TSC_DEADLINE: u32 = 0x6E0;
+// The TSC-deadline LAPIC timer (LVT timer mode 10b, the WAKE vector — only an EOI) on x86;
+// the generic timer's compare value on arm64 — `arch::smp::deadline_arm`.
 fn arm_tsc_deadline(deadline_mono_ns: u64) {
     WARMED[crate::sched::current_id()].store(true, Ordering::SeqCst);
     // Remember THE REMAINDER of the slice before we reprogram the LVT: returning
@@ -1119,13 +1115,9 @@ fn arm_tsc_deadline(deadline_mono_ns: u64) {
     let hz = crate::tsc::calibrate_cached();
     let dt_tsc = deadline_mono_ns.saturating_sub(now).saturating_mul(hz) / 1_000_000_000;
     let target = crate::tsc::rdtsc().saturating_add(dt_tsc.max(1));
-    // SAFETY: W3 — the LAPIC and IA32_TSC_DEADLINE of THIS core: the timer is borrowed for the
-    // duration of one bounded sleep.
-    unsafe {
-        crate::smp::lapic_poke(0x320, crate::idt::WAKE_VECTOR as u32 | 0x4_0000); // LVT: TSC-deadline
-        cpu::mfence(); // SDM: order the LVT before the wrmsr
-        cpu::wrmsr(IA32_TSC_DEADLINE, target);
-    }
+    // SAFETY: W3 — the deadline timer of THIS core: it is borrowed for the duration of one
+    // bounded sleep (the LVT in TSC-deadline mode on x86, the generic timer's compare on arm64).
+    unsafe { crate::smp::deadline_arm(target); }
 }
 fn disarm_tsc_deadline() {
     WARMED[crate::sched::current_id()].store(false, Ordering::SeqCst);
@@ -1136,9 +1128,7 @@ fn disarm_tsc_deadline() {
 fn disarm_tsc_deadline_raw() {
     // SAFETY: W3 — the borrowed timer is returned to the CORE; it is called both by the sleeper and by
     // whoever takes the core from a preempted one.
-    unsafe {
-        cpu::wrmsr(IA32_TSC_DEADLINE, 0);
-    }
+    unsafe { crate::smp::deadline_disarm(); }
     // A12: the LVT timer is a SHARED register, and we borrowed it from the scheduler. Previously
     // there was a masking here, that is, the scheduler's timer died forever after the very first
     // wait by time (on metal that cost the production mode:

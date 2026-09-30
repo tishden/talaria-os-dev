@@ -2,6 +2,8 @@
 //! surface, and `enable` says so once instead of pretending.
 use core::sync::atomic::{AtomicBool, Ordering};
 static SAID: AtomicBool = AtomicBool::new(false);
+/// `talaria.gdb=break`: honoured by the stub when there is one.
+pub static BREAK_AT_START: AtomicBool = AtomicBool::new(false);
 pub fn enable() {
     if !SAID.swap(true, Ordering::Relaxed) { crate::println!("gdb: the stub is not ported to arm64 yet (phase 8)"); }
 }

@@ -877,8 +877,6 @@ pub fn lapic_timer_init(period_ns: u32) {
 
 /// A12: read a LAPIC register (the diagnostics of the timer's state in the log).
 pub fn lapic_peek(reg: u64) -> u32 { unsafe { lapic_read(reg) } }
-/// Write a LAPIC register from outside the module (in the right mode — xAPIC or x2APIC).
-pub fn lapic_poke(reg: u64, val: u32) { unsafe { lapic_write(reg, val); } }
 
 /// A12: is a vector's IRR bit raised (an interrupt IS WAITING to be accepted). A raised IRR
 /// with a zero counter means "there is an interrupt, but there is nobody to take it" —
@@ -1010,6 +1008,21 @@ pub fn lapic_timer_restore() {
 /// interrupts a cell's core — the basis of the µs preemption and of the cores' donation).
 /// The current core's APIC id (the LAPIC 0x20; call it on the BSP before the APs start).
 pub fn bsp_apic_id() -> u32 { unsafe { apic_id_here() } }
+
+const IA32_TSC_DEADLINE: u32 = 0x6E0;
+/// A one-shot at the TSC count `target` on the WAKE vector: the LVT timer in TSC-deadline mode
+/// (mode 10b), then the MSR — the SDM orders the LVT write before the deadline.
+/// # Safety
+/// W3 — the caller has borrowed the timer (`timer_borrow`) and will give it back.
+pub unsafe fn deadline_arm(target: u64) {
+    lapic_write(0x320, crate::idt::WAKE_VECTOR as u32 | 0x4_0000);
+    crate::arch::cpu::mfence();
+    wrmsr(IA32_TSC_DEADLINE, target);
+}
+/// Remove the deadline (the LVT is returned by `lapic_timer_restore`).
+/// # Safety
+/// As `deadline_arm`.
+pub unsafe fn deadline_disarm() { wrmsr(IA32_TSC_DEADLINE, 0); }
 
 /// ── THE SENDING OF AN IPI ───────────────────────────────────────────────────
 ///

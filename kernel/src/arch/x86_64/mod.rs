@@ -25,5 +25,19 @@ pub mod switch;  // the FPU state, the saved-context entry, the tick's stub, the
 pub mod syscall_entry; // the SYSCALL MSRs, the entry stub, the sigreturn iretq
 pub mod vga;     // the legacy text window at 0xB8000
 
+/// The virtio-mmio slots a driver may probe: QEMU microvm's fixed grid — 32 windows of 512
+/// bytes from 0xFEB0_0000 (`virtnet::scan_mmio_window`).
+pub const VIRTIO_MMIO_SLOTS: usize = 32;
+pub fn virtio_mmio_slot(i: usize) -> Option<(usize, usize)> {
+    if i < VIRTIO_MMIO_SLOTS { Some((0xFEB0_0000 + i * 512, 512)) } else { None }
+}
+
+/// The ELF `e_machine` this kernel runs, the `AT_HWCAP` word it hands a process (cpuid.1:edx:
+/// fpu..sse2) and the `AT_PLATFORM` string.
+#[allow(dead_code)] // elfhdr keeps its own cfg const (it is #[path]-included into kernel-unit); this is the pair's x86 half
+pub const ELF_MACHINE: u16 = 0x3E;
+pub const AT_HWCAP: u64 = 0x0f8b_fbff;
+pub const PLATFORM: [u8; 8] = *b"x86_64\0\0";
+
 /// The vDSO symbol a libc looks for on this architecture; `vdso::init` refuses an image without it.
 pub const VDSO_CLOCK_SYMBOL: &[u8] = b"__vdso_clock_gettime";

@@ -12,19 +12,51 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use super::{cpu, gic, timer};
 
-/// The frame the stubs save: x0..x30, then the saved sp, elr, spsr, esr, far.
+/// The frame the stubs save: x0..x30, then the saved sp, elr, spsr, esr, far — 36 words.
+/// ONE frame for every entry (an `svc`, a fault, an interrupt, from EL0 or EL1), which is
+/// what docs/ARM64-PLAN.md §4.5 asked for: it plays `syscall::Frame` for the dispatcher,
+/// `idt::ExcFrame` for the fault paths, and the saved context the scheduler switches. The
+/// field names are the neutral ones the shared code reads (`nr`, `a1..a6`, `pc`, `flags`,
+/// `usp`); the rest of the file is reachable by number through `x()`/`set_x()`.
 #[repr(C)]
 pub struct Frame {
-    pub x: [u64; 31],
-    pub sp: u64,
-    pub elr: u64,
-    pub spsr: u64,
+    pub a1: u64, pub a2: u64, pub a3: u64, pub a4: u64, pub a5: u64, pub a6: u64,  // x0..x5
+    pub x6: u64, pub x7: u64,
+    pub nr: u64,                                                                   // x8
+    pub x9_18: [u64; 10],
+    pub x19_28: [u64; 10],                                                         // callee-saved
+    pub fp: u64,                                                                   // x29
+    pub lr: u64,                                                                   // x30
+    /// The interrupted stack: `SP_EL0` for an EL0 entry (restored on the way out — a signal's
+    /// stack substitution is a write here), the EL1 sp before the frame for an EL1 entry.
+    pub usp: u64,
+    pub pc: u64,      // ELR_EL1
+    pub flags: u64,   // SPSR_EL1
     pub esr: u64,
     pub far: u64,
 }
+impl Frame {
+    /// Register `x<i>` (0..=30) by number.
+    #[inline] pub fn x(&self, i: usize) -> u64 {
+        debug_assert!(i < 31);
+        unsafe { core::ptr::read((self as *const Frame as *const u64).add(i)) }
+    }
+    #[inline] pub fn set_x(&mut self, i: usize, v: u64) {
+        debug_assert!(i < 31);
+        unsafe { core::ptr::write((self as *mut Frame as *mut u64).add(i), v) }
+    }
+    /// A copy with the number and the arguments replaced (the dispatcher's translated copy).
+    pub fn with_args(&self, nr: u64, a: [u64; 6]) -> Frame {
+        let mut f = Frame { ..*self };
+        f.nr = nr; f.a1 = a[0]; f.a2 = a[1]; f.a3 = a[2]; f.a4 = a[3]; f.a5 = a[4]; f.a6 = a[5];
+        f
+    }
+}
 
 core::arch::global_asm!(r#"
-.macro SAVE_FRAME
+/* SAVE_FRAME el0: the 36-word frame (trap::Frame). The `usp` slot is SP_EL0 for an entry
+   from EL0 and the EL1 sp before the frame for an entry from EL1. */
+.macro SAVE_FRAME el0
     sub sp, sp, #288
     stp x0, x1, [sp, #0]
     stp x2, x3, [sp, #16]
@@ -41,7 +73,11 @@ core::arch::global_asm!(r#"
     stp x24, x25, [sp, #192]
     stp x26, x27, [sp, #208]
     stp x28, x29, [sp, #224]
+    .if \el0
+    mrs x1, sp_el0
+    .else
     add x1, sp, #288
+    .endif
     stp x30, x1, [sp, #240]
     mrs x2, elr_el1
     mrs x3, spsr_el1
@@ -51,10 +87,18 @@ core::arch::global_asm!(r#"
     stp x2, x3, [sp, #272]
 .endm
 
+/* RESTORE_FRAME: by the FRAME's origin, not the stub's — a scheduling stub may enter a
+   frame another kind of entry saved. SPSR.M == 0 (EL0t): SP_EL0 comes from the slot (a
+   signal's stack substitution is a write there); an EL1 frame leaves SP_EL1 to the add. */
 .macro RESTORE_FRAME
     ldp x2, x3, [sp, #256]
     msr elr_el1, x2
     msr spsr_el1, x3
+    and x4, x3, #0xF
+    cbnz x4, 1f
+    ldr x1, [sp, #248]
+    msr sp_el0, x1
+1:
     ldp x0, x1, [sp, #0]
     ldp x2, x3, [sp, #16]
     ldp x4, x5, [sp, #32]
@@ -74,61 +118,12 @@ core::arch::global_asm!(r#"
     add sp, sp, #288
 .endm
 
-.macro VECTOR kind
-    .balign 0x80
-    b vec_\kind
-.endm
-
-.section .text
-.balign 0x800
-.global vectors_el1
-vectors_el1:
-    VECTOR 0
-    VECTOR 1
-    VECTOR 2
-    VECTOR 3
-    VECTOR 4
-    VECTOR 5
-    VECTOR 6
-    VECTOR 7
-    VECTOR 8
-    VECTOR 9
-    VECTOR 10
-    VECTOR 11
-    VECTOR 12
-    VECTOR 13
-    VECTOR 14
-    VECTOR 15
-
-.macro STUB_FATAL kind
-vec_\kind:
-    SAVE_FRAME
-    mov x0, #\kind
-    mov x1, sp
-    bl trap
-    b .
-.endm
-
-.macro STUB_IRQ kind
-vec_\kind:
-    SAVE_FRAME
-    mov x0, #\kind
-    mov x1, sp
-    bl irq
-    RESTORE_FRAME
-    eret
-.endm
-
-.macro STUB_SYNC_EL0 kind
-vec_\kind:
-    SAVE_FRAME
-    /* the workload's FP/SIMD state, 528 bytes below the frame — when FPSAVE_ON says so
-       (the svccost probe measures the entry with and without; the kernel is hard-float,
-       so with it OFF a handler that touches a V register corrupts the workload's) */
+/* FP_SAVE: the 528-byte FP/SIMD state (q0..q31, fpcr, fpsr) below the frame, and its
+   address into this core's block (+64) — `switch::fpu_save` copies from THERE, so the
+   kernel's own use of the V registers between the entry and the scheduler cannot leak
+   into a task's saved state. FP_RESTORE takes it back from sp. */
+.macro FP_SAVE
     sub sp, sp, #528
-    adrp x9, FPSAVE_ON
-    ldr w9, [x9, :lo12:FPSAVE_ON]
-    cbz w9, 1f
     stp q0, q1, [sp, #0]
     stp q2, q3, [sp, #32]
     stp q4, q5, [sp, #64]
@@ -149,13 +144,13 @@ vec_\kind:
     mrs x10, fpsr
     str x9, [sp, #512]
     str x10, [sp, #520]
-1:
-    mov x0, #\kind
-    add x1, sp, #528
-    bl sync_el0
-    adrp x9, FPSAVE_ON
-    ldr w9, [x9, :lo12:FPSAVE_ON]
-    cbz w9, 2f
+    mrs x9, tpidr_el1
+    cbz x9, 2f
+    mov x10, sp
+    str x10, [x9, #64]
+2:
+.endm
+.macro FP_RESTORE
     ldr x9, [sp, #512]
     ldr x10, [sp, #520]
     msr fpcr, x9
@@ -176,33 +171,128 @@ vec_\kind:
     ldp q26, q27, [sp, #416]
     ldp q28, q29, [sp, #448]
     ldp q30, q31, [sp, #480]
-2:
     add sp, sp, #528
+.endm
+
+/* SCHED_TAIL: x0 = the frame to enter (from a handler that may have switched tasks),
+   x19 = our FP area (our frame is 528 above it). The same frame: its FP state back from
+   the area. Another frame: the scheduler loaded that task's FP registers itself
+   (`fpu_restore`); free the stack we left (`off_stack` -> STACK_BUSY), switch the address
+   space the scheduler chose (`sched_root`, +40) — the x86 tail of timer_stub_sched. */
+.macro SCHED_TAIL
+    add x1, x19, #528
+    cmp x0, x1
+    b.ne 5f
+    mov sp, x19
+    FP_RESTORE
+    b 6f
+5:
+    mov sp, x0
+    mrs x9, tpidr_el1
+    ldr x10, [x9, #56]
+    cmn x10, #1
+    b.eq 3f
+    adrp x11, STACK_BUSY
+    add x11, x11, :lo12:STACK_BUSY
+    strb wzr, [x11, x10]
+    mov x10, #-1
+    str x10, [x9, #56]
+3:
+    ldr x10, [x9, #40]
+    cbz x10, 6f
+    msr ttbr0_el1, x10
+    isb
+    tlbi vmalle1
+    dsb ish
+    isb
+6:
     RESTORE_FRAME
     eret
 .endm
 
-.macro STUB_SYNC_EL1 kind
+.section .text
+.balign 2048
+.global vectors_el1
+vectors_el1:
+.macro VECTOR n
+    .balign 128
+    b vec_\n
+.endm
+    VECTOR 0
+    VECTOR 1
+    VECTOR 2
+    VECTOR 3
+    VECTOR 4
+    VECTOR 5
+    VECTOR 6
+    VECTOR 7
+    VECTOR 8
+    VECTOR 9
+    VECTOR 10
+    VECTOR 11
+    VECTOR 12
+    VECTOR 13
+    VECTOR 14
+    VECTOR 15
+
+.macro STUB_FATAL kind
 vec_\kind:
-    SAVE_FRAME
+    SAVE_FRAME 0
     mov x0, #\kind
     mov x1, sp
-    bl sync_el1
+    bl trap
+    b .
+.endm
+
+/* An IRQ, or a synchronous exception at EL1: the handler returns the frame to enter —
+   the same one, or another task's after a tick that switched (`sched_tail_entry`). */
+.macro STUB_SCHED kind, el0, handler
+vec_\kind:
+    SAVE_FRAME \el0
+    FP_SAVE
+    mov x19, sp
+    mov x0, #\kind
+    add x1, sp, #528
+    bl \handler
+    SCHED_TAIL
+.endm
+
+/* An `svc` or a fault from EL0: the dispatcher works on the frame in place; the FP/SIMD
+   save obeys FPSAVE_ON (the svccost probe measures it off). */
+.macro STUB_SYNC_EL0 kind
+vec_\kind:
+    SAVE_FRAME 1
+    adrp x9, FPSAVE_ON
+    ldr w9, [x9, :lo12:FPSAVE_ON]
+    cbz w9, 1f
+    FP_SAVE
+    mov x0, #\kind
+    add x1, sp, #528
+    bl sync_el0
+    FP_RESTORE
+    b 2f
+1:
+    sub sp, sp, #528
+    mov x0, #\kind
+    add x1, sp, #528
+    bl sync_el0
+    add sp, sp, #528
+2:
     RESTORE_FRAME
     eret
 .endm
 
 STUB_FATAL 0
-STUB_IRQ 1
+STUB_SCHED 1, 0, irq_entry
 STUB_FATAL 2
 STUB_FATAL 3
-STUB_SYNC_EL1 4
-STUB_IRQ 5
+STUB_SCHED 4, 0, sync_el1_entry
+STUB_SCHED 5, 0, irq_entry
 STUB_FATAL 6
 STUB_FATAL 7
 
 STUB_SYNC_EL0 8
-STUB_IRQ 9
+STUB_SCHED 9, 1, irq_entry
 STUB_FATAL 10
 STUB_FATAL 11
 STUB_FATAL 12
@@ -244,11 +334,11 @@ fn ec_name(esr: u64) -> &'static str {
 #[unsafe(no_mangle)]
 extern "C" fn trap(kind: u64, f: &Frame) -> ! {
     crate::println!("[trap] {}: esr={:#x} ({}) far={:#x} elr={:#x} spsr={:#x} sp={:#x}",
-        kind_name(kind), f.esr, ec_name(f.esr), f.far, f.elr, f.spsr, f.sp);
+        kind_name(kind), f.esr, ec_name(f.esr), f.far, f.pc, f.flags, f.usp);
     for i in (0..30).step_by(2) {
-        crate::println!("[trap]   x{:<2}={:#018x} x{:<2}={:#018x}", i, f.x[i], i + 1, f.x[i + 1]);
+        crate::println!("[trap]   x{:<2}={:#018x} x{:<2}={:#018x}", i, f.x(i), i + 1, f.x(i + 1));
     }
-    crate::println!("[trap]   x30={:#018x}", f.x[30]);
+    crate::println!("[trap]   x30={:#018x}", f.lr);
     cpu::halt_irq_off_forever()
 }
 
@@ -272,22 +362,24 @@ extern "C" fn sync_el0(kind: u64, f: &mut Frame) {
     let ec = (f.esr >> 26) & 0x3F;
     if ec == 0x15 {
         SVCS.fetch_add(1, Ordering::Relaxed);
-        f.x[0] = f.x[8].wrapping_add(1);
+        let r = crate::syscall::rust_syscall(f);
+        f.a1 = r;
         return;
     }
+    if user_fault(f) { return; }
     let back = EL0_RETURN.swap(0, Ordering::Relaxed);
     if ec == 0x3C && f.esr & 0xFFFF == 2 && back != 0 {
         // `brk #2`: the probe reports two words (x8, x9) and resumes the kernel.
-        PROBE_X8.store(f.x[8], Ordering::Relaxed);
-        PROBE_X9.store(f.x[9], Ordering::Relaxed);
-        f.elr = back;
-        f.spsr = 0x3C5;
+        PROBE_X8.store(f.nr, Ordering::Relaxed);
+        PROBE_X9.store(f.x(9), Ordering::Relaxed);
+        f.pc = back;
+        f.flags = 0x3C5;
         return;
     }
     if ec == 0x3C && f.esr & 0xFFFF == 0 && back != 0 {
         // `brk #0` with a continuation: resume the kernel there, at EL1h, interrupts masked.
-        f.elr = back;
-        f.spsr = 0x3C5;
+        f.pc = back;
+        f.flags = 0x3C5;
         return;
     }
     trap(kind, f)
@@ -343,35 +435,117 @@ pub fn guarded_load(addr: u64) -> Option<u64> {
 /// A synchronous exception at EL1 (the kernel itself). A data abort inside a guarded load
 /// resumes at its fixup; anything else is fatal.
 #[unsafe(no_mangle)]
-extern "C" fn sync_el1(kind: u64, f: &mut Frame) {
+extern "C" fn sync_el1_entry(kind: u64, f: &mut Frame) -> u64 {
+    let me = f as *mut Frame as u64;
     let ec = (f.esr >> 26) & 0x3F;
+    // `svc` at EL1 = the scheduler's soft yield (`switch::soft_yield_kick`): the tick's path
+    // by hand, once the scheduler owns the tick.
+    if ec == 0x15 {
+        if super::idt::SCHED_TIMER.load(Ordering::Relaxed) != 0 { return unsafe { rust_schedule(me) }; }
+        return me;
+    }
     let cpu = cpu::cpu_index().min(63);
     let fix = FIXUP[cpu].load(Ordering::Relaxed);
     if ec == 0x25 && fix != 0 {
         if f.esr & 0x3F == 0x30 { CONFLICTS[cpu].fetch_add(1, Ordering::Relaxed); }
         HIT[cpu].store(1, Ordering::Relaxed);
         FIXUP[cpu].store(0, Ordering::Relaxed);
-        f.elr = fix;
-        return;
+        f.pc = fix;
+        return me;
+    }
+    if ec == 0x25 {
+        // The profiler's guarded load on a foreign stack (`obs::unwind`): resume after it.
+        if let Some(fixup) = crate::obs::unwind::fault_fixup() { f.pc = fixup; return me; }
+        // The kernel writing into a user page the workload has not touched yet (a read into a
+        // lazily reserved buffer): the first touch, as at EL0. A COW page written by the kernel
+        // on the workload's behalf is copied the same way.
+        let (_, no_page, write, _) = super::signal::fault_kind(f);
+        if no_page && crate::paging::lazy_fault(f.far) { return me; }
+        if write && !no_page && crate::paging::cow_fault(f.far) { crate::metrics::inc_cow_fault(); return me; }
     }
     trap(kind, f)
+}
+
+unsafe extern "C" {
+    /// The scheduler's switch (`sched.rs`, `#[no_mangle]`): the frame to enter for the frame
+    /// interrupted.
+    fn rust_schedule(cur_sp: u64) -> u64;
+}
+
+/// A workload's fault at EL0, in the order the x86 handler takes (`idt::rust_exception`):
+/// a write to a COW page is a copy and a retry; a first touch of a reserved page is a frame
+/// and a retry; anything else is a SYNCHRONOUS SIGNAL — delivered to the process's handler
+/// when it has one (the JVM catches a SIGSEGV on every implicit null check), else the
+/// supervisor's recovery for a single-threaded test, else the process dies as under Linux.
+/// `true` — the frame is fixed and the stub returns into it; `false` — not a fault of the
+/// workload's (the bring-up's `brk` probes go on to their own handling).
+fn user_fault(f: &mut Frame) -> bool {
+    use core::sync::atomic::Ordering::SeqCst;
+    let ec = (f.esr >> 26) & 0x3F;
+    let (abort, no_page, write, _ifetch) = super::signal::fault_kind(f);
+    let far = f.far;
+    if abort {
+        if ec == 0x24 { crate::metrics::inc_page_fault(); }
+        if ec == 0x24 && write && !no_page && crate::paging::cow_fault(far) { crate::metrics::inc_cow_fault(); return true; }
+        if no_page && crate::paging::lazy_fault(far) { return true; }
+    }
+    let sig = match ec {
+        0x20 | 0x21 | 0x24 | 0x25 => 11,    // an abort -> SIGSEGV
+        0x00 | 0x0E | 0x18 | 0x19 => 4,     // an unknown/illegal instruction, a trapped system access, SVE -> SIGILL
+        0x22 | 0x26 => 7,                   // a PC/SP alignment fault -> SIGBUS
+        0x2C => 8,                          // an FP exception -> SIGFPE
+        0x30..=0x35 => 5,                   // a breakpoint/step/watchpoint -> SIGTRAP
+        0x3C if EL0_RETURN.load(Ordering::Relaxed) == 0 => 5, // `brk` with no bring-up continuation
+        _ => return false,
+    };
+    let fpu = super::signal::fpu_area(f);
+    if crate::syscall::deliver_exception_signal(f, sig, far, fpu) { return true; }
+    crate::fr::record(crate::fr::FAULT, f.pc);
+    let own_as_threads = crate::syscall::THREADED.load(SeqCst) && crate::sched::task_cr3(crate::sched::current_id()) != 0;
+    if crate::supervise::RECOVERY_ARMED.load(SeqCst) && !own_as_threads {
+        crate::supervise::CRASH_RIP.store(f.pc, SeqCst);
+        crate::supervise::CRASH_VEC.store(ec, SeqCst);
+        crate::supervise::RECOVERY_ARMED.store(false, SeqCst);
+        unsafe { crate::supervise::tal_longjmp(core::ptr::addr_of_mut!(crate::supervise::RECOVERY), 1); }
+    }
+    if own_as_threads {
+        crate::println!("\n[fault] EL0: esr={:#x} ({}) pc={:#x} far={:#x} sp={:#x} tpidr={:#x}",
+            f.esr, ec_name(f.esr), f.pc, far, f.usp, unsafe { cpu::tls_base() });
+        crate::syscall::kill_current_process(sig);
+    }
+    false
 }
 
 /// The IRQ path: acknowledge, dispatch by INTID, end. Nothing here prints — the
 /// console has a lock and the interrupted code may hold it.
 #[unsafe(no_mangle)]
-extern "C" fn irq(_kind: u64, _f: &Frame) {
+extern "C" fn irq_entry(_kind: u64, f: &mut Frame) -> u64 {
+    let me = f as *mut Frame as u64;
     let cpu = cpu::cpu_index();
+    let mut tick = false;
     loop {
         let id = gic::ack();
         if id == gic::SPURIOUS { break; }
         if id == TIMER_PPI.load(Ordering::Relaxed) {
-            timer::on_tick(cpu, TICK_NS.load(Ordering::Relaxed));
+            // Re-arm the deadline (the x86 LAPIC reloads a periodic count itself) — unless the
+            // scheduler borrowed the timer for a one-shot, which it re-arms itself.
+            let p = super::smp::rearm_period_ns();
+            if p != 0 { timer::on_tick(cpu, p); } else if cpu < 64 { timer::TICKS[cpu].fetch_add(1, Ordering::Relaxed); }
+            super::idt::TICKS.fetch_add(1, Ordering::Relaxed);
+            tick = true;
+        } else if let Some(h) = super::idt::handler_of(id) {
+            h();
         } else if id < 16 {
             SGIS[cpu.min(63)].fetch_add(1, Ordering::Relaxed);
+            super::idt::IPI_COUNT.fetch_add(1, Ordering::Relaxed);
         } else {
             UNCLAIMED[cpu.min(63)].fetch_add(1, Ordering::Relaxed);
         }
         gic::eoi(id);
     }
+    // The tick belongs to the scheduler once it is installed: the frame it returns is the
+    // one the stub enters (the same, or another task's).
+    if tick && super::idt::SCHED_TIMER.load(Ordering::Relaxed) != 0 { return unsafe { rust_schedule(me) }; }
+    me
 }
+

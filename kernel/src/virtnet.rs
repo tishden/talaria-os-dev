@@ -124,14 +124,14 @@ fn find_mmio(inst: usize) -> Option<(usize, usize)> {
     let mut list = [(0usize, 0usize); 8];
     let mut n = 0usize;
     if a0 != 0 { list[0] = (a0, if sz0 != 0 { sz0 } else { 512 }); n = 1; }
-    for i in 0..32usize {
+    for i in 0..crate::arch::VIRTIO_MMIO_SLOTS {
         if n >= list.len() { break; }
-        let addr = 0xFEB0_0000 + i * 512;
+        let Some((addr, size)) = crate::arch::virtio_mmio_slot(i) else { continue };
         let magic = unsafe { core::ptr::read_volatile(addr as *const u32) };
         if magic != 0x7472_6976 { continue; }
         if addr == a0 { continue; }
         let header = match NonNull::new(addr as *mut VirtIOHeader) { Some(h) => h, None => continue };
-        if let Ok(t) = unsafe { MmioTransport::new(header, 512) } {
+        if let Ok(t) = unsafe { MmioTransport::new(header, size) } {
             use virtio_drivers::transport::{DeviceType, Transport};
             let net = t.device_type() == DeviceType::Network;
             // IMPORTANT: `MmioTransport` at its destruction RESETS the device
@@ -206,11 +206,12 @@ pub fn mmio_window_from_cmdline(cmdline: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// The virtio-mmio window by an enumeration of the microvm's fixed slots (0xFEB0_0000+512*i),
+/// The virtio-mmio window by an enumeration of the machine's slots (`arch::virtio_mmio_slot`:
+/// the microvm's fixed grid at 0xFEB0_0000+512*i on x86, the device tree's windows on arm64),
 /// when the firmware has not put a `virtio_mmio.device=` into the cmdline.
 pub fn scan_mmio_window() -> Option<(usize, usize)> {
-    for i in 0..32usize {
-        let addr = 0xFEB0_0000 + i * 512;
+    for i in 0..crate::arch::VIRTIO_MMIO_SLOTS {
+        let Some((addr, size)) = crate::arch::virtio_mmio_slot(i) else { continue };
         let magic = unsafe { core::ptr::read_volatile(addr as *const u32) };
         let dev_id = unsafe { core::ptr::read_volatile((addr + 8) as *const u32) };
         if i < 4 || (magic == 0x7472_6976 && dev_id != 0) {
@@ -218,10 +219,10 @@ pub fn scan_mmio_window() -> Option<(usize, usize)> {
         }
         if magic != 0x7472_6976 { continue; }
         let header = NonNull::new(addr as *mut VirtIOHeader)?;
-        if let Ok(t) = unsafe { MmioTransport::new(header, 512) } {
+        if let Ok(t) = unsafe { MmioTransport::new(header, size) } {
             let net = t.device_type() == DeviceType::Network;
             core::mem::forget(t); // a Drop resets the device — an inspection does not put out a foreign one
-            if net { return Some((addr, 512)); }
+            if net { return Some((addr, size)); }
         }
     }
     None
@@ -232,20 +233,20 @@ pub fn scan_mmio_window() -> Option<(usize, usize)> {
 /// because that one needs the address, and this one the ordinal number.
 pub fn mmio_slot_max() -> usize {
     let mut m = 0;
-    for i in 0..32usize {
-        let addr = 0xFEB0_0000 + i * 512;
+    for i in 0..crate::arch::VIRTIO_MMIO_SLOTS {
+        let Some((addr, _)) = crate::arch::virtio_mmio_slot(i) else { continue };
         if unsafe { core::ptr::read_volatile(addr as *const u32) } == 0x7472_6976 { m = i; }
     }
     m
 }
 
 pub fn mmio_slot() -> Option<usize> {
-    for i in 0..32usize {
-        let addr = 0xFEB0_0000 + i * 512;
+    for i in 0..crate::arch::VIRTIO_MMIO_SLOTS {
+        let Some((addr, size)) = crate::arch::virtio_mmio_slot(i) else { continue };
         let magic = unsafe { core::ptr::read_volatile(addr as *const u32) };
         if magic != 0x7472_6976 { continue; }
         let header = NonNull::new(addr as *mut VirtIOHeader)?;
-        if let Ok(t) = unsafe { MmioTransport::new(header, 512) } {
+        if let Ok(t) = unsafe { MmioTransport::new(header, size) } {
             let net = t.device_type() == DeviceType::Network;
             core::mem::forget(t); // a Drop resets the device — an inspection does not put out a foreign one
             if net { return Some(i); }

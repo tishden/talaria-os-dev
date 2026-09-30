@@ -23,6 +23,10 @@ pub const SIGFRAME_ALIGN: u64 = 64;
 pub const SIGFPU_OFF: u64 = 1088;
 /// The siginfo's size: the ucontext follows it.
 pub const SIGINFO_SIZE: u64 = 128;
+/// The handler returns through a word BELOW the frame (the restorer's address, `ret`
+/// pops it): the frame's base sits `RET_SLOT` above the handler's sp. arm64 has no slot —
+/// the return address travels in x30.
+pub const RET_SLOT: u64 = 8;
 /// `ucontext`: `uc_stack` (ss_sp/ss_flags/ss_size) and `uc_sigmask`.
 pub const UC_STACK: u64 = 16;
 pub const UC_SIGMASK: u64 = 296;
@@ -69,6 +73,41 @@ pub fn excframe_of_syscall(f: &Frame) -> ExcFrame {
         rsp: f.usp, ss: 0x23,
     }
 }
+
+/// The registers of a core dump's `NT_PRSTATUS`, in the order of `user_regs_struct` — that is
+/// exactly what GDB expects. The order is not ours and must not be changed: fields swapped
+/// round would give not "a format error" but a PLAUSIBLE wrong stack.
+pub fn prstatus_regs(f: &ExcFrame, fs_base: u64) -> [u64; 27] {
+    [
+        f.r15, f.r14, f.r13, f.r12, f.rbp, f.rbx, f.r11, f.r10, f.r9, f.r8,
+        f.rax, f.rcx, f.rdx, f.rsi, f.rdi,
+        f.rax,          // orig_rax: for an exception's frame it makes no sense
+        f.rip, f.cs, f.rflags, f.rsp, f.ss,
+        fs_base, 0,     // fs_base, gs_base
+        0, 0, 0, 0,     // ds, es, fs, gs
+    ]
+}
+/// A frame "as if" for a thread that left through a syscall (`sched::exit_uregs`: rip, rsp,
+/// rbp, rbx, r12..r15, rflags, the syscall number) — enough for gdb to show where it stood.
+pub fn frame_of_exit_uregs(r: &[u64; 10]) -> ExcFrame {
+    let mut f: ExcFrame = unsafe { core::mem::zeroed() };
+    f.rip = r[0]; f.rsp = r[1]; f.rbp = r[2]; f.rbx = r[3];
+    f.r12 = r[4]; f.r13 = r[5]; f.r14 = r[6]; f.r15 = r[7]; f.rflags = r[8];
+    f.rax = r[9];
+    f.cs = 0x2B; f.ss = 0x23;
+    f
+}
+/// A frame "as if" for a thread that stands in the scheduler: the pc, the sp and the frame
+/// pointer of its saved context.
+pub fn frame_of_saved(pc: u64, sp: u64, fp: u64) -> ExcFrame {
+    let mut f: ExcFrame = unsafe { core::mem::zeroed() };
+    f.rip = pc; f.rsp = sp; f.rbp = fp;
+    f.cs = 0x2B; f.ss = 0x23; f.rflags = 0x202;
+    f
+}
+/// The register file a `clone` child starts with: the return value 0 and the function where
+/// musl's `__clone` left it (r9); the rest zero, as it always was here.
+pub fn clone_regs(_f: &Frame, func: u64) -> super::switch::Gp { let mut g = super::switch::GP_ZERO; g[8] = func; g }
 
 /// The user stack pointer and the pc an exception's frame holds.
 pub fn exc_sp(f: &ExcFrame) -> u64 { f.rsp }
@@ -141,13 +180,19 @@ pub unsafe fn write_fpu(base: u64, uc: u64, entry_area: u64) {
 
 /// Redirect a SYSCALL's return into the handler: rdi=sig, rsi=&siginfo, rdx=&uc, rip=handler,
 /// and the user rsp substituted at the sysret (the per-CPU `sig_newrsp`).
-pub fn enter_handler_syscall(f: &mut Frame, sig: u64, si: u64, uc: u64, handler: u64, sp: u64) {
+/// # Safety
+/// `sp` is inside a frame `paging::user_writable` admitted (the restorer word goes there).
+pub unsafe fn enter_handler_syscall(f: &mut Frame, sig: u64, si: u64, uc: u64, handler: u64, sp: u64, restorer: u64) {
+    core::ptr::write_unaligned(sp as *mut u64, restorer);
     f.a1 = sig; f.a2 = si; f.a3 = uc; f.pc = handler;
     super::percpu::set_sig_newrsp(sp);
 }
 
 /// Redirect an EXCEPTION's return (the caller's iretq) into the handler.
-pub fn enter_handler_exception(f: &mut ExcFrame, sig: u64, si: u64, uc: u64, handler: u64, sp: u64) {
+/// # Safety
+/// As `enter_handler_syscall`.
+pub unsafe fn enter_handler_exception(f: &mut ExcFrame, sig: u64, si: u64, uc: u64, handler: u64, sp: u64, restorer: u64) {
+    core::ptr::write_unaligned(sp as *mut u64, restorer);
     f.rdi = sig; f.rsi = si; f.rdx = uc;
     f.rip = handler; f.rsp = sp;
 }
@@ -172,8 +217,9 @@ pub fn enter_handler_exception(f: &mut ExcFrame, sig: u64, si: u64, uc: u64, han
 /// # Safety
 /// `uc` is the ucontext of a frame this kernel built (`uaccess::gate` admitted the address);
 /// `kstack_top` is the current task's kernel stack top — the array must survive the change of
-/// rsp, so it goes ABOVE the current top, where the stub will no longer return.
-pub unsafe fn sigreturn(uc: u64, kstack_top: u64) -> ! {
+/// rsp, so it goes ABOVE the current top, where the stub will no longer return. It never
+/// returns; the `u64` is the shared dispatcher's type (arm64 does return the new x0).
+pub unsafe fn sigreturn(_f: &mut Frame, uc: u64, kstack_top: u64) -> u64 {
     let fp = core::ptr::read_unaligned((uc + UC_FPREGS) as *const u64);
     if fp != 0 { super::switch::fpu_restore(fp as *const u8); }
     let g = (uc + UC_GREGS) as *const u64;

@@ -5,8 +5,8 @@
 use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 
 #[repr(C)]
-pub struct JmpBuf { regs: [u64; 8] } // rbx,rbp,r12,r13,r14,r15,rsp,rip
-pub static mut RECOVERY: JmpBuf = JmpBuf { regs: [0; 8] };
+pub struct JmpBuf { regs: [u64; crate::arch::setjmp::JMPBUF_WORDS] } // the callee-saved set, sp and the return address of the machine
+pub static mut RECOVERY: JmpBuf = JmpBuf { regs: [0; crate::arch::setjmp::JMPBUF_WORDS] };
 pub static RECOVERY_ARMED: AtomicBool = AtomicBool::new(false);
 pub static CRASH_RIP: AtomicU64 = AtomicU64::new(0);
 pub static CRASH_VEC: AtomicU64 = AtomicU64::new(0);

@@ -52,8 +52,15 @@ static ECAM_BUSN: AtomicUsize = AtomicUsize::new(255);
 // Legacy access to the config through the ports 0xCF8/0xCFC: on EC2 virtual machines (Nitro
 // emulates an i440FX) there is no MCFG in the ACPI at all, ECAM is unavailable — only this works.
 // The limitation: the first 256 bytes of the config (the BARs and the capability list fit in there).
+#[cfg(target_arch = "x86_64")]
 #[inline] fn io_out32(port: u16, v: u32) { unsafe { crate::arch::cpu::outl(port, v) } }
+#[cfg(target_arch = "x86_64")]
 #[inline] fn io_in32(port: u16) -> u32 { unsafe { crate::arch::cpu::inl(port) } }
+// No port I/O on arm64: without an ECAM window every register reads as "no device".
+#[cfg(not(target_arch = "x86_64"))]
+#[inline] fn io_out32(_port: u16, _v: u32) {}
+#[cfg(not(target_arch = "x86_64"))]
+#[inline] fn io_in32(_port: u16) -> u32 { u32::MAX }
 #[inline] fn cf8(bus: u8, dev: u8, func: u8, off: u16) -> u32 {
     0x8000_0000 | ((bus as u32) << 16) | ((dev as u32) << 11) | ((func as u32) << 8) | (off as u32 & 0xFC)
 }

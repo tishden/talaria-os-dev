@@ -90,6 +90,9 @@ pub fn pat_init() {
 }
 
 /// Read IA32_PAT of this core (the self-check `talaria.test=wc` compares it with `PAT_VALUE`).
+/// A 4K leaf re-typed as write-combining: the PAT slot (PAT=1, PCD=0, PWT=0) `pat_init` set.
+pub fn with_wc(pte: u64) -> u64 { (pte & !((1 << 3) | (1 << 4))) | PTE_PAT_4K }
+
 pub fn pat_read() -> u64 {
     // SAFETY: P5 — a read of this core's PAT MSR.
     unsafe { cpu::rdmsr(MSR_PAT) }

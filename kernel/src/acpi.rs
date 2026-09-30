@@ -269,6 +269,14 @@ unsafe fn parse_s5(dsdt: u64) {
 /// Power the machine off (ACPI S5). It returns control only if it did not work —
 /// the caller is bound to have a fallback path (a `hlt` or a reboot).
 pub fn poweroff() {
+    // No FADT ports on arm64: the firmware's PSCI is the one way off (docs/ARM64-PLAN.md §4.9).
+    #[cfg(not(target_arch = "x86_64"))]
+    crate::arch::cpu::power_off();
+    #[cfg(target_arch = "x86_64")]
+    poweroff_ports();
+}
+#[cfg(target_arch = "x86_64")]
+fn poweroff_ports() {
     let a = PM1A_CNT.load(Ordering::Relaxed);
     let ta0 = SLP_TYPA.load(Ordering::Relaxed);
     if a == 0 {
@@ -331,9 +339,21 @@ static BTN_WAIT_NS: AtomicU64 = AtomicU64::new(20_000_000_000);
 static SHUTDOWN_AT_NS: AtomicU64 = AtomicU64::new(0);
 const PWRBTN_BIT: u16 = 1 << 8;
 
+#[cfg(target_arch = "x86_64")]
 unsafe fn inw(port: u32) -> u16 { crate::arch::cpu::inw(port as u16) }
+#[cfg(target_arch = "x86_64")]
 unsafe fn outw(port: u32, v: u16) { crate::arch::cpu::outw(port as u16, v) }
+#[cfg(target_arch = "x86_64")]
 unsafe fn outb(port: u32, v: u8) { crate::arch::cpu::outb(port as u16, v) }
+// The PM1 event/control blocks are port I/O: an x86 thing. On arm64 the tables (phase 6,
+// from UEFI) carry no such ports — the button and the power-off go through PSCI — so the
+// registers read as "nothing pending" and a write goes nowhere, and `init` finds no FADT.
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn inw(_port: u32) -> u16 { 0 }
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn outw(_port: u32, _v: u16) {}
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn outb(_port: u32, _v: u8) {}
 
 /// The knob from the TAIL of the cmdline (the EC2 user-data): the button is armed before the tail is merged
 /// (`main.rs`: the ACPI comes up before the network and the IMDS), and `talaria.pwrbtn=0` from
@@ -490,6 +510,11 @@ unsafe fn find_rsdp() -> u64 {
 
 pub fn init(rsdp: u64) {
     let rsdp = if rsdp != 0 { rsdp } else {
+        // The EBDA/ROM scan is a PC's: on arm64 the tables come from the firmware's pointer
+        // (phase 6) or not at all, and the low addresses it would read are not RAM.
+        #[cfg(not(target_arch = "x86_64"))]
+        let r = 0u64;
+        #[cfg(target_arch = "x86_64")]
         let r = unsafe { find_rsdp() };
         if r != 0 { crate::println!("acpi: the RSDP was found by scanning the BIOS areas: {:#x}", r); }
         else { crate::println!("acpi: the RSDP was not found (neither from the bootloader nor in the EBDA/ROM) — the fallbacks"); }

@@ -81,6 +81,8 @@ fn movz(rd: u32, imm16: u32) -> u32 { 0xD280_0000 | (imm16 & 0xFFFF) << 5 | (rd 
 fn movk(rd: u32, imm16: u32, hw: u32) -> u32 { 0xF280_0000 | (hw & 3) << 21 | (imm16 & 0xFFFF) << 5 | (rd & 31) }
 /// `cmp x0, #imm12` = `subs xzr, x0, #imm12`
 fn cmp_imm(imm: u32) -> u32 { 0xF100_001F | (imm & 0xFFF) << 10 }
+/// `cmn x0, #imm` — `adds xzr, x0, #imm`: the compare of x0 against a NEGATIVE small value.
+fn cmn_imm(imm: u32) -> u32 { 0xB100_001F | ((imm & 0xFFF) << 10) }
 /// `subs x<rd>, x<rd>, #imm12`
 fn subs_imm(rd: u32, imm: u32) -> u32 { 0xF100_0000 | (imm & 0xFFF) << 10 | (rd & 31) << 5 | (rd & 31) }
 /// `b.ne .+4*words` (a negative `words` branches back)
@@ -126,7 +128,13 @@ pub fn finish() -> ! {
     cpu::halt_forever()
 }
 
-/// The dispatch: a named probe, or the default sequence.
+/// Is the command line asking for the arch bring-up or one of its probes (else the kernel
+/// proper boots through `boot_shared`)?
+pub fn is_arch_test(cmdline: &str) -> bool {
+    matches!(crate::cmdline::test_name(cmdline), Some("bringup") | Some("ring") | Some("icache") | Some("bbm") | Some("svccost"))
+}
+
+/// The dispatch: a named probe, or the bring-up's default sequence (`talaria.test=bringup`).
 pub fn run(cmdline: &str) -> ! {
     POWEROFF.store(crate::cmdline::flag(cmdline, "talaria.poweroff"), core::sync::atomic::Ordering::Relaxed);
     match crate::cmdline::test_name(cmdline) {
@@ -141,18 +149,20 @@ pub fn run(cmdline: &str) -> ! {
 // ── the default sequence: EL0 and the vDSO ────────────────────────────────────────
 
 /// Phase 3's first step, proved with no ELF and no libc: a dozen instructions in a fresh
-/// frame — three `svc`s that expect `x0 = x8 + 1` back, then a `brk` — run at EL0 with a
-/// stack of their own.
+/// frame — three `svc`s through the REAL dispatcher (`syscall::rust_syscall`, the arm64
+/// numbers decoded by `arch::abi`), then a `brk` — run at EL0 with a stack of their own.
+/// `getpid` (172) and `gettid` (178) answer 1 for the first task; a number no table knows
+/// (999) answers -ENOSYS (-38).
 fn el0_probe() -> ! {
     let (code, sp) = two_frames();
-    //   mov x8, #100; svc; cmp x0, #101; b.ne wrong
-    //   mov x8, #200; svc; cmp x0, #201; b.ne wrong
-    //   mov x8, #300; svc; cmp x0, #301; b.ne wrong
+    //   mov x8, #172; svc; cmp x0, #1;  b.ne wrong
+    //   mov x8, #178; svc; cmp x0, #1;  b.ne wrong
+    //   mov x8, #999; svc; cmn x0, #38; b.ne wrong
     //   brk #0 (the end)          wrong: brk #1
     let probe: [u32; 14] = [
-        movz(8, 100), SVC0, cmp_imm(101), b_ne(13 - 3),
-        movz(8, 200), SVC0, cmp_imm(201), b_ne(13 - 7),
-        movz(8, 300), SVC0, cmp_imm(301), b_ne(13 - 11),
+        movz(8, 172), SVC0, cmp_imm(1), b_ne(13 - 3),
+        movz(8, 178), SVC0, cmp_imm(1), b_ne(13 - 7),
+        movz(8, 999), SVC0, cmn_imm(38), b_ne(13 - 11),
         brk(0), brk(1),
     ];
     place(code, &probe, true);

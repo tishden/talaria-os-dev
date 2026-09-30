@@ -22,22 +22,46 @@ pub mod cpu;
 pub mod crypto;  // ct_eq; AES on the Crypto Extensions is not written yet
 pub mod dtb;
 pub mod gdb;     // the stub is phase 8: the surface says so
+pub mod gdt;     // no tables: the way into EL0 and this core's kernel stack
 pub mod gic;
 pub mod icache;
 pub mod idt;     // the INTIDs under the x86 vector names, the handler table, ExcFrame
 pub mod ioapic;  // a device line to a core = a GIC SPI route
 pub mod kmain;
 pub mod mmu;
-pub mod pending;
 pub mod percpu;
 pub mod pmu;     // PMUv3 is phase 8: available() == false
 pub mod probes;
 pub mod psci;
+pub mod setjmp;  // tal_setjmp/tal_longjmp: x19..x28, fp, lr, sp, d8..d15
+pub mod signal;  // the rt_sigframe layout, the fault decode, sigreturn as a frame rewrite
 pub mod smp;     // the cores and the tick under the LAPIC's names (GIC + generic timer + PSCI)
+pub mod switch;  // the FP/SIMD state, the saved-context API, entering a frame, the soft yield
+pub mod syscall_entry; // the svc entry is the trap frame; the neutral names live there
 pub mod timer;
 pub mod trap;
 pub mod tsc;     // the counter under the TSC's names; the wall clock is the shared wallclock.rs
+pub mod unwind;  // the guarded load a profiler makes on a foreign stack
 pub mod vga;     // no text window: the surface answers "no"
+
+/// The virtio-mmio slots a driver may probe: the device tree's `virtio,mmio` windows, as
+/// `kmain` recorded them (QEMU `virt`: 32 windows of 0x200 from 0x0a00_0000, in the device
+/// gigabyte below the kernel's — mapped as such by `paging::init`).
+pub const VIRTIO_MMIO_SLOTS: usize = dtb::MAX_VIRTIO;
+pub fn virtio_mmio_slot(i: usize) -> Option<(usize, usize)> {
+    if i >= VIRTIO_MMIO_SLOTS { return None; }
+    let base = kmain::VIRTIO_WINDOWS[i].load(core::sync::atomic::Ordering::Relaxed);
+    if base == 0 { None } else { Some((base as usize, 0x200)) }
+}
+
+/// The ELF `e_machine` this kernel runs, the `AT_HWCAP` word it hands a process and the
+/// `AT_PLATFORM` string. The HWCAP bits are the ones a Graviton3 and QEMU `max` both have —
+/// FP, ASIMD, EVTSTRM, AES, PMULL, SHA1, SHA2, CRC32, ATOMICS, FPHP, ASIMDHP, CPUID, ASIMDRDM
+/// (bits 0..12), LRCPC (15), DCPOP (16), ASIMDDP (20); the rest are read from `ID_AA64*`
+/// when a workload asks for them (phase 7).
+pub const ELF_MACHINE: u16 = 0xB7;
+pub const AT_HWCAP: u64 = 0x1FFF | (1 << 15) | (1 << 16) | (1 << 20);
+pub const PLATFORM: [u8; 8] = *b"aarch64\0";
 
 /// The vDSO symbol a libc looks for on this architecture; `vdso::init` refuses an image without it.
 pub const VDSO_CLOCK_SYMBOL: &[u8] = b"__kernel_clock_gettime";

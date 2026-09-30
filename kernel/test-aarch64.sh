@@ -34,16 +34,35 @@ boot() {
   fi
 }
 
+# bootd SECS APPEND: as `boot`, with the TFS1 disk of the arm64 set on virtio-blk (the tree's
+# virtio-mmio windows; `mkfs.py <img> user/aarch64` builds it from the binaries present).
+DISK=kernel/target/disk-a64.img
+bootd() {
+  QEMU="timeout $1 qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp 4 -m 1024 -nographic \
+    -kernel /w/$IMG -append \"console=ttyAMA0 $2 talaria.smp=4 talaria.poweroff=1\" \
+    -drive id=d0,file=/w/$DISK,format=raw,if=none -device virtio-blk-device,drive=d0"
+  if command -v qemu-system-aarch64 >/dev/null 2>&1; then
+    sh -c "$(echo "$QEMU" | sed "s|/w/|$REPO/|g")" > "$LOG" 2>&1
+  else
+    docker run --rm $KVMDEV -v "$REPO:/w" -w /w talaria-qemu-aarch64 sh -c "$QEMU" > "$LOG" 2>&1
+  fi
+}
+
 PASS=0; FAIL=0
 assert() {
   if grep -qE "$1" "$LOG"; then echo "  PASS  $2"; PASS=$((PASS+1)); else echo "  FAIL  $2 (no /$1/)"; FAIL=$((FAIL+1)); fi
+}
+# assertcount PAT N NAME: the pattern must appear at least N times (two processes, two lines).
+assertcount() {
+  local n; n=$(grep -cE "$1" "$LOG")
+  if [ "$n" -ge "$2" ]; then echo "  PASS  $3"; PASS=$((PASS+1)); else echo "  FAIL  $3 ($n of $2 /$1/)"; FAIL=$((FAIL+1)); fi
 }
 # assertnot PAT NAME: the pattern must NOT appear (a trap or a panic anywhere is a failure).
 assertnot() {
   if grep -qE "$1" "$LOG"; then echo "  FAIL  $2 (found /$1/)"; FAIL=$((FAIL+1)); grep -E "$1" "$LOG" | head -3 | cut -c1-160 | sed 's/^/      /'; else echo "  PASS  $2"; PASS=$((PASS+1)); fi
 }
 
-boot 30 "talaria.mode=cell"
+boot 30 "talaria.test=bringup"
 echo "== arm64 bring-up (QEMU virt, gicv3+its, 4 cores) =="
 assert 'talaria: boot \(aarch64\), EL1, dtb=0x'                       'boot: the entry runs at EL1 with a device tree in x0'
 assert 'the MMU is on: sctlr=0x[0-9a-f]+ ttbr0=0x'                    'boot: the early identity map is on'
@@ -52,8 +71,8 @@ assert 'gic v3: distributor 0x8000000, redistributors 0x80a0000 .* its 0x8080000
 assert 'timer ppis: secure 29 phys 30 virt 27 hyp 26; psci hvc'          'dtb: the timer PPIs and the PSCI conduit'
 assert 'pcie ecam at 0x4010000000'                                    'dtb: the ECAM window'
 assert 'start_info at 0x[0-9a-f]+ \(1 memmap entries\)'                'boot: the tree became a PVH start_info'
-assert 'cmdline = "console=ttyAMA0 talaria.mode=cell talaria.smp=4 talaria.poweroff=1"'   'cmdline: read through the shared read_cmdline'
-assert 'RAM in total 1024 MB; the frame allocator: 0x40[0-9a-f]+\.\.0x80000000' 'mem: the shared allocator took the map'
+assert 'cmdline = "console=ttyAMA0 talaria.test=bringup talaria.smp=4 talaria.poweroff=1"'   'cmdline: read through the shared read_cmdline'
+assert 'RAM in total 1024 MB; the frame allocator: 0x4[0-9a-f]+\.\.0x80000000' 'mem: the shared allocator took the map'
 assert 'free frames = [0-9]{6}'                                        'mem: frames are handed out'
 assert 'vdso: the clock in user space is up .*__kernel_clock_gettime at \+0x' 'vdso: the image is mapped and exports the clock call'
 assert 'dirty probe on 0x[0-9a-f]+: hardware DBM \(TCR.HD\) .*\(as expected\)' 'paging: the dirty bit through DBM'
@@ -79,6 +98,48 @@ assertnot '\[trap\]|PANIC|NOT as expected|NOT inside|NOT the'          'no trap,
 # machinery — the job on a secondary core, the guarded load and its fixup, the EL0 state
 # machines — and their verdict lines; the numbers and the weak-memory answers are the
 # stand's. The ring gets fewer slots than the stand would (TCG is slow).
+echo "== the shared kernel on arm64: boot_shared, the scheduler, the tick (docs/ARM64-PLAN.md §10.1, stage 3.3) =="
+boot 40 "talaria.test=slice"
+assert 'slice-test: ALL OK'                                              'slice: the shared timer self-test through the whole boot'
+assertnot '\[trap\]|PANIC|BOOT REFUSED'                                  'slice: no trap, no panic, no refusal'
+boot 30 "talaria.test=ipi"
+assert 'the AP is up — the datapath on core 1, the BSP = the control plane' 'ipi: a secondary came up through PSCI under the scheduler'
+assert 'sched: the first entry'                                           'ipi: the tick entered the shared scheduler'
+assert '\[task B: housekeeping\] tick [3-9]'                              'ipi: the shared scheduler switches two kernel tasks on the tick'
+assert 'IPI->AP=[2-9]'                                                     'ipi: IPIs reach the secondary'
+assertnot '\[trap\]|PANIC'                                               'ipi: no trap, no panic'
+
+# Ring 3 (stage 3.4): the binaries come from `make -C kernel/user aarch64` and are not in git,
+# so these boots run where they were built; a CI runner without them skips the block and says so.
+if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/hello.elf" ]; then
+  echo "== ring 3 on arm64: the embedded binaries (kernel/user/aarch64) =="
+  boot 30 "talaria.test=user"
+  assert "Hello from Talaria's userspace \(EL0, a Linux syscall\)!"           'user: hello.elf prints through write() from EL0'
+  assert '\[syscall\] exit\(the code=7\)'                                    'user: and exits with its code'
+  boot 30 "talaria.test=musl"
+  assert 'musl static binary -> Talaria OS!'                                  'musl: a static musl binary starts (TLS, auxv) and prints'
+  assert '\[syscall\] exit_group\(the code=5\)'                              'musl: and exits with its code'
+  assertnot '\[trap\]|PANIC|\[fault\]'                                        'musl: no trap, no fault'
+  boot 40 "talaria.test=printf"
+  assert 'Talaria: the line 2, malloc=0x'                                     'printf: stdio and malloc (brk/mmap) in a musl process'
+  assert '\[syscall\] exit_group\(the code=0\)'                              'printf: and a clean exit'
+  boot 90 "talaria.test=pthreads"
+  assert 'PTHREADS: counter=200000 \(we expected 200000\) -> OK'              'pthreads: four threads through clone and futex, preempted by the tick, agree on the count'
+  assert 'sched: all the 5 task\(s\) have finished'                           'pthreads: the process and its threads are reaped'
+  assertnot '\[trap\]|PANIC|\[fault\]'                                        'pthreads: no trap, no fault'
+  (cd "$REPO/kernel" && python3 mkfs.py "$REPO/$DISK" user/aarch64 >/dev/null 2>&1)
+  echo "== the disk on arm64: virtio-blk over the tree's virtio-mmio, processes from it =="
+  bootd 40 "talaria.test=fs"
+  assert 'TFS1 is mounted — [0-9]+ files on virtio-blk'                        'fs: the block device found in a virtio-mmio window, the FS mounted'
+  assert 'Hello from the Talaria disk! \(virtio-blk \+ TFS1\)'                'fs: a file read from the disk'
+  bootd 60 "talaria.test=procdisk"
+  assertcount 'musl static binary -> Talaria OS!' 2                          'procdisk: both processes from the disk print'
+  assert 'sched: all the 2 task\(s\) have finished'                           'procdisk: two processes in separate address spaces run to their end'
+  assertnot '\[trap\]|PANIC|\[fault\]'                                        'procdisk: no trap, no fault — the spaces do not share a stack'
+else
+  echo "== ring 3 on arm64: SKIPPED — no kernel/user/aarch64 binaries here (make -C kernel/user aarch64) =="
+fi
+
 echo "== the probes (talaria.test=ring|icache|bbm|svccost) =="
 boot 90 "talaria.test=ring talaria.ringn=${TAL_RINGN:-100000}"
 assert 'ring probe: [0-9]+ slots in [0-9]+ ms — 0 corrupted, 0 with a wrong length, [0-9]+ slots/s \(as expected\)' 'ring: the SPSC protocol between two cores, no corrupted slot'

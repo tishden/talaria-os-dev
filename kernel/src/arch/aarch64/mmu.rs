@@ -122,6 +122,14 @@ pub fn dec(h: u64) -> u64 {
 /// Whether the dirty state is managed by the hardware (decided once, at the early map).
 static HW_DIRTY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 #[inline(always)] fn hw_dirty() -> bool { HW_DIRTY.load(core::sync::atomic::Ordering::Relaxed) }
+/// A 4K leaf re-typed as write-combining: Normal non-cacheable (MAIR index 2), outer
+/// shareable — what a device's LLQ window wants (docs/ARM64-PLAN.md §4.11).
+pub fn with_wc(desc: u64) -> u64 { (desc & !(0x7 << ATTR_SHIFT) & !(0x3 << 8)) | (ATTR_NC << ATTR_SHIFT) | (0x2 << 8) }
+/// The memory attribute table, the arm64 twin of the PAT (`talaria.test=wc` prints it).
+pub fn pat_read() -> u64 { MAIR_VALUE }
+/// What `pat_read` must show: the MAIR as `enable` wrote it.
+pub const PAT_VALUE: u64 = MAIR_VALUE;
+
 pub fn hw_dirty_on() -> bool { hw_dirty() }
 
 /// The physical address of the active root table (`TTBR0_EL1` without the ASID).

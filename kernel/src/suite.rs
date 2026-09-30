@@ -145,16 +145,4 @@ pub fn set_poweroff(v: bool) { POWEROFF.store(v, Ordering::Relaxed); }
 /// shows the firmware banner again, and the number of banners tells whether the kernel got
 /// to the needed point — the only channel that works BEFORE the disk comes up
 /// (`talaria.rebootat=`).
-pub fn reboot() -> ! {
-    unsafe {
-        // 0xCF9 = PCI reset control: 0x0E — a full reset. If the firmware does not
-        // support it, we finish the job with a triple fault through an empty IDT.
-        crate::arch::cpu::outb(0xCF9, 0x0E);
-        let mut n = 0u64;
-        while n < 100_000_000 { core::hint::spin_loop(); n += 1; }
-        crate::arch::cpu::outb(0x64, 0xFE); // the keyboard controller
-        n = 0;
-        while n < 100_000_000 { core::hint::spin_loop(); n += 1; }
-        crate::arch::cpu::triple_fault()
-    }
-}
+pub fn reboot() -> ! { crate::arch::cpu::reset_machine() }

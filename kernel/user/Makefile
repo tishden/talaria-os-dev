@@ -76,6 +76,32 @@ dyn/hello: dyn/hello.c
 tsync/tsynctest.dyn: tsync/tsynctest.c tsync/tsync.c
 	$(MUSL) musl-gcc -O2 -fPIE -pie -o $@ tsync/tsynctest.c tsync/tsync.c
 
+# ── AArch64 (docs/ARM64-PLAN.md §10.1, stage 3.4): the same sources, the same flags, into
+# aarch64/, with the cross musl of the talaria-musl-aarch64 image (services/docker/
+# Dockerfile.musl-aarch64). MUSLA64= names another toolchain runner: `make aarch64 MUSLA64=`
+# runs a musl-gcc from the host's PATH (a cross musl built by hand, as on the dev box).
+MUSLA64 ?= docker run --rm -v $(CURDIR):/w -w /w talaria-musl-aarch64
+# The link address IS the load address (the loader keeps a static binary's identity: vaddr ==
+# phys, `user.rs`), so it must be RAM on the machine: QEMU `virt` and Graviton have RAM from
+# 0x4000_0000, and 0x1000_0000 — x86's choice — is a PCIe window there, which reads as zeros
+# (the first arm64 `hello` faulted on `udf #0` at its own entry). 0x5000_0000 is 256 MiB in.
+LDFA64 := -static -no-pie -Wl,-Ttext-segment=0x50000000
+A64CBINS := efault fputest futexlat pthreads sigtest memrace shmrace mbench forktls smp2 smp4 mapshared schedapi epsrv memhog
+A64 := $(addprefix aarch64/,$(A64CBINS) mhello mprintf hello.elf)
+aarch64: $(A64)
+aarch64/%: %.c
+	@mkdir -p aarch64
+	$(MUSLA64) sh -c 'musl-gcc -O2 $(LDFA64) -o $@ $< && aarch64-linux-gnu-strip $@'
+aarch64/mhello: mh.c
+	@mkdir -p aarch64
+	$(MUSLA64) sh -c 'musl-gcc -O2 $(LDFA64) -o $@ $< && aarch64-linux-gnu-strip $@'
+aarch64/mprintf: mp.c
+	@mkdir -p aarch64
+	$(MUSLA64) sh -c 'musl-gcc -O2 $(LDFA64) -o $@ $< && aarch64-linux-gnu-strip $@'
+aarch64/hello.elf: hello-aarch64.s user-aarch64.ld
+	@mkdir -p aarch64
+	$(MUSLA64) sh -c 'aarch64-linux-gnu-as -o aarch64/hello.o $< && aarch64-linux-gnu-ld -T user-aarch64.ld -o $@ aarch64/hello.o && rm -f aarch64/hello.o'
+
 disks: mhello epsrv memhog
 	cd .. && python3 mkfs.py
 
