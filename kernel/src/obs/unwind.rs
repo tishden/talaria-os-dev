@@ -119,6 +119,25 @@ pub fn walk(rip: u64, rbp: u64, user: bool, out: &mut [u64; MAXDEPTH]) -> usize 
     n
 }
 
+/// The call stack into the log: the addresses from the point of the fault to the callers.
+///
+/// The symbols are resolved on the HOST (`addr2line -f -C -e <binary> <address>`) — dragging
+/// a symbol table into the kernel for the sake of a line printed at a crash is pointless, and
+/// for the workload the kernel does not have one at all. `fp` is the frame pointer of the
+/// interrupted code: RBP on x86-64, x29 on arm64 — both point at a {caller's fp, return
+/// address} pair, so the walk is one.
+pub fn print_backtrace(what: &str, pc: u64, fp: u64, user: bool) {
+    let mut stk = [0u64; MAXDEPTH];
+    let n = walk(pc, fp, user, &mut stk);
+    crate::print!("║ the stack {} ({} frame(s)):", what, n);
+    for a in &stk[..n] { crate::print!(" {:#x}", a); }
+    crate::println!("");
+    if n == 1 {
+        crate::println!("║   the depth is 1 — the code is built without frame pointers (see build-prof.sh / -fno-omit-frame-pointer)");
+    }
+    crate::println!("║   the symbols: addr2line -f -C -e <binary> <address>");
+}
+
 /// A self-check of the unwinding on a SYNTHETIC stack.
 ///
 /// A real stack is no good for a gate: it depends on how the compiler

@@ -86,6 +86,10 @@ pub fn run(cmdline: &str, tsc_hz: u64) -> ! {
             // A workload without a network does not need a NIC: we start it by the manifest without netsys
             // (the socket syscalls will return an error; compute/file applications work).
             println!("talaria: cell: no NIC found — starting without a network");
+            // Neither of the two needs a network: without this they fell through to the
+            // manifest on a machine with no NIC (arm64's `virt` before its virtio-net).
+            if crate::cmdline::test_is(cmdline, "forktls") { run_forktls(); }
+            if crate::cmdline::test_is(cmdline, "idleshoot") { run_idleshoot(); }
             if crate::cmdline::mode_is(cmdline, "proc") { run_manifest_process_at(manifest_path(cmdline)); }
             run_manifest_threaded();
         }
@@ -114,18 +118,8 @@ pub fn run(cmdline: &str, tsc_hz: u64) -> ! {
                 println!("talaria: a test of outgoing TCP + DNS + the wall clock ({} bytes)", CT.len());
                 crate::user::run(CT);
             }
-            if crate::cmdline::test_is(cmdline, "forktls") {
-                // After a fork the child's TLS must be intact (see user/forktls.c).
-                if crate::fs::init() {
-                    println!("talaria: forktls — verifying the TLS of forked children");
-                    unsafe { crate::user::run_process_disk(b"/forktls", &[b"forktls"], &[b"HOME=/"]); }
-                }
-            }
-            if crate::cmdline::test_is(cmdline, "idleshoot") {
-                static IS: &[u8] = user_elf!("idleshoot");
-                println!("talaria: idleshoot {} bytes — one thread removes mappings, one sleeps, two cores idle", IS.len());
-                unsafe { crate::user::run_threaded(IS) };
-            }
+            if crate::cmdline::test_is(cmdline, "forktls") { run_forktls(); }
+            if crate::cmdline::test_is(cmdline, "idleshoot") { run_idleshoot(); }
             if crate::cmdline::test_is(cmdline, "netshoot") {
                 // A network waiter must acknowledge TLB shootdowns to its neighbours: the wait
                 // path runs with interrupts disabled, and the shootdown vector's call
@@ -261,8 +255,12 @@ pub fn run(cmdline: &str, tsc_hz: u64) -> ! {
     unsafe {
         crate::sched::spawn(task_control_plane, sa);
         crate::sched::spawn(task_housekeeping, sb);
+        // No `irq_enable` between the two: from `install` on a tick is a context switch, and one
+        // that lands before `start` saves THE BOOT CONTEXT into task 0's slot — `start` then
+        // "enters task 0" on the boot stack (arm64 under TCG hit it in 1 boot of 10: the
+        // timer's period had long passed, so the tick was pending at the unmask). The task's
+        // own frame turns interrupts on at the entry.
         crate::sched::install();                 // the timer -> a context switch
-        crate::arch::cpu::irq_enable();
         crate::sched::start()                    // -> ! : enter task 0, the timer preempts from there on
     }
 }
@@ -408,6 +406,23 @@ extern "C" fn task_housekeeping() -> ! {
 // The virtio-mmio window lives in its own driver (virtnet.rs) — here there are only the names,
 // so as not to edit every place where it is filled in while parsing the cmdline.
 static SMOLTCP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// `talaria.test=forktls`: after a fork the child's TLS must be intact (see user/forktls.c).
+/// It returns only when there is no disk to take the program from.
+fn run_forktls() {
+    if crate::fs::init() {
+        println!("talaria: forktls — verifying the TLS of forked children");
+        // SAFETY: L1 + L4 — the launch path: once, from the boot core, before any ring 3.
+        unsafe { crate::user::run_process_disk(b"/forktls", &[b"forktls"], &[b"HOME=/"]); }
+    }
+}
+/// `talaria.test=idleshoot`: one thread removes mappings, one sleeps, two cores idle.
+fn run_idleshoot() -> ! {
+    static IS: &[u8] = user_elf!("idleshoot");
+    println!("talaria: idleshoot {} bytes — one thread removes mappings, one sleeps, two cores idle", IS.len());
+    // SAFETY: L1 + L4 — the launch path: once, from the boot core, before any ring 3.
+    unsafe { crate::user::run_threaded(IS) }
+}
+
 pub static TEST_IPI: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static HTTPD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static FAST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);

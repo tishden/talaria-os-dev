@@ -230,8 +230,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 crate::smp::lapic_enable();
                 crate::smp::lapic_timer_init(crate::smp::SLICE_NS);
                 crate::sched::install();
-                crate::arch::cpu::irq_enable();
-                crate::sched::start();
+                crate::sched::start();   // no irq_enable before it: see runmode's ipi path
             }
         }
         "sysbench" => {

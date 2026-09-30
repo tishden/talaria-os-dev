@@ -109,6 +109,11 @@ pub fn start_ap(apic_id: u32) -> bool {
     let l = logical_of(apic_id);
     if l == usize::MAX || l >= super::probes::MAX_AP { return false; }
     if crate::percpu::ONLINE.load(Ordering::SeqCst) & (1 << l) != 0 { return true; }
+    // The stack the core's pickup loop re-enters on when a task EXITS on it (x86 sets it at
+    // the same place). Without it the first thread to finish on a secondary moved the core
+    // onto sp = 0: the fault's own entry faulted, forever and in silence, and every task
+    // queued on that core waited for it (`futexlat` stopped after its first phase).
+    crate::sched::set_ap_stack(l, super::kmain::ap_stack_top(l));
     let rc = super::kmain::start_secondary(l, unpack_aff(apic_id));
     if rc != psci::SUCCESS && rc != psci::ALREADY_ON { return false; }
     let t0 = cpu::counter();
@@ -121,10 +126,14 @@ pub fn start_ap(apic_id: u32) -> bool {
 }
 
 pub fn send_nmi(cpu: usize) { send_ipi(apic_of(cpu), crate::idt::IPI_VECTOR as u8); }
-/// An inter-core call is an SGI: the vector IS the SGI number (0..15, `idt.rs`).
+/// An inter-core call is an SGI: the vector IS the SGI number (0..15, `idt.rs`) — except
+/// the timer's vector, which the shared code sends to make another core enter its
+/// scheduler: that is `RESCHED_SGI` (masked to four bits it was SGI 11, which nobody
+/// handles — `execve` waited a second for sister threads that never left their cores).
 pub fn send_ipi(apic_id: u32, vector: u8) {
     IPI_ICR.fetch_add(1, Ordering::Relaxed);
-    gic::send_sgi(unpack_aff(apic_id), (vector & 0xF) as u32);
+    let sgi = if vector as usize == crate::idt::TIMER_VECTOR { crate::idt::RESCHED_SGI } else { (vector & 0xF) as u32 };
+    gic::send_sgi(unpack_aff(apic_id), sgi);
 }
 
 // ── the tick: a deadline re-armed from the vector ────────────────────────────────

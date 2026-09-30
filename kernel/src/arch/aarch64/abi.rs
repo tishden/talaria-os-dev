@@ -199,9 +199,218 @@ pub fn normalize(nr: u64, args: &mut [u64; 6]) {
     if nr == 56 { args.swap(3, 4); }
 }
 
+// ── the structures and flag values that differ (docs/ARM64-PLAN.md §4.4) ─────────────
+//
+// The handlers write and read x86-64's layouts — they are the kernel's internal ones, as
+// the numbers are. Three things an arm64 libc sees differently, and each is translated at
+// the dispatcher's door rather than in the dozen places that fill them:
+//
+// * `struct stat`: 128 bytes with `st_mode` before a 32-bit `st_nlink` (x86-64: 144 bytes,
+//   a 64-bit `st_nlink` first). An untranslated `fstat` does not only show a wrong mode —
+//   it writes 16 bytes PAST the caller's structure (the first arm64 `sigtest` returned from
+//   `main` into address 0: the saved x29/x30 lay right after its `struct stat`);
+// * `struct epoll_event`: 16 bytes with `data` at 8 (x86-64 packs it into 12, `data` at 4);
+// * `O_DIRECTORY`/`O_NOFOLLOW`/`O_DIRECT`/`O_LARGEFILE`: the same four bits, in two pairs
+//   that change places.
+
+/// `struct stat` sizes: the internal (x86-64) one and arm64's.
+pub const STAT_INTERNAL: usize = 144;
+pub const STAT_SIZE: usize = 128;
+/// `struct epoll_event` sizes likewise.
+pub const EPOLL_EVENT_INTERNAL: usize = 12;
+pub const EPOLL_EVENT_SIZE: usize = 16;
+
+/// The kernel-side buffer a call's structure is bounced through (`enter`/`leave`).
+pub struct Bounce { buf: core::mem::MaybeUninit<[u8; STAT_INTERNAL]> }
+impl Bounce {
+    #[inline(always)]
+    pub fn uninit() -> Self { Bounce { buf: core::mem::MaybeUninit::uninit() } }
+    #[inline(always)]
+    fn ptr(&mut self) -> *mut u8 { self.buf.as_mut_ptr() as *mut u8 }
+}
+
+/// An x86-64 `struct stat` as arm64's.
+pub fn stat_from_internal(x: &[u8; STAT_INTERNAL]) -> [u8; STAT_SIZE] {
+    let mut a = [0u8; STAT_SIZE];
+    a[0..16].copy_from_slice(&x[0..16]);        // st_dev, st_ino
+    a[16..20].copy_from_slice(&x[24..28]);      // st_mode
+    a[20..24].copy_from_slice(&x[16..20]);      // st_nlink: the low 32 bits of x86's 64
+    a[24..32].copy_from_slice(&x[28..36]);      // st_uid, st_gid
+    a[32..40].copy_from_slice(&x[40..48]);      // st_rdev
+    a[48..56].copy_from_slice(&x[48..56]);      // st_size
+    a[56..60].copy_from_slice(&x[56..60]);      // st_blksize: 32 bits here
+    a[64..120].copy_from_slice(&x[64..120]);    // st_blocks, the three timestamps
+    a
+}
+
+/// arm64's `struct epoll_event` as the packed internal one, and back.
+pub fn epoll_event_to_internal(a: &[u8; EPOLL_EVENT_SIZE]) -> [u8; EPOLL_EVENT_INTERNAL] {
+    let mut x = [0u8; EPOLL_EVENT_INTERNAL];
+    x[0..4].copy_from_slice(&a[0..4]);
+    x[4..12].copy_from_slice(&a[8..16]);
+    x
+}
+pub fn epoll_event_from_internal(x: &[u8; EPOLL_EVENT_INTERNAL]) -> [u8; EPOLL_EVENT_SIZE] {
+    let mut a = [0u8; EPOLL_EVENT_SIZE];
+    a[0..4].copy_from_slice(&x[0..4]);
+    a[8..16].copy_from_slice(&x[4..12]);
+    a
+}
+
+/// The open flags between the two numberings. arm64: `O_DIRECTORY` 0x4000, `O_NOFOLLOW`
+/// 0x8000, `O_DIRECT` 0x10000, `O_LARGEFILE` 0x20000; x86-64: `O_DIRECT` 0x4000,
+/// `O_LARGEFILE` 0x8000, `O_DIRECTORY` 0x10000, `O_NOFOLLOW` 0x20000 — the pairs at bits
+/// 14-15 and 16-17 change places, so the same function goes both ways.
+#[inline]
+pub fn oflags(f: u64) -> u64 { (f & !0x3C000) | ((f & 0xC000) << 2) | ((f & 0x3_0000) >> 2) }
+
+/// Before the dispatch: the flag words into the internal numbering, and a structure the
+/// handler READS rebuilt in `b` with the pointer argument moved onto it. A structure the
+/// handler WRITES gets `b` as its destination — `leave` carries it out. `nr` is internal,
+/// the pointers have passed `uaccess::gate`.
+/// # Safety
+/// The pointer arguments must be the process's own, readable for the structure's size.
+#[inline]
+pub unsafe fn enter(nr: u64, args: &mut [u64; 6], b: &mut Bounce) {
+    match nr {
+        257 => args[2] = oflags(args[2]),                              // openat(dirfd, path, flags, mode)
+        293 => args[1] = oflags(args[1]),                              // pipe2(fds, flags): O_DIRECT
+        72 if args[1] == 4 => args[2] = oflags(args[2]),               // fcntl(F_SETFL)
+        5 => args[1] = b.ptr() as u64,                                 // fstat(fd, st)
+        262 => args[2] = b.ptr() as u64,                               // newfstatat(dirfd, path, st, flags)
+        233 if args[3] != 0 => {                                       // epoll_ctl(ep, op, fd, event)
+            let a = core::ptr::read_unaligned(args[3] as *const [u8; EPOLL_EVENT_SIZE]);
+            core::ptr::write_unaligned(b.ptr() as *mut [u8; EPOLL_EVENT_INTERNAL], epoll_event_to_internal(&a));
+            args[3] = b.ptr() as u64;
+        }
+        _ => {}
+    }
+}
+
+/// After the dispatch: what the handler wrote, in the process's layout, at the process's
+/// pointer (`user` are the arguments as they were before `enter`); the result, translated
+/// where it is a flag word.
+/// # Safety
+/// As `enter`; `b` is the buffer `enter` was given for this call.
+#[inline]
+pub unsafe fn leave(nr: u64, user: &[u64; 6], b: &mut Bounce, r: u64) -> u64 {
+    match nr {
+        5 | 262 if r == 0 => {
+            let dst = if nr == 5 { user[1] } else { user[2] };
+            let x = core::ptr::read_unaligned(b.ptr() as *const [u8; STAT_INTERNAL]);
+            core::ptr::write_unaligned(dst as *mut [u8; STAT_SIZE], stat_from_internal(&x));
+        }
+        // epoll_pwait(ep, events, max, ...): `r` packed events lie at the start of an array
+        // sized for `max` 16-byte ones — spread them out from the last one down.
+        281 if (r as i64) > 0 => {
+            let base = user[1] as *mut u8;
+            for i in (0..r as usize).rev() {
+                let x = core::ptr::read_unaligned(base.add(i * EPOLL_EVENT_INTERNAL) as *const [u8; EPOLL_EVENT_INTERNAL]);
+                core::ptr::write_unaligned(base.add(i * EPOLL_EVENT_SIZE) as *mut [u8; EPOLL_EVENT_SIZE], epoll_event_from_internal(&x));
+            }
+        }
+        72 if user[1] == 3 && (r as i64) >= 0 => return oflags(r),     // fcntl(F_GETFL)
+        _ => {}
+    }
+    r
+}
+
+/// `utsname.machine`.
+pub const UTS_MACHINE: &[u8] = b"aarch64";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stat_lands_in_arm64s_fields() {
+        let mut x = [0u8; STAT_INTERNAL];
+        x[0..8].copy_from_slice(&0x1122u64.to_le_bytes());        // st_dev
+        x[8..16].copy_from_slice(&77u64.to_le_bytes());           // st_ino
+        x[16..24].copy_from_slice(&3u64.to_le_bytes());           // st_nlink
+        x[24..28].copy_from_slice(&0o40755u32.to_le_bytes());     // st_mode
+        x[28..32].copy_from_slice(&1000u32.to_le_bytes());        // st_uid
+        x[32..36].copy_from_slice(&1001u32.to_le_bytes());        // st_gid
+        x[40..48].copy_from_slice(&0x0501u64.to_le_bytes());      // st_rdev
+        x[48..56].copy_from_slice(&123456789u64.to_le_bytes());   // st_size
+        x[56..64].copy_from_slice(&4096u64.to_le_bytes());        // st_blksize
+        x[64..72].copy_from_slice(&88u64.to_le_bytes());          // st_blocks
+        x[72..80].copy_from_slice(&1700000000u64.to_le_bytes());  // st_atime
+        x[104..112].copy_from_slice(&1700000002u64.to_le_bytes());// st_ctime
+        let a = stat_from_internal(&x);
+        let u32at = |o: usize| u32::from_le_bytes(a[o..o + 4].try_into().unwrap());
+        let u64at = |o: usize| u64::from_le_bytes(a[o..o + 8].try_into().unwrap());
+        assert_eq!((u64at(0), u64at(8)), (0x1122, 77));
+        assert_eq!((u32at(16), u32at(20), u32at(24), u32at(28)), (0o40755, 3, 1000, 1001));
+        assert_eq!((u64at(32), u64at(40), u64at(48)), (0x0501, 0, 123456789));
+        assert_eq!((u32at(56), u32at(60), u64at(64)), (4096, 0, 88));
+        assert_eq!((u64at(72), u64at(104), u64at(120)), (1700000000, 1700000002, 0));
+    }
+
+    #[test]
+    fn an_epoll_event_goes_there_and_back() {
+        let mut a = [0u8; EPOLL_EVENT_SIZE];
+        a[0..4].copy_from_slice(&0x8000_0001u32.to_le_bytes());   // EPOLLIN | EPOLLET
+        a[4..8].copy_from_slice(&0xDEADu32.to_le_bytes());        // the padding: must not travel
+        a[8..16].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+        let x = epoll_event_to_internal(&a);
+        assert_eq!(u32::from_le_bytes(x[0..4].try_into().unwrap()), 0x8000_0001);
+        assert_eq!(u64::from_le_bytes(x[4..12].try_into().unwrap()), 0x1122_3344_5566_7788);
+        let back = epoll_event_from_internal(&x);
+        assert_eq!(&back[0..4], &a[0..4]);
+        assert_eq!(&back[4..8], &[0u8; 4]);
+        assert_eq!(&back[8..16], &a[8..16]);
+    }
+
+    #[test]
+    fn a_packed_array_of_events_spreads_in_place() {
+        // what `leave` does for epoll_pwait: three packed events at the start of a 4-slot array
+        let mut buf = [0u8; 4 * EPOLL_EVENT_SIZE];
+        for i in 0..3u64 {
+            let o = i as usize * EPOLL_EVENT_INTERNAL;
+            buf[o..o + 4].copy_from_slice(&(i as u32 + 1).to_le_bytes());
+            buf[o + 4..o + 12].copy_from_slice(&(0xA0 + i).to_le_bytes());
+        }
+        let user = [0, buf.as_mut_ptr() as u64, 4, 0, 0, 0];
+        let mut b = Bounce::uninit();
+        assert_eq!(unsafe { leave(281, &user, &mut b, 3) }, 3);
+        for i in 0..3usize {
+            let o = i * EPOLL_EVENT_SIZE;
+            assert_eq!(u32::from_le_bytes(buf[o..o + 4].try_into().unwrap()), i as u32 + 1);
+            assert_eq!(u64::from_le_bytes(buf[o + 8..o + 16].try_into().unwrap()), 0xA0 + i as u64);
+        }
+    }
+
+    #[test]
+    fn the_open_flags_change_places_in_pairs_and_the_rest_stays() {
+        assert_eq!(oflags(0x4000), 0x10000);   // O_DIRECTORY
+        assert_eq!(oflags(0x8000), 0x20000);   // O_NOFOLLOW
+        assert_eq!(oflags(0x10000), 0x4000);   // O_DIRECT
+        assert_eq!(oflags(0x20000), 0x8000);   // O_LARGEFILE
+        let rest = 0o2 | 0o100 | 0o1000 | 0o2000 | 0o4000 | 0x80000; // RDWR CREAT TRUNC APPEND NONBLOCK CLOEXEC
+        assert_eq!(oflags(rest | 0x4000), rest | 0x10000);
+        for f in [0u64, 0x4000, 0x3C000, 0x24000, rest | 0x18000] { assert_eq!(oflags(oflags(f)), f); }
+    }
+
+    #[test]
+    fn fstat_is_bounced_and_carried_out() {
+        let mut user_st = [0xEEu8; STAT_SIZE + 16];              // 16 guard bytes after the structure
+        let mut args = [3, user_st.as_mut_ptr() as u64, 0, 0, 0, 0];
+        let user = args;
+        let mut b = Bounce::uninit();
+        unsafe {
+            enter(5, &mut args, &mut b);
+            assert_ne!(args[1], user[1]);
+            let mut x = [0u8; STAT_INTERNAL];
+            x[24..28].copy_from_slice(&0o100644u32.to_le_bytes());
+            x[48..56].copy_from_slice(&10u64.to_le_bytes());
+            core::ptr::write_unaligned(args[1] as *mut [u8; STAT_INTERNAL], x);  // the handler
+            assert_eq!(leave(5, &user, &mut b, 0), 0);
+        }
+        assert_eq!(u32::from_le_bytes(user_st[16..20].try_into().unwrap()), 0o100644);
+        assert_eq!(u64::from_le_bytes(user_st[48..56].try_into().unwrap()), 10);
+        assert_eq!(&user_st[STAT_SIZE..], &[0xEEu8; 16]);       // nothing past the 128 bytes
+    }
 
     #[test]
     fn the_calls_a_libc_issues_land_on_the_right_handler() {

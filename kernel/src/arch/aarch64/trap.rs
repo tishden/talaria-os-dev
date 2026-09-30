@@ -174,10 +174,43 @@ core::arch::global_asm!(r#"
     add sp, sp, #528
 .endm
 
+/* FP_TAKE_PENDING: the FP/SIMD image the scheduler chose for the task being entered
+   (`switch::fpu_restore` left its address in the core's block, +72) — loaded HERE, after
+   the last Rust code of the switch, and the slot cleared. Clobbers x9-x11. */
+.macro FP_TAKE_PENDING
+    mrs x9, tpidr_el1
+    cbz x9, 7f
+    ldr x10, [x9, #72]
+    cbz x10, 7f
+    str xzr, [x9, #72]
+    ldr x11, [x10, #512]
+    msr fpcr, x11
+    ldr x11, [x10, #520]
+    msr fpsr, x11
+    ldp q0, q1, [x10, #0]
+    ldp q2, q3, [x10, #32]
+    ldp q4, q5, [x10, #64]
+    ldp q6, q7, [x10, #96]
+    ldp q8, q9, [x10, #128]
+    ldp q10, q11, [x10, #160]
+    ldp q12, q13, [x10, #192]
+    ldp q14, q15, [x10, #224]
+    ldp q16, q17, [x10, #256]
+    ldp q18, q19, [x10, #288]
+    ldp q20, q21, [x10, #320]
+    ldp q22, q23, [x10, #352]
+    ldp q24, q25, [x10, #384]
+    ldp q26, q27, [x10, #416]
+    ldp q28, q29, [x10, #448]
+    ldp q30, q31, [x10, #480]
+7:
+.endm
+
 /* SCHED_TAIL: x0 = the frame to enter (from a handler that may have switched tasks),
    x19 = our FP area (our frame is 528 above it). The same frame: its FP state back from
-   the area. Another frame: the scheduler loaded that task's FP registers itself
-   (`fpu_restore`); free the stack we left (`off_stack` -> STACK_BUSY), switch the address
+   the area (and a pending image, if the scheduler named one for the task it then stayed
+   on, is dropped — it is the same state). Another frame: the image the scheduler named
+   (`fpu_restore` -> FP_TAKE_PENDING); free the stack we left (`off_stack` -> STACK_BUSY), switch the address
    space the scheduler chose (`sched_root`, +40) — the x86 tail of timer_stub_sched. */
 .macro SCHED_TAIL
     add x1, x19, #528
@@ -185,9 +218,13 @@ core::arch::global_asm!(r#"
     b.ne 5f
     mov sp, x19
     FP_RESTORE
+    mrs x9, tpidr_el1
+    cbz x9, 6f
+    str xzr, [x9, #72]
     b 6f
 5:
     mov sp, x0
+    FP_TAKE_PENDING
     mrs x9, tpidr_el1
     ldr x10, [x9, #56]
     cmn x10, #1
@@ -209,6 +246,15 @@ core::arch::global_asm!(r#"
     RESTORE_FRAME
     eret
 .endm
+
+/* enter_frame_tail: sp = a saved frame (`switch::enter_saved_ctx`): the pending FP/SIMD
+   image, the frame's restore, `eret`. */
+.section .text
+.global enter_frame_tail
+enter_frame_tail:
+    FP_TAKE_PENDING
+    RESTORE_FRAME
+    eret
 
 .section .text
 .balign 2048
@@ -509,8 +555,30 @@ fn user_fault(f: &mut Frame) -> bool {
         unsafe { crate::supervise::tal_longjmp(core::ptr::addr_of_mut!(crate::supervise::RECOVERY), 1); }
     }
     if own_as_threads {
-        crate::println!("\n[fault] EL0: esr={:#x} ({}) pc={:#x} far={:#x} sp={:#x} tpidr={:#x}",
-            f.esr, ec_name(f.esr), f.pc, far, f.usp, unsafe { cpu::tls_base() });
+        // The thread pointer goes in the same line, as x86's FS base does: every access to
+        // `errno` and the TLS goes through it, and a crash on a broken one cannot be told
+        // from an honest bug by the pc and the address. There is no self-pointer at
+        // [tpidr] on arm64 (the TLS lies ABOVE the thread pointer, the first word is the
+        // dtv), so the verdict is only "mapped or not" — read through the tables, never by
+        // a dereference here.
+        let tp = unsafe { cpu::tls_base() };
+        let root = crate::sched::task_cr3(crate::sched::current_id()) & 0x0000_ffff_ffff_f000;
+        let tp_lost = tp != 0 && (root == 0 || crate::paging::phys_of_in(root, tp).is_none());
+        crate::println!("\n[fault] EL0: esr={:#x} ({}) pc={:#x} far={:#x} sp={:#x} tpidr={:#x}{}",
+            f.esr, ec_name(f.esr), f.pc, far, f.usp, tp, if tp_lost { " (tpidr IS NOT MAPPED) <-- THE TLS IS BROKEN" } else { "" });
+        // The crashed thread's stack goes into the log, always (a core dump needs an FS and
+        // the knob; the stack is wanted on a machine that has neither).
+        crate::obs::unwind::print_backtrace("workload", f.pc, f.fp, true);
+        // First stop the sisters, then write the dump — the order of `idt::rust_exception`
+        // on x86: a thread that keeps running while the dump is written leaves garbage in
+        // it. Under the supervisor the BSP hands control back once every task has stopped.
+        let armed = crate::supervise::RECOVERY_ARMED.load(SeqCst);
+        if armed { crate::supervise::crashed(f.pc, ec, sig); }
+        crate::coredump::snapshot_threads();
+        crate::sched::exit_all(128 + sig as i32);
+        crate::sched::drain_proc(1000);
+        crate::coredump::dump_process(f, sig as u32);
+        if armed { crate::sched::exit_current_code(128 + sig as i32); } // a secondary goes into the pickup loop
         crate::syscall::kill_current_process(sig);
     }
     false
@@ -532,6 +600,11 @@ extern "C" fn irq_entry(_kind: u64, f: &mut Frame) -> u64 {
             let p = super::smp::rearm_period_ns();
             if p != 0 { timer::on_tick(cpu, p); } else if cpu < 64 { timer::TICKS[cpu].fetch_add(1, Ordering::Relaxed); }
             super::idt::TICKS.fetch_add(1, Ordering::Relaxed);
+            tick = true;
+        } else if id == super::idt::RESCHED_SGI {
+            // Another core asks this one to enter its scheduler (`smp::send_ipi` on the
+            // timer's vector): the tick's path, with the timer left as it is.
+            super::idt::IPI_COUNT.fetch_add(1, Ordering::Relaxed);
             tick = true;
         } else if let Some(h) = super::idt::handler_of(id) {
             h();
