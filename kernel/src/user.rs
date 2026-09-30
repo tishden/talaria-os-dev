@@ -114,6 +114,7 @@ unsafe fn load_elf_from_disk(path: *const u8) -> (u64, u64, u64, u64) {
         if memsz > filesz { core::ptr::write_bytes((vaddr as *mut u8).add(filesz), 0, memsz - filesz); }
         // W^X per segment: p_flags (PF_X=1, PF_W=2) -> the rights of the segment's pages.
         let (w, x) = p.rights();
+        if x { crate::arch::icache::sync(vaddr, memsz as u64); }   // the code is in the data cache; fetch must see it
         crate::paging::protect(vaddr, memsz as u64, w, x);
     }
     if ext { crate::ext2::close(fd); } else { crate::fs::close(fd); }
@@ -340,6 +341,7 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
                         while done < n { let got = readat(foff + done as u64, dst.add(done), n - done); if got == 0 { break; } done += got; }
                     }
                 }
+                if exec_ { crate::arch::icache::sync(fr, CHUNK * 4096); }
                 for k in 0..CHUNK { crate::paging::map_leaf(pml4, va + k * 4096, fr + k * 4096, writable, true, exec_); }
                 q += CHUNK;
             }
@@ -364,6 +366,9 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
                 let mut done = 0usize; let want = (seg_hi - seg_lo) as usize;
                 while done < want { let got = readat(foff + done as u64, dst.add(done), want - done); if got == 0 { break; } done += got; }
             }
+            // The page was mapped before it was filled (a segment may share it with the
+            // previous one): the instruction cache is told AFTER the bytes are in.
+            if exec { crate::arch::icache::sync(frame, 4096); }
             q += 1;
         }
     }
@@ -688,6 +693,7 @@ unsafe fn load_elf(elf: &[u8]) -> u64 {
         }
         // W^X per segment: p_flags (PF_X=1, PF_W=2) -> the rights of the segment's pages.
         let (w, x) = p.rights();
+        if x { crate::arch::icache::sync(vaddr, memsz as u64); }
         crate::paging::protect(vaddr, memsz as u64, w, x);
     }
     h.entry
@@ -869,6 +875,7 @@ unsafe fn load_elf_into_space(pml4: u64, elf: &[u8]) -> u64 {
         let frames = crate::mem::alloc_contig(npages).expect("exec: frames");
         core::ptr::write_bytes(frames as *mut u8, 0, (npages * 4096) as usize); // zero (bss)
         core::ptr::copy_nonoverlapping(elf.as_ptr().add(off), (frames + (vaddr - start)) as *mut u8, filesz);
+        if x { crate::arch::icache::sync(frames, npages * 4096); }
         for k in 0..npages {
             crate::paging::map_leaf(pml4, start + k * 4096, frames + k * 4096, w, true, x);
         }

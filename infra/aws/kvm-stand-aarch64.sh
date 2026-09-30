@@ -14,6 +14,7 @@
 #   RINGN=5000000 ...                                   # slots for the ring probe (default 2M)
 #   SOAKN=200 ...                                       # boots per mode of the soak (default 50)
 #   LOOPN=10 ...                                        # runs of the whole gate in a loop (default 10)
+#   UPONLY=1 ...                                        # stop after the build, keep the instance: hand work
 #
 # The ring-3 set travels as BINARIES: kernel/user/aarch64/ (`make -C kernel/user aarch64` on the
 # dev box — the cross musl is there, the stand's Amazon Linux has none) is uploaded next to the
@@ -102,6 +103,12 @@ echo "== the kernel and the raw Image (native objcopy) =="
 ssh $SSH_OPTS ec2-user@"$IP" '. $HOME/.cargo/env && cd talaria && AARCH64_OBJCOPY=objcopy VDSO_CC_AARCH64=gcc kernel/build-aarch64.sh' >"$LOGD/build.log" 2>&1 || { echo "the kernel did not build — $LOGD/build.log"; tail -8 "$LOGD/build.log"; exit 1; }
 T3=$(date +%s); echo "built after $((T3-T2)) s" | tee -a "$LOGD/timing.log"
 
+if [ "${UPONLY:-0}" = 1 ]; then
+  KEEP=1
+  echo "UPONLY=1: built and kept. ssh $SSH_OPTS ec2-user@$IP"
+  exit 0
+fi
+
 echo "== the bring-up gate under KVM (TAL_KVM=1: the timing lines are judged too) =="
 ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && TAL_KVM=1 kernel/test-aarch64.sh' 2>&1 | tee "$LOGD/gate.log" | grep -E 'FAIL|TOTAL|SKIP'
 
@@ -114,7 +121,7 @@ for n in 1 2 3; do
   for p in mbench futexlat smp2 smp4; do
     extra=""; [ "$p" = mbench ] && extra="$DISKARG"
     ssh $SSH_OPTS ec2-user@"$IP" "cd talaria && TAL_APPEND='console=ttyAMA0 talaria.test=$p talaria.smp=4 talaria.poweroff=1' kernel/runq-aarch64.sh 120 -smp 4 $extra" \
-      > "$LOGD/num-$p-$n.log" 2>&1
+      > "$LOGD/num-$p-$n.log" 2>&1 || true
     grep -aE "RESULT mbench|FUTEXLAT|SMP[24]: (t1|the parallel)|\[trap\]|PANIC" "$LOGD/num-$p-$n.log" | cut -c1-160 | sed "s/^/   [$n] /"
   done
 done
@@ -130,7 +137,7 @@ done
 # The soak BEFORE anything can destroy the instance: the modes whose verdict depends on what
 # two cores see of each other's writes, SOAKN boots each; the failing consoles come home.
 echo "== the soak (kernel/soak-aarch64.sh: ${SOAKN:-50} boots of each mode under KVM) =="
-ssh $SSH_OPTS ec2-user@"$IP" "cd talaria && kernel/soak-aarch64.sh ${SOAKN:-50} /tmp/soak" 2>&1 | tee "$LOGD/soak.log"
+ssh $SSH_OPTS ec2-user@"$IP" "cd talaria && kernel/soak-aarch64.sh ${SOAKN:-50} /tmp/soak" 2>&1 | tee "$LOGD/soak.log" || true
 ssh $SSH_OPTS ec2-user@"$IP" 'tar -C /tmp -c soak 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || echo "the soak's consoles did not come home (the verdict lines above are what is left)"
 
 LOOPN=${LOOPN:-10}

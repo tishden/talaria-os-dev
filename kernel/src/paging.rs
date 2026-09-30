@@ -640,6 +640,7 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
                         if writable { ne |= PTE_RW; }
                         if !exec { ne |= PTE_NX; }
                         pte_w(pde, ne);
+                        if exec { crate::arch::icache::sync(e & ADDR_MASK, 0x20_0000); } // mprotect(PROT_EXEC) over written code
                         a += 0x20_0000;
                         continue;
                     }
@@ -680,6 +681,7 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
                         if writable && old & PTE_COW == 0 { e |= PTE_RW; }
                         if !exec { e |= PTE_NX; }
                         pte_w(fresh, e);
+                        if exec && old & PTE_P != 0 { crate::arch::icache::sync(a, 4096); }
                     }
                     a += 0x1000;
                     continue;
@@ -690,6 +692,9 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
                 if writable && old & PTE_COW == 0 { e |= PTE_RW; }
                 if !exec { e |= PTE_NX; }
                 pte_w(pte, e);
+                // mprotect(PROT_EXEC) after a write (a JIT that does not `__clear_cache`, a loader
+                // that maps RW and flips): the instruction cache must see the bytes.
+                if exec && old & PTE_P != 0 { crate::arch::icache::sync(a, 4096); }
                 a += 0x1000;
             }
         }
@@ -2316,6 +2321,7 @@ pub fn cow_fault(vaddr: u64) -> bool {
                     // The copy comes from the node OF THE ONE WHO WRITES: the page moves to it forever.
                     let np = crate::mem::alloc_contig_node(1, crate::affinity::my_node()).expect("cow: page");
                     core::ptr::copy_nonoverlapping(phys as *const u8, np as *mut u8, 4096);
+                    if keep & PTE_NX == 0 { crate::arch::icache::sync(np, 4096); }   // an executable page: fetch must see the copy
                     pte_w(pte, (np & ADDR_MASK) | PTE_P | PTE_RW | keep);
                     crate::mem::rc_drop(phys);
                     COW_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

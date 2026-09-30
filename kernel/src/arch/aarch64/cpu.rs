@@ -136,10 +136,10 @@ pub fn ttbr0_el1() -> u64 { let v: u64; unsafe { core::arch::asm!("mrs {}, ttbr0
 ///   `__clear_cache` reads the line size and issues `dc cvau`/`ic ivau` itself;
 /// * `DC ZVA` (`DZE`): a libc's `memset` uses it when `DCZID_EL0` says it may.
 pub unsafe fn enable_el0_access() {
-    let mut v: u64;
-    core::arch::asm!("mrs {}, cntkctl_el1", out(reg) v, options(nomem, nostack));
-    v |= 1 << 1;
-    core::arch::asm!("msr cntkctl_el1, {}", "isb", in(reg) v, options(nomem, nostack));
+    // The whole word, not a read-modify-write: CNTKCTL_EL1's reset value is UNKNOWN
+    // (KVM's poison), and the other bits (the event stream, EL0 access to the physical
+    // timer) are not wanted.
+    core::arch::asm!("msr cntkctl_el1, {}", "isb", in(reg) 1u64 << 1, options(nomem, nostack));
     let s = sctlr_el1() | (1 << 14) | (1 << 15) | (1 << 26);
     core::arch::asm!("msr sctlr_el1, {}", "isb", in(reg) s, options(nomem, nostack));
 }

@@ -50,6 +50,7 @@ pub fn init() {
     unsafe {
         core::ptr::write_bytes(fr as *mut u8, 0, load);
         core::ptr::copy_nonoverlapping(IMAGE.as_ptr(), fr as *mut u8, load);
+        crate::arch::icache::sync(fr, load as u64);   // the trampolines and the clock calls are code
     }
     BASE.store(fr, Ordering::SeqCst);
     crate::tsc::publish_vdso_now(); // the clock's parameters go at once, before the first discipline

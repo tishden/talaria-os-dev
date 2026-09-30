@@ -140,7 +140,23 @@ pub fn root() -> u64 { cpu::ttbr0_el1() & ADDR_MASK }
 /// translations are dropped (ASID 0 is shared by every space for now).
 #[inline(always)]
 pub unsafe fn set_root(root: u64) {
-    core::arch::asm!("msr ttbr0_el1, {}", "tlbi vmalle1", "dsb nsh", "isb", in(reg) root & ADDR_MASK, options(nostack));
+    // Every space shares ASID 0 for now, so the old space's translations must be gone
+    // BEFORE the new root can be walked — and any that a speculative walk brings in during
+    // the switch, after it: the invalidate on both sides, completed (`dsb ish`, not `nsh`:
+    // the walks are inner-shareable), and an `isb` so that nothing fetched under the old
+    // regime is used. With the single trailing invalidate the first instruction of a
+    // process at 0x50002190 read, one boot in three under KVM, the ZEROS the kernel's
+    // identity mapping of that same address holds — an UNDEF at `_start`.
+    core::arch::asm!(
+        "dsb ishst",
+        "tlbi vmalle1",
+        "dsb ish",
+        "msr ttbr0_el1, {}",
+        "isb",
+        "tlbi vmalle1",
+        "dsb ish",
+        "isb",
+        in(reg) root & ADDR_MASK, options(nostack));
 }
 
 /// Drop every translation this core has cached.

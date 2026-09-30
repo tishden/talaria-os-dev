@@ -7,6 +7,12 @@
 //! silent, intermittent and invisible under TCG (QEMU keeps the caches coherent).
 
 /// Make the bytes at `[addr, addr + len)` visible to instruction fetch on every core.
+/// `addr` is the address the KERNEL wrote through (the frame's identity address for a
+/// loader, the process's own for an `mprotect`): the clean is by address and reaches the
+/// same lines either way; the invalidate is by address only on a PIPT instruction cache
+/// (`CTR_EL0.L1Ip` = 0b11 — Neoverse and every recent core), and on a VIPT one it is the
+/// whole cache of every core (`ic ialluis`), as Linux's `sync_icache_aliases` does, since
+/// the process fetches through another virtual address than the kernel wrote.
 pub fn sync(addr: u64, len: u64) {
     if len == 0 { return; }
     // The cache line sizes come from CTR_EL0: DminLine (bits 19:16) and IminLine (3:0),
@@ -15,13 +21,18 @@ pub fn sync(addr: u64, len: u64) {
     unsafe { core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)); }
     let dline = 4u64 << ((ctr >> 16) & 0xF);
     let iline = 4u64 << (ctr & 0xF);
+    let pipt = (ctr >> 14) & 0x3 == 0b11;
     let end = addr + len;
     unsafe {
         let mut a = addr & !(dline - 1);
         while a < end { core::arch::asm!("dc cvau, {}", in(reg) a, options(nostack)); a += dline; }
         core::arch::asm!("dsb ish", options(nostack));
-        let mut a = addr & !(iline - 1);
-        while a < end { core::arch::asm!("ic ivau, {}", in(reg) a, options(nostack)); a += iline; }
+        if pipt {
+            let mut a = addr & !(iline - 1);
+            while a < end { core::arch::asm!("ic ivau, {}", in(reg) a, options(nostack)); a += iline; }
+        } else {
+            core::arch::asm!("ic ialluis", options(nostack));
+        }
         core::arch::asm!("dsb ish", "isb", options(nostack));
     }
 }
