@@ -9,12 +9,12 @@
 //! `arch::` is compiled for this target yet.
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use super::{cpu, dtb, gic, mmu, percpu, psci, timer, trap, uart};
+use super::{cpu, dtb, gic, mmu, percpu, probes, psci, timer, trap, uart};
 
 /// A secondary core's stack (its PSCI context is the stack's top) and its "I am up"
 /// mark. The BSP's stack is `boot_stack` in boot.rs.
 const AP_STACK: usize = 16 * 1024;
-const MAX_AP: usize = 8;
+const MAX_AP: usize = probes::MAX_AP;
 #[repr(C, align(16))]
 struct ApStack([u8; AP_STACK]);
 static mut AP_STACKS: [ApStack; MAX_AP] = [const { ApStack([0; AP_STACK]) }; MAX_AP];
@@ -193,6 +193,7 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
         if i >= MAX_AP { crate::println!("talaria: cpu{} (mpidr {:#x}): no stack slot — MAX_AP is {}", i, mpidr, MAX_AP); continue; }
         unsafe extern "C" { fn ap_start(); }
         let top = unsafe { core::ptr::addr_of!(AP_STACKS[i]) as u64 + AP_STACK as u64 };
+        probes::CPU_MPIDR[i].store(mpidr, Ordering::Relaxed);
         let rc = psci::cpu_on(mpidr, ap_start as *const () as usize as u64, top);
         if rc != psci::SUCCESS { crate::println!("talaria: cpu{} (mpidr {:#x}): PSCI CPU_ON refused: {}", i, mpidr, rc); continue; }
         let t0 = cpu::counter();
@@ -213,7 +214,8 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     }
     unsafe { cpu::irq_disable(); }
     timer::stop();
-    el0_probe()
+    percpu::init_tpidr(cpu::cpu_index());
+    probes::run(cmdline)
 }
 
 /// A secondary core, from `ap_start` (boot.rs): the same map, vectors and GIC state
@@ -232,116 +234,13 @@ extern "C" fn rust_ap_main(ctx: u64) -> ! {
     let slot = me.min(MAX_AP - 1);
     AP_UP[slot].store(1, Ordering::Release);
     unsafe { cpu::irq_enable(); }
-    loop { unsafe { cpu::halt(); } }
+    probes::ap_idle_loop(me)
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     crate::println!("PANIC: {}", info);
     cpu::halt_irq_off_forever()
-}
-
-/// Phase 3's first step (docs/ARM64-PLAN.md §4.5), proved with no ELF and no libc: a
-/// dozen instructions written into a fresh frame — three `svc`s that expect `x0 = x8 + 1`
-/// back, then a `brk` — run at EL0 with a stack of their own. The kernel's identity leaves
-/// of the RAM gigabyte are user-accessible and executable (`paging::init`, the U/S region),
-/// so the frame is reachable from EL0 as it is; the instruction cache is synchronised
-/// after the write (`icache::sync`), which TCG would forgive and a core would not.
-fn el0_probe() -> ! {
-    let (Some(code), Some(stack)) = (crate::mem::alloc_frame(), crate::mem::alloc_frame()) else {
-        crate::println!("talaria: el0 probe: no frame");
-        cpu::halt_forever()
-    };
-    // The probe, assembled here so that no hand-written word can be off by a bit:
-    //   mov x8, #100; svc; cmp x0, #101; b.ne wrong
-    //   mov x8, #200; svc; cmp x0, #201; b.ne wrong
-    //   mov x8, #300; svc; cmp x0, #301; b.ne wrong
-    //   brk #0 (the end)          wrong: brk #1
-    let probe: [u32; 14] = [
-        movz(8, 100), SVC0, cmp_imm(101), b_ne(13 - 3),
-        movz(8, 200), SVC0, cmp_imm(201), b_ne(13 - 7),
-        movz(8, 300), SVC0, cmp_imm(301), b_ne(13 - 11),
-        brk(0), brk(1),
-    ];
-    unsafe {
-        for (i, w) in probe.iter().enumerate() { core::ptr::write_volatile((code as *mut u32).add(i), *w); }
-    }
-    super::icache::sync(code, 4 * probe.len() as u64);
-    percpu::init_tpidr(cpu::cpu_index());
-    crate::println!("talaria: el0 probe: code at {:#x}, stack at {:#x} — three svc round trips, then a brk", code, stack + 4096);
-    trap::EL0_RETURN.store(el0_probe_done as *const () as usize as u64, Ordering::Relaxed);
-    // Into EL0: SPSR = EL0t with DAIF masked (no tick while the probe runs), ELR = the code,
-    // SP_EL0 = the stack. The `eret` never returns here — the probe ends in a fatal `brk`.
-    unsafe {
-        core::arch::asm!(
-            "msr sp_el0, {sp}",
-            "msr elr_el1, {pc}",
-            "msr spsr_el1, {ps}",
-            "eret",
-            sp = in(reg) stack + 4096, pc = in(reg) code, ps = in(reg) 0x3C0u64, options(noreturn)
-        );
-    }
-}
-
-/// Where `brk #0` from the probe lands (trap.rs, `EL0_RETURN`): the count of round trips
-/// says whether every `svc` came back with the right answer — a wrong one would have
-/// ended in `brk #1`, which is fatal.
-extern "C" fn el0_probe_done() -> ! {
-    let n = trap::SVCS.load(Ordering::Relaxed);
-    crate::println!("talaria: el0 probe: back in EL1 — {} svc round trip(s), ended by brk #0 ({})", n, if n == 3 { "as expected" } else { "NOT the 3 expected" });
-    vdso_probe()
-}
-
-/// The vDSO from EL0: `__kernel_clock_gettime(CLOCK_MONOTONIC, &ts)` called through the
-/// image mapped at `vdso::VADDR`, the result reported with `brk #2`. The kernel brackets
-/// the call with two readings of its own clock: the vDSO's answer must lie between them.
-fn vdso_probe() -> ! {
-    let Some(off) = crate::vdso::symbol(b"__kernel_clock_gettime") else {
-        crate::println!("talaria: vdso probe: no __kernel_clock_gettime in the image (an empty vDSO — no aarch64 cross compiler at build time?)");
-        finish()
-    };
-    let entry = crate::vdso::VADDR + off;
-    let (Some(code), Some(stack)) = (crate::mem::alloc_frame(), crate::mem::alloc_frame()) else { finish() };
-    //   sub sp, sp, #16; mov x0, #1; mov x1, sp; x9 = entry (movz/movk x4); blr x9
-    //   ldp x8, x9, [sp]; brk #2
-    let probe: [u32; 11] = [
-        0xD10043FF,                         // sub sp, sp, #16
-        movz(0, 1),                          // mov x0, #1 (CLOCK_MONOTONIC)
-        0x910003E1,                          // mov x1, sp
-        movz(9, (entry & 0xFFFF) as u32),
-        movk(9, ((entry >> 16) & 0xFFFF) as u32, 1),
-        movk(9, ((entry >> 32) & 0xFFFF) as u32, 2),
-        movk(9, ((entry >> 48) & 0xFFFF) as u32, 3),
-        0xD63F0120,                          // blr x9
-        0xA94027E8,                          // ldp x8, x9, [sp]
-        brk(2),
-        brk(1),
-    ];
-    unsafe { for (i, w) in probe.iter().enumerate() { core::ptr::write_volatile((code as *mut u32).add(i), *w); } }
-    super::icache::sync(code, 4 * probe.len() as u64);
-    trap::EL0_RETURN.store(vdso_probe_done as *const () as usize as u64, Ordering::Relaxed);
-    let hz = cpu::counter_hz();
-    let base = super::pending::tsc::VDSO_BASE.load(Ordering::Relaxed);
-    let before = cpu::counter().wrapping_sub(base) as u128 * 1_000_000_000 / hz as u128;
-    PROBE_BEFORE.store(before as u64, Ordering::Relaxed);
-    crate::println!("talaria: vdso probe: __kernel_clock_gettime at {:#x} (the image at {:#x}), calling it from EL0", entry, crate::vdso::VADDR);
-    unsafe {
-        core::arch::asm!("msr sp_el0, {sp}", "msr elr_el1, {pc}", "msr spsr_el1, {ps}", "eret",
-            sp = in(reg) stack + 4096, pc = in(reg) code, ps = in(reg) 0x3C0u64, options(noreturn));
-    }
-}
-static PROBE_BEFORE: AtomicU64 = AtomicU64::new(0);
-
-extern "C" fn vdso_probe_done() -> ! {
-    let hz = cpu::counter_hz();
-    let base = super::pending::tsc::VDSO_BASE.load(Ordering::Relaxed);
-    let after = (cpu::counter().wrapping_sub(base) as u128 * 1_000_000_000 / hz as u128) as u64;
-    let before = PROBE_BEFORE.load(Ordering::Relaxed);
-    let (sec, nsec) = (trap::PROBE_X8.load(Ordering::Relaxed), trap::PROBE_X9.load(Ordering::Relaxed));
-    let got = sec.wrapping_mul(1_000_000_000).wrapping_add(nsec);
-    crate::println!("talaria: vdso probe: EL0 read {}.{:09} s; the kernel's clock around the call: {} .. {} ns ({})",
-        sec, nsec, before, after, if nsec < 1_000_000_000 && got >= before && got <= after { "as expected" } else { "NOT inside the bracket" });
-    finish()
 }
 
 /// The dirty bit on a 4K page: hardware DBM where the core has it (`TCR.HD`), else the
@@ -363,20 +262,3 @@ fn dirty_probe() {
         if ok { "as expected" } else { "NOT as expected" });
 }
 
-fn finish() -> ! {
-    crate::println!("talaria: arm64 phases 1-3(a) stop here — the kernel above arch/ is not compiled for this target yet (docs/ARM64-PLAN.md §5)");
-    cpu::halt_forever()
-}
-
-// The five encodings the probe needs (the ARM ARM, C6.2): MOVZ, SVC, SUBS (cmp), B.cond, BRK.
-const SVC0: u32 = 0xD400_0001;
-/// `movz x<rd>, #imm16`
-fn movz(rd: u32, imm16: u32) -> u32 { 0xD280_0000 | (imm16 & 0xFFFF) << 5 | (rd & 31) }
-/// `cmp x0, #imm12` = `subs xzr, x0, #imm12`
-fn cmp_imm(imm: u32) -> u32 { 0xF100_001F | (imm & 0xFFF) << 10 }
-/// `b.ne .+4*words`
-fn b_ne(words: u32) -> u32 { 0x5400_0001 | (words & 0x7FFFF) << 5 }
-/// `movk x<rd>, #imm16, lsl #(16*hw)`
-fn movk(rd: u32, imm16: u32, hw: u32) -> u32 { 0xF280_0000 | (hw & 3) << 21 | (imm16 & 0xFFFF) << 5 | (rd & 31) }
-/// `brk #imm16`
-fn brk(imm16: u32) -> u32 { 0xD420_0000 | (imm16 & 0xFFFF) << 5 }

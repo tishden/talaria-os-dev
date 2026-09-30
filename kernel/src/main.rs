@@ -101,7 +101,6 @@ mod waitpred; // the predicates of a wait on a word: the sleeper's side and the 
 use arch::percpu;
 #[cfg(target_arch = "x86_64")]
 mod fastpath;
-#[cfg(target_arch = "x86_64")]
 mod fastring;  // the zero-syscall rings: the layout, the index arithmetic, the ARP the cell answers itself
 #[cfg(target_arch = "x86_64")]
 mod fs;

@@ -119,23 +119,87 @@ vec_\kind:
     eret
 .endm
 
-STUB_FATAL 0
-STUB_IRQ 1
-STUB_FATAL 2
-STUB_FATAL 3
-STUB_FATAL 4
-STUB_IRQ 5
-STUB_FATAL 6
-STUB_FATAL 7
 .macro STUB_SYNC_EL0 kind
+vec_\kind:
+    SAVE_FRAME
+    /* the workload's FP/SIMD state, 528 bytes below the frame — when FPSAVE_ON says so
+       (the svccost probe measures the entry with and without; the kernel is hard-float,
+       so with it OFF a handler that touches a V register corrupts the workload's) */
+    sub sp, sp, #528
+    adrp x9, FPSAVE_ON
+    ldr w9, [x9, :lo12:FPSAVE_ON]
+    cbz w9, 1f
+    stp q0, q1, [sp, #0]
+    stp q2, q3, [sp, #32]
+    stp q4, q5, [sp, #64]
+    stp q6, q7, [sp, #96]
+    stp q8, q9, [sp, #128]
+    stp q10, q11, [sp, #160]
+    stp q12, q13, [sp, #192]
+    stp q14, q15, [sp, #224]
+    stp q16, q17, [sp, #256]
+    stp q18, q19, [sp, #288]
+    stp q20, q21, [sp, #320]
+    stp q22, q23, [sp, #352]
+    stp q24, q25, [sp, #384]
+    stp q26, q27, [sp, #416]
+    stp q28, q29, [sp, #448]
+    stp q30, q31, [sp, #480]
+    mrs x9, fpcr
+    mrs x10, fpsr
+    str x9, [sp, #512]
+    str x10, [sp, #520]
+1:
+    mov x0, #\kind
+    add x1, sp, #528
+    bl sync_el0
+    adrp x9, FPSAVE_ON
+    ldr w9, [x9, :lo12:FPSAVE_ON]
+    cbz w9, 2f
+    ldr x9, [sp, #512]
+    ldr x10, [sp, #520]
+    msr fpcr, x9
+    msr fpsr, x10
+    ldp q0, q1, [sp, #0]
+    ldp q2, q3, [sp, #32]
+    ldp q4, q5, [sp, #64]
+    ldp q6, q7, [sp, #96]
+    ldp q8, q9, [sp, #128]
+    ldp q10, q11, [sp, #160]
+    ldp q12, q13, [sp, #192]
+    ldp q14, q15, [sp, #224]
+    ldp q16, q17, [sp, #256]
+    ldp q18, q19, [sp, #288]
+    ldp q20, q21, [sp, #320]
+    ldp q22, q23, [sp, #352]
+    ldp q24, q25, [sp, #384]
+    ldp q26, q27, [sp, #416]
+    ldp q28, q29, [sp, #448]
+    ldp q30, q31, [sp, #480]
+2:
+    add sp, sp, #528
+    RESTORE_FRAME
+    eret
+.endm
+
+.macro STUB_SYNC_EL1 kind
 vec_\kind:
     SAVE_FRAME
     mov x0, #\kind
     mov x1, sp
-    bl sync_el0
+    bl sync_el1
     RESTORE_FRAME
     eret
 .endm
+
+STUB_FATAL 0
+STUB_IRQ 1
+STUB_FATAL 2
+STUB_FATAL 3
+STUB_SYNC_EL1 4
+STUB_IRQ 5
+STUB_FATAL 6
+STUB_FATAL 7
 
 STUB_SYNC_EL0 8
 STUB_IRQ 9
@@ -238,6 +302,60 @@ pub static TICK_NS: AtomicU64 = AtomicU64::new(1_000_000);
 pub static SGIS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
 /// Interrupts nobody claimed, per core.
 pub static UNCLAIMED: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+
+/// Whether the EL0 sync stub saves the workload's FP/SIMD state (528 bytes) on entry.
+/// ON by default — the kernel is built hard-float; the `svccost` probe turns it off to
+/// measure what the save costs (docs/ARM64-PLAN.md §4.5: the lazy-save decision).
+#[unsafe(no_mangle)]
+pub static FPSAVE_ON: AtomicU32 = AtomicU32::new(1);
+
+/// A guarded load's fixup (per core): the address to resume at if the load faults, and
+/// whether it did — the arm64 twin of `arch::x86_64::unwind::guarded_load`, used by the
+/// `bbm` probe to read a page another core is flipping.
+pub static FIXUP: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+pub static HIT: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+/// TLB conflict aborts (DFSC 0x30) swallowed by a guarded load — the signature of a
+/// missing break-before-make, which is exactly what the `bbm` probe hunts.
+pub static CONFLICTS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+
+/// Load the word at `addr`, or `None` if the load faults. The fault handler (`sync_el1`)
+/// resumes at the label after the load with the destination left as the zero it was set
+/// to, and marks `HIT`.
+pub fn guarded_load(addr: u64) -> Option<u64> {
+    let cpu = cpu::cpu_index().min(63);
+    HIT[cpu].store(0, Ordering::Relaxed);
+    let v: u64;
+    unsafe {
+        core::arch::asm!(
+            "adr {t}, 2f",
+            "str {t}, [{s}]",
+            "mov {v}, #0",
+            "ldr {v}, [{a}]",
+            "2:",
+            "str xzr, [{s}]",
+            t = out(reg) _, s = in(reg) FIXUP[cpu].as_ptr(), v = out(reg) v, a = in(reg) addr,
+            options(nostack),
+        );
+    }
+    if HIT[cpu].load(Ordering::Relaxed) != 0 { None } else { Some(v) }
+}
+
+/// A synchronous exception at EL1 (the kernel itself). A data abort inside a guarded load
+/// resumes at its fixup; anything else is fatal.
+#[unsafe(no_mangle)]
+extern "C" fn sync_el1(kind: u64, f: &mut Frame) {
+    let ec = (f.esr >> 26) & 0x3F;
+    let cpu = cpu::cpu_index().min(63);
+    let fix = FIXUP[cpu].load(Ordering::Relaxed);
+    if ec == 0x25 && fix != 0 {
+        if f.esr & 0x3F == 0x30 { CONFLICTS[cpu].fetch_add(1, Ordering::Relaxed); }
+        HIT[cpu].store(1, Ordering::Relaxed);
+        FIXUP[cpu].store(0, Ordering::Relaxed);
+        f.elr = fix;
+        return;
+    }
+    trap(kind, f)
+}
 
 /// The IRQ path: acknowledge, dispatch by INTID, end. Nothing here prints — the
 /// console has a lock and the interrupted code may hold it.

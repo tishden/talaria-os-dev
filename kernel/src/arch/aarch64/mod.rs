@@ -22,6 +22,7 @@ pub mod kmain;
 pub mod mmu;
 pub mod pending;
 pub mod percpu;
+pub mod probes;
 pub mod psci;
 pub mod timer;
 pub mod trap;

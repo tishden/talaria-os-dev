@@ -10,7 +10,14 @@ variable "region" {
 }
 variable "instance_type" {
   # Cheapest sensible x86 metal; 4.5 GHz Cascade Lake — good latency stand.
+  # The arm64 KVM stand (docs/ARM64-PLAN.md §9) is `c7g.metal` with `arch = "arm64"`:
+  # Graviton3, 64 cores, no SMT, the only way to get /dev/kvm on arm64 EC2.
   default = "m5zn.metal"
+}
+variable "arch" {
+  # The AMI's architecture: "x86_64" or "arm64". It must match the instance type, and
+  # terraform cannot tell — an arm64 AMI on an x86 type fails at launch, not here.
+  default = "x86_64"
 }
 variable "ssh_cidr" {
   default = "0.0.0.0/0"
@@ -69,7 +76,7 @@ data "aws_ami" "al2023" {
   owners      = ["amazon"]
   filter {
     name   = "name"
-    values = ["al2023-ami-2023*-x86_64"]
+    values = ["al2023-ami-2023*-${var.arch}"]
   }
 }
 
