@@ -747,27 +747,77 @@ KVM on the arm64 metal. `validate.sh` follows the same switch.
 
 ---
 
-## 9. The first session's checklist
+## 9. The next session: the KVM stand on `c6g.metal`
 
-1. Install: `rustup target add aarch64-unknown-none aarch64-unknown-uefi
-   --toolchain nightly-2026-08-20`; `dnf install qemu-system-aarch64-core
-   edk2-aarch64`; `aarch64-linux-musl-cross` into `services/docker/` as a third
-   toolchain image (`Dockerfile.musl-aarch64`).
-2. Create `kernel/src/arch/{mod.rs,x86_64/}` and MOVE (not rewrite) the `asm!`
-   holders listed in §4.1 there, one module per commit, running `test.sh` after
-   each: the count must not move. This is a week of mechanical work with a
-   sharp gate, and it is the part that cannot be wrong without being noticed.
-3. Write `aarch64-talaria.json`, `linker-aarch64.ld` with the `Image` header
-   section first, and the empty `arch/aarch64/` that compiles; make
-   `cargo build --target aarch64-talaria.json` a CI job next to the x86 one.
-4. Boot to `talaria: boot` on `qemu-system-aarch64 -M virt -cpu max -kernel`
-   with the PL011 and the DTB parser (phase 1's first half). From here the work
-   is the table in §3, top to bottom.
-5. Bring up a `c7g.metal` once, install docker + `qemu-system-aarch64` + KVM
-   there, run the x86-independent subset of `test.sh` under `TAL_ARCH=aarch64`,
-   and record the price of an hour and the time to bring it up in
-   `docs/ENGINEERING-NOTES.md` — the stand's economics decide how often the
-   full set runs.
+The first session did what §9 used to list — the toolchains, the `arch/` split (to the
+last `asm!`), first light and phases 1-3(a) under TCG, the gate in CI. What TCG cannot
+show is now the whole of what is left to learn, and it needs an arm64 host with KVM.
+The choice is **`c6g.metal`** (Graviton2, Neoverse N1, ARMv8.2-A, 64 cores, no SMT,
+`ap-northeast-1` where the vCPU quota fits): it has every feature the target asks for
+(LSE, the Crypto Extensions, FEAT_HAFDBS for the dirty bit) at the lowest price of the
+metal types that do; `a1.metal` (Cortex-A72) does not — no LSE, no HAFDBS — and
+`c7g.metal` is the same work at a higher price, worth it only when the numbers of
+phase 9 must match the production generation. A metal instance takes 10-20 minutes to
+come up and costs about $2.2 an hour: the session is planned as ONE bring-up of a few
+hours, with everything that can be prepared in advance prepared in advance.
+
+### 9.1. Before the stand is paid for (the dev box, no clock running)
+
+1. **The stand's recipe in `infra/aws/`.** `main.tf` looks the AMI up by
+   `al2023-ami-2023*-x86_64`: the arm64 twin (`*-arm64`) selected by a variable, and
+   `instance_type = c6g.metal`. A user-data or an `ansible` play that installs docker,
+   git, `binutils` (a native `objcopy`), the pinned nightly with
+   `aarch64-unknown-none`, builds `services/docker/Dockerfile.qemu-aarch64` NATIVELY
+   (the `fedora:40` base pulls its arm64 variant) and clones the `arm64-port` branch.
+   Check `/dev/kvm` exists and is group-readable in the play, not by hand.
+2. **The probes TCG forgives, written now, judged there** — each a `talaria.test=`
+   value the arm64 `kmain` dispatches on (`cmdline.rs` is over, `test_is` works):
+   * `ring` — the §4.13 fences under a weak machine: a producer core and a consumer
+     core over an SPSC ring in the `fastring` layout (the exact code path of
+     `fastpath.rs`, minus the card), a checksum per slot, a few seconds and millions of
+     slots, the count of corrupted slots printed — zero or the fences are wrong;
+   * `icache` — §4.12: write a probe into a frame, run it at EL0, rewrite the SAME frame
+     with a probe that answers differently, `icache::sync`, run again — the second
+     answer or a stale line executed (then repeat WITHOUT the sync to see the failure
+     the sync prevents: a gate that cannot fail proves nothing);
+   * `bbm` — §4.3 break-before-make: one core flips a page between `protect` and
+     `protect_none` in a loop while another reads it and takes the expected fault or
+     the expected value — a TLB conflict abort or a stale translation is the failure;
+   * `svccost` — the first arm64 number for §4.5: a hundred thousand `svc` round trips
+     timed by the counter from EL0, printed as ns per call, with and without the
+     528-byte FP/SIMD save in the vector (the lazy-save decision needs both).
+3. **The timing lines already printed are made judgeable under KVM**: the 50-ms tick
+   count (48-49 under TCG, ~50 expected under KVM), and the `test-aarch64.sh` gate gains
+   a `TAL_KVM=1` mode that tightens them.
+4. **The dev-box work that does not need the stand goes on in parallel**: the
+   `arch/x86_64/signal.rs` extraction (the x86 `ucontext`/`gregs`, `fork_regs`,
+   `exit_uregs`, `sigreturn`) and the neutral `Frame` — phase 3's design item, with its
+   own x86 regression.
+
+### 9.2. On the stand (one bring-up, 3-4 hours)
+
+| # | Step | The gate / what is recorded |
+|---|---|---|
+| A | `lab-up` with `c6g.metal`; the recipe of 9.1.1 runs; `kernel/build-aarch64.sh`; `kernel/test-aarch64.sh` under `-enable-kvm -cpu host` | 25/25 as under TCG; the banner's facts go to `docs/MEASUREMENTS.md`: MIDR (Arm 0x41, part 0xd0c), `CNTFRQ` on Graviton2, HAFDBS present, PSCI version, GIC SPIs, the tick count in 50 ms |
+| B | `talaria.test=ring` at `-smp 2/4/8`, several minutes each | corrupted slots = 0; if not, the fence set of §4.13 is wrong and this is the day to learn it |
+| C | `talaria.test=icache` | the resynchronised probe answers anew; the unsynchronised repeat shows the stale line (records how the failure LOOKS — the plan's §4.12 said "silent") |
+| D | `talaria.test=bbm` | no conflict abort, no stale value across the flip |
+| E | `talaria.test=svccost` | ns per `svc` with and without the FP/SIMD save — the number the lazy-save decision is made on |
+| F | 50 boots of `test-aarch64.sh` in a loop (`-smp 4`) | zero failures: the bring-up's SMP paths (PSCI, the redistributor wake, SGIs) under a real weak machine |
+| G | `lab-down`; the hours and the bring-up time go to `docs/ENGINEERING-NOTES.md` §5 | the stand's economics decide how often the full set runs |
+
+Not in this session, on purpose: the UEFI path (phase 6 needs the aarch64 stub, not
+written), the workloads (phase 7 needs `syscall.rs` over — phase 3 first), and the
+x86 regression on the metal (`test.sh` is x86 QEMU; the arm64 set is
+`test-aarch64.sh` until the shared modes come over, §6).
+
+### 9.3. What the session must leave behind
+
+* `docs/MEASUREMENTS.md`: a new section with the stand's first facts (A) and numbers
+  (E) — the arm64 twin of the x86 syscall cost, so that phase 9 has a baseline;
+* `docs/ENGINEERING-NOTES.md` §5: the stand's recipe, the bring-up time, the price, and
+  every pitfall met on the way (the x86 sections there began the same way);
+* this plan: §4.13 updated with what B/C/D found, and the status line at the top.
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
