@@ -388,6 +388,8 @@ extern "C" fn trap(kind: u64, f: &Frame) -> ! {
     cpu::halt_irq_off_forever()
 }
 
+/// How many raw EL1 exception lines have been written (`sync_el1_entry`).
+static RAW_TRAPS: AtomicU64 = AtomicU64::new(0);
 /// SVCs taken from EL0, for the bring-up's proof.
 pub static SVCS: AtomicU64 = AtomicU64::new(0);
 /// What a probe reported with `brk #2` (x8, x9).
@@ -484,6 +486,17 @@ pub fn guarded_load(addr: u64) -> Option<u64> {
 extern "C" fn sync_el1_entry(kind: u64, f: &mut Frame) -> u64 {
     let me = f as *mut Frame as u64;
     let ec = (f.esr >> 26) & 0x3F;
+    // An exception BEFORE the per-core block exists (the bring-up, up to `percpu::init`),
+    // in raw hex and before any logic: a fault whose handler faults again leaves this
+    // line and nothing else (the console lock, the formatting and the tables are all
+    // suspects at that stage — the poisoned TPIDR_EL1 of §10.4 left NOTHING).
+    if ec != 0x15 && super::percpu::block_ptr().is_null() && RAW_TRAPS.fetch_add(1, Ordering::Relaxed) < 4 {
+        for (tag, v) in [(b'E', f.esr), (b'L', f.pc), (b'F', f.far), (b'S', f.usp), (b'R', f.lr)] {
+            super::uart::putb(b' '); super::uart::putb(tag);
+            for i in (0..16).rev() { super::uart::putb(b"0123456789abcdef"[((v >> (i * 4)) & 0xF) as usize]); }
+        }
+        super::uart::putb(b'\n');
+    }
     // `svc` at EL1 = the scheduler's soft yield (`switch::soft_yield_kick`): the tick's path
     // by hand, once the scheduler owns the tick.
     if ec == 0x15 {
@@ -566,6 +579,18 @@ fn user_fault(f: &mut Frame) -> bool {
         let tp_lost = tp != 0 && (root == 0 || crate::paging::phys_of_in(root, tp).is_none());
         crate::println!("\n[fault] EL0: esr={:#x} ({}) pc={:#x} far={:#x} sp={:#x} tpidr={:#x}{}",
             f.esr, ec_name(f.esr), f.pc, far, f.usp, tp, if tp_lost { " (tpidr IS NOT MAPPED) <-- THE TLS IS BROKEN" } else { "" });
+        // An UNDEFINED instruction: the word the data side holds at the pc, through the
+        // process's mapping and through the frame's identity address — an instruction
+        // cache that fetched something else is the difference between the two prints
+        // and what the process saw (docs/ARM64-PLAN.md §4.12).
+        if ec == 0 {
+            let user = if root != 0 { crate::paging::phys_of_in(root, f.pc) } else { None };
+            let word = user.map(|ph| unsafe { core::ptr::read_volatile(ph as *const u32) });
+            match (user, word) {
+                (Some(ph), Some(w)) => crate::println!("[fault] EL0: the data side holds {:#010x} at the pc (the frame {:#x})", w, ph),
+                _ => crate::println!("[fault] EL0: the pc is not mapped in the process's tables"),
+            }
+        }
         // The crashed thread's stack goes into the log, always (a core dump needs an FS and
         // the knob; the stack is wanted on a machine that has neither).
         crate::obs::unwind::print_backtrace("workload", f.pc, f.fp, true);

@@ -60,6 +60,19 @@ _start:
     stp     xzr, xzr, [x9], #16
     b       2b
 3:
+    /* The registers whose reset value the architecture leaves UNKNOWN and this kernel
+       reads before it writes them, or lets EL0 see. Under KVM "unknown" is the poison
+       0x1de7ec7edbadc0de (reset_unknown in the host's sys_regs.c): TPIDR_EL1 was that,
+       the exception stubs took it for the per-core block and wrote into it — every
+       fault faulted again, silently, until the stack had walked through the image
+       (docs/ARM64-PLAN.md §10.4). TCG starts them at zero, which hid it. */
+    msr     tpidr_el1, xzr
+    msr     tpidr_el0, xzr
+    msr     tpidrro_el0, xzr
+    msr     contextidr_el1, xzr
+    msr     amair_el1, xzr
+    msr     cntkctl_el1, xzr
+    msr     mdscr_el1, xzr
     /* FP/SIMD at EL1 and EL0 (CPACR.FPEN = 0b11); SVE stays trapped (ZEN = 0) */
     mov     x9, #(3 << 20)
     msr     cpacr_el1, x9
@@ -98,6 +111,14 @@ ap_start:
     msr     elr_el2, x9
     eret
 5:
+    /* the same UNKNOWN-at-reset registers as on the boot core (see above) */
+    msr     tpidr_el1, xzr
+    msr     tpidr_el0, xzr
+    msr     tpidrro_el0, xzr
+    msr     contextidr_el1, xzr
+    msr     amair_el1, xzr
+    msr     cntkctl_el1, xzr
+    msr     mdscr_el1, xzr
     mov     x9, #(3 << 20)
     msr     cpacr_el1, x9
     isb

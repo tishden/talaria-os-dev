@@ -15,6 +15,7 @@ pub mod unwind;  // the guarded load a profiler makes on a foreign stack
 pub mod cat;     // Intel CAT: the L3 masks and the class per core (MSRs)
 pub mod cpu;     // the privileged instructions, one wrapper each
 pub mod crypto;  // AES-128-GCM on AES-NI + PCLMULQDQ
+pub mod icache;  // nothing: the instruction cache is coherent with stores on x86-64
 pub mod ioapic;  // the I/O APIC: a GSI -> a vector on the BSP
 pub mod mmu;     // the page-table descriptor as the MMU reads it, CR3, the TLB, the PAT
 pub mod percpu;  // the per-CPU block through GS.base
