@@ -184,19 +184,14 @@ fn vdso_probe() -> ! {
         0xD63F0120, 0xA94027E8, brk(2), brk(1),
     ];
     place(code, &probe, true);
-    let hz = cpu::counter_hz();
-    let base = super::pending::tsc::VDSO_BASE.load(Ordering::Relaxed);
-    let before = cpu::counter().wrapping_sub(base) as u128 * 1_000_000_000 / hz as u128;
-    T_BEFORE.store(before as u64, Ordering::Relaxed);
+    T_BEFORE.store(crate::tsc::mono_ns(), Ordering::Relaxed);
     crate::println!("talaria: vdso probe: __kernel_clock_gettime at {:#x} (the image at {:#x}), calling it from EL0", entry, crate::vdso::VADDR);
     enter_el0(code, sp, vdso_probe_done)
 }
 static T_BEFORE: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn vdso_probe_done() -> ! {
-    let hz = cpu::counter_hz();
-    let base = super::pending::tsc::VDSO_BASE.load(Ordering::Relaxed);
-    let after = (cpu::counter().wrapping_sub(base) as u128 * 1_000_000_000 / hz as u128) as u64;
+    let after = crate::tsc::mono_ns();
     let before = T_BEFORE.load(Ordering::Relaxed);
     let (sec, nsec) = (trap::PROBE_X8.load(Ordering::Relaxed), trap::PROBE_X9.load(Ordering::Relaxed));
     let got = sec.wrapping_mul(1_000_000_000).wrapping_add(nsec);

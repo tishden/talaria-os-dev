@@ -21,6 +21,7 @@ pub mod x86_64;
 pub use x86_64::*;
 
 #[cfg(target_arch = "aarch64")]
+#[macro_use]
 pub mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::*;

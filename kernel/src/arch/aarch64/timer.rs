@@ -29,6 +29,21 @@ pub fn arm(ns: u64) {
     }
 }
 
+/// Arm this core's timer `ticks` counter ticks from now.
+pub fn arm_ticks(ticks: u64) {
+    let cval = super::cpu::counter().wrapping_add(ticks.max(1));
+    unsafe {
+        core::arch::asm!("msr cntv_cval_el0, {c}", "mov {t}, #1", "msr cntv_ctl_el0, {t}", "isb",
+            c = in(reg) cval, t = out(reg) _, options(nomem, nostack));
+    }
+}
+/// The compare value the timer is armed at.
+pub fn compare_value() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, cntv_cval_el0", out(reg) v, options(nomem, nostack)); }
+    v
+}
+
 /// Stop this core's timer.
 pub fn stop() {
     unsafe { core::arch::asm!("msr cntv_ctl_el0, xzr", "isb", options(nomem, nostack)); }
