@@ -15,10 +15,12 @@ IMG=kernel/target/aarch64-talaria/release/talaria.img
 [ -f "$REPO/$IMG" ] || { echo "no $IMG — run kernel/build-aarch64.sh first"; exit 1; }
 ACCEL="-cpu max"
 [ "$(uname -m)" = "aarch64" ] && [ -c /dev/kvm ] && ACCEL="-enable-kvm -cpu host"
+# The container sees /dev/kvm only when it is handed in (the x86 test.sh does the same).
+KVMDEV=""; [ -c /dev/kvm ] && KVMDEV="--device /dev/kvm"
 QEMU="timeout $SECS qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp 1 -m 1024 -nographic \
   -kernel /w/$IMG -append \"$APPEND\" $*"
 if command -v qemu-system-aarch64 >/dev/null 2>&1; then
   sh -c "$(echo "$QEMU" | sed "s|/w/|$REPO/|")"
 else
-  docker run --rm -v "$REPO:/w" -w /w talaria-qemu-aarch64 sh -c "$QEMU"
+  docker run --rm $KVMDEV -v "$REPO:/w" -w /w talaria-qemu-aarch64 sh -c "$QEMU"
 fi

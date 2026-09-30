@@ -111,13 +111,24 @@ fn two_frames() -> (u64, u64) {
     (code, stack + 4096)
 }
 
+/// `talaria.poweroff=1` — the machine powers itself off once the sequence has finished
+/// (PSCI SYSTEM_OFF, on which QEMU exits): a gate or a boot loop under KVM then takes
+/// seconds per boot rather than the boot's whole timeout. The same knob, the same
+/// meaning as on x86 (`cmdline.rs`), read once in `run`.
+static POWEROFF: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 pub fn finish() -> ! {
     crate::println!("talaria: arm64 phases 1-3(a) stop here — the kernel above arch/ is not compiled for this target yet (docs/ARM64-PLAN.md §5)");
+    if POWEROFF.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::println!("talaria: poweroff (PSCI SYSTEM_OFF)");
+        super::psci::system_off();
+    }
     cpu::halt_forever()
 }
 
 /// The dispatch: a named probe, or the default sequence.
 pub fn run(cmdline: &str) -> ! {
+    POWEROFF.store(crate::cmdline::flag(cmdline, "talaria.poweroff"), core::sync::atomic::Ordering::Relaxed);
     match crate::cmdline::test_name(cmdline) {
         Some("ring") => ring(crate::cmdline::num(cmdline, "talaria.ringn").unwrap_or(200_000)),
         Some("icache") => icache_probe(),

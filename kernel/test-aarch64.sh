@@ -16,17 +16,21 @@ LOG=$(mktemp)
 trap 'rm -f "$LOG"' EXIT
 ACCEL="-cpu max"
 [ "$(uname -m)" = "aarch64" ] && [ -c /dev/kvm ] && ACCEL="-enable-kvm -cpu host"
+# The container sees /dev/kvm only when it is handed in (the x86 test.sh does the same).
+KVMDEV=""; [ -c /dev/kvm ] && KVMDEV="--device /dev/kvm"
 KVM=${TAL_KVM:-0}
 # boot SECS APPEND: one boot of the image with 4 cores, the console into $LOG. 4 cores: the
 # secondaries and the IPIs are part of what is judged. TCG on a loaded runner reaches the
-# default sequence's last line in ~8 s; the probes take longer (the bbm one ~30 s).
+# default sequence's last line in ~8 s; the probes take longer (the bbm one ~30 s). The
+# kernel powers the machine off at its end (`talaria.poweroff=1`), so SECS is a ceiling,
+# not the boot's length — under KVM the whole gate is a minute rather than the sum of them.
 boot() {
   QEMU="timeout $1 qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp 4 -m 1024 -nographic \
-    -kernel /w/$IMG -append \"console=ttyAMA0 $2 talaria.smp=4\""
+    -kernel /w/$IMG -append \"console=ttyAMA0 $2 talaria.smp=4 talaria.poweroff=1\""
   if command -v qemu-system-aarch64 >/dev/null 2>&1; then
     sh -c "$(echo "$QEMU" | sed "s|/w/|$REPO/|")" > "$LOG" 2>&1
   else
-    docker run --rm -v "$REPO:/w" -w /w talaria-qemu-aarch64 sh -c "$QEMU" > "$LOG" 2>&1
+    docker run --rm $KVMDEV -v "$REPO:/w" -w /w talaria-qemu-aarch64 sh -c "$QEMU" > "$LOG" 2>&1
   fi
 }
 
@@ -48,7 +52,7 @@ assert 'gic v3: distributor 0x8000000, redistributors 0x80a0000 .* its 0x8080000
 assert 'timer ppis: secure 29 phys 30 virt 27 hyp 26; psci hvc'          'dtb: the timer PPIs and the PSCI conduit'
 assert 'pcie ecam at 0x4010000000'                                    'dtb: the ECAM window'
 assert 'start_info at 0x[0-9a-f]+ \(1 memmap entries\)'                'boot: the tree became a PVH start_info'
-assert 'cmdline = "console=ttyAMA0 talaria.mode=cell talaria.smp=4"'   'cmdline: read through the shared read_cmdline'
+assert 'cmdline = "console=ttyAMA0 talaria.mode=cell talaria.smp=4 talaria.poweroff=1"'   'cmdline: read through the shared read_cmdline'
 assert 'RAM in total 1024 MB; the frame allocator: 0x40[0-9a-f]+\.\.0x80000000' 'mem: the shared allocator took the map'
 assert 'free frames = [0-9]{6}'                                        'mem: frames are handed out'
 assert 'vdso: the clock in user space is up .*__kernel_clock_gettime at \+0x' 'vdso: the image is mapped and exports the clock call'

@@ -73,7 +73,7 @@ ssh $SSH_OPTS ec2-user@"$IP" 'test "$(uname -m)" = aarch64 && test -c /dev/kvm' 
 
 echo "== provisioning (docker, git, binutils, python3, the pinned nightly + aarch64-unknown-none) =="
 PIN=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$REPO/kernel/rust-toolchain.toml")
-ssh $SSH_OPTS ec2-user@"$IP" "sudo dnf install -y -q docker git binutils python3 tar && \
+ssh $SSH_OPTS ec2-user@"$IP" "sudo dnf install -y -q docker git gcc binutils python3 tar && \
   sudo systemctl enable --now docker && sudo usermod -aG docker ec2-user && sudo chmod 666 /dev/kvm && \
   curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none -q && . \$HOME/.cargo/env && \
   rustup toolchain install $PIN --profile minimal -c rust-src -c clippy >/dev/null && \
@@ -87,7 +87,7 @@ echo "== the arm64 stand image, built natively (fedora:40 pulls its arm64 varian
 ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && docker build -t talaria-qemu-aarch64 -f services/docker/Dockerfile.qemu-aarch64 services/docker' >"$LOGD/image.log" 2>&1 || { echo "the image did not build — $LOGD/image.log"; tail -5 "$LOGD/image.log"; exit 1; }
 
 echo "== the kernel and the raw Image (native objcopy) =="
-ssh $SSH_OPTS ec2-user@"$IP" '. $HOME/.cargo/env && cd talaria && AARCH64_OBJCOPY=objcopy kernel/build-aarch64.sh' >"$LOGD/build.log" 2>&1 || { echo "the kernel did not build — $LOGD/build.log"; tail -8 "$LOGD/build.log"; exit 1; }
+ssh $SSH_OPTS ec2-user@"$IP" '. $HOME/.cargo/env && cd talaria && AARCH64_OBJCOPY=objcopy VDSO_CC_AARCH64=gcc kernel/build-aarch64.sh' >"$LOGD/build.log" 2>&1 || { echo "the kernel did not build — $LOGD/build.log"; tail -8 "$LOGD/build.log"; exit 1; }
 T3=$(date +%s); echo "built after $((T3-T2)) s" | tee -a "$LOGD/timing.log"
 
 echo "== the bring-up gate under KVM (TAL_KVM=1: the timing lines are judged too) =="
@@ -97,11 +97,11 @@ echo "== the probes TCG cannot judge (docs/ARM64-PLAN.md §9.2 B-E) =="
 for p in "ring talaria.ringn=${RINGN:-2000000}" icache bbm svccost; do
   name=${p%% *}
   echo "-- talaria.test=$p"
-  ssh $SSH_OPTS ec2-user@"$IP" "cd talaria && TAL_APPEND='console=ttyAMA0 talaria.test=$p talaria.smp=4' kernel/runq-aarch64.sh 120 -smp 4" \
+  ssh $SSH_OPTS ec2-user@"$IP" "cd talaria && TAL_APPEND='console=ttyAMA0 talaria.test=$p talaria.smp=4 talaria.poweroff=1' kernel/runq-aarch64.sh 120 -smp 4" \
     2>&1 | tee "$LOGD/probe-$name.log" | grep -E "probe|as expected|NOT|corrupt|stale|conflict|ns per|\[trap\]|PANIC" | cut -c1-200
 done
 
-echo "== fifty boots of the gate in a loop (the SMP paths under a real weak machine) =="
-ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && fails=0; for i in $(seq 1 50); do TAL_KVM=1 kernel/test-aarch64.sh > /tmp/g.log 2>&1 || { fails=$((fails+1)); cp /tmp/g.log /tmp/g-fail-$i.log; }; done; echo "loop: $fails of 50 boots failed"; ls /tmp/g-fail-*.log 2>/dev/null | head' 2>&1 | tee "$LOGD/loop.log"
+echo "== fifty runs of the gate in a loop (250 boots: the SMP paths under a real weak machine; ~5 s a run under KVM) =="
+ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && fails=0; for i in $(seq 1 50); do TAL_KVM=1 kernel/test-aarch64.sh > /tmp/g.log 2>&1 || { fails=$((fails+1)); cp /tmp/g.log /tmp/g-fail-$i.log; }; done; echo "loop: $fails of 50 gate runs failed"; ls /tmp/g-fail-*.log 2>/dev/null | head' 2>&1 | tee "$LOGD/loop.log"
 T4=$(date +%s); echo "all done after $((T4-T0)) s; the stand ran $((T4-T1)) s" | tee -a "$LOGD/timing.log"
 echo "logs: $LOGD"
