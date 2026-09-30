@@ -128,12 +128,20 @@ pub fn sctlr_el1() -> u64 { let v: u64; unsafe { core::arch::asm!("mrs {}, sctlr
 #[inline(always)]
 pub fn ttbr0_el1() -> u64 { let v: u64; unsafe { core::arch::asm!("mrs {}, ttbr0_el1", out(reg) v, options(nomem, nostack)); } v }
 
-/// Let EL0 read `CNTVCT_EL0` and `CNTFRQ_EL0` (`CNTKCTL_EL1.EL0VCTEN`): the vDSO's clock.
-pub unsafe fn enable_el0_counter() {
+/// What EL0 may touch without a trap, as Linux grants it — ON EVERY CORE (these are
+/// per-core registers; a secondary that was not given them trapped the vDSO's clock read
+/// of the first thread that ran on it: `MSR/MRS trapped` at the vDSO's pc):
+/// * `CNTVCT_EL0`/`CNTFRQ_EL0` (`CNTKCTL_EL1.EL0VCTEN`): the vDSO's clock;
+/// * `CTR_EL0` (`SCTLR_EL1.UCT`) and the cache maintenance by address (`UCI`): a JIT's
+///   `__clear_cache` reads the line size and issues `dc cvau`/`ic ivau` itself;
+/// * `DC ZVA` (`DZE`): a libc's `memset` uses it when `DCZID_EL0` says it may.
+pub unsafe fn enable_el0_access() {
     let mut v: u64;
     core::arch::asm!("mrs {}, cntkctl_el1", out(reg) v, options(nomem, nostack));
     v |= 1 << 1;
     core::arch::asm!("msr cntkctl_el1, {}", "isb", in(reg) v, options(nomem, nostack));
+    let s = sctlr_el1() | (1 << 14) | (1 << 15) | (1 << 26);
+    core::arch::asm!("msr sctlr_el1, {}", "isb", in(reg) s, options(nomem, nostack));
 }
 
 /// Does this core manage the access flag and the dirty state in hardware (FEAT_HAFDBS:

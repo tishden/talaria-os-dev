@@ -373,11 +373,31 @@ pub fn sigmask_of(t: usize) -> u64 { unsafe { SIGMASK[t] } }
 /// clone(CLONE_VM): the thread inherits the creator's mask, it has no pending signals.
 pub fn thread_inherit_sigmask(parent: usize, child: usize) { unsafe { SIGMASK[child] = SIGMASK[parent]; PENDING[child] = 0; } }
 pub fn set_sigmask(t: usize, m: u64) { unsafe { SIGMASK[t] = m; } }
+/// Is the signal IGNORED by the process `p` for a recipient with the mask `mask` — Linux's
+/// `sig_ignored`: the disposition is SIG_IGN, or SIG_DFL for a signal whose default is to
+/// do nothing (SIGCHLD, SIGURG, SIGWINCH), and the recipient has not blocked it (a blocked
+/// one stays pending: `sigwait`, `signalfd` and a later handler are entitled to it).
+///
+/// Such a signal is DISCARDED WHEN IT IS SENT. Left pending, it interrupted the very wait
+/// it announced: a child's SIGCHLD reaches the parent a moment before the child has left
+/// its core (`sched::reap` still says "dying"), and a `wait4` that looked in between
+/// returned EINTR for a signal nobody handles. x86 under KVM never lost that race; arm64
+/// under TCG lost it 30 times of 40 (`crashme forkap`).
+fn sig_ignored(p: usize, sig: u64, mask: u64) -> bool {
+    if mask & (1u64 << (sig - 1)) != 0 { return false; }
+    // SAFETY: a read of the process's disposition table (one word, written by `sigaction`).
+    let h = unsafe { core::ptr::read_volatile(addr_of!(SA_HANDLER[p][sig as usize])) };
+    h == 1 || (h == 0 && matches!(sig, 17 | 23 | 28))
+}
 /// Put a signal to the task t (pending).
-pub fn send(t: usize, sig: u64) { if t < NT && (1..=64).contains(&sig) { unsafe { let v = core::ptr::read_volatile(addr_of!(PENDING[t])) | (1u64 << (sig - 1));
+pub fn send(t: usize, sig: u64) { if t < NT && (1..=64).contains(&sig) {
+    if sig_ignored(crate::sched::proc_of(t), sig, sigmask_of(t)) { return; }
+    unsafe { let v = core::ptr::read_volatile(addr_of!(PENDING[t])) | (1u64 << (sig - 1));
     core::ptr::write_volatile(addr_of_mut!(PENDING[t]), v); } } }
 /// A signal to a PROCESS (the leader p): any of its threads for which it is not masked will take it.
-pub fn send_proc(p: usize, sig: u64) { if p < NT && (1..=64).contains(&sig) { unsafe {
+pub fn send_proc(p: usize, sig: u64) { if p < NT && (1..=64).contains(&sig) {
+    if sig_ignored(p, sig, sigmask_of(p)) { return; }
+    unsafe {
     let v = core::ptr::read_volatile(addr_of!(PPEND[p])) | (1u64 << (sig - 1)); core::ptr::write_volatile(addr_of_mut!(PPEND[p]), v); } } }
 /// A SIGTERM to all the live processes (by their leaders) — the regular stop of the machine. It returns the number of processes.
 pub fn term_all() -> usize {

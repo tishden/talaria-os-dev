@@ -44,6 +44,17 @@ pub unsafe fn fpu_restore(area: *const u8) {
         core::arch::asm!("fxrstor [{}]", in(reg) area, options(nostack));
     }
 }
+/// Is the saved image fit to be restored? `mxcsr` with a reserved bit set makes
+/// `fxrstor`/`xrstor` raise #GP in ring 0, and a misaligned area likewise — `Err` carries
+/// the word for the diagnosis.
+#[inline]
+pub fn fpu_image_check(area: *const u8) -> Result<(), u32> {
+    // SAFETY: the caller hands a task's FPU slot — at least 512 bytes of it.
+    let mxcsr = unsafe { core::ptr::read_volatile(area.add(24) as *const u32) };
+    if mxcsr & 0xFFFF_0000 != 0 || area as usize & 0xF != 0 { Err(mxcsr) } else { Ok(()) }
+}
+/// How much of an entry's FP area a forked task inherits: the legacy fxsave area.
+pub const FPU_INHERIT: usize = 512;
 
 /// Enter a saved context (like the tail of `timer_stub_sched`): 15 GP + an iretq.
 /// `cli` first — the entry must be atomic with respect to the ticks/IPIs; the task's IF is

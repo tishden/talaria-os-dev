@@ -86,8 +86,10 @@ const fn wr_opt(arg: u8, len: Len) -> Ptr { Ptr { arg, len, write: true, opt: tr
 
 use Len::{Arg, ArgMul, Fixed, Str};
 
-// Sizes of the x86-64 structures the kernel reads or writes.
-const STAT: u32 = 144;
+// Sizes of the structures the kernel reads or writes. They are x86-64's except the two
+// an arm64 process sees in another layout (`arch::aarch64::abi` translates them at the
+// dispatcher's door): the gate judges the extent THE PROCESS's structure has.
+const STAT: u32 = if cfg!(target_arch = "aarch64") { 128 } else { 144 };
 const STATFS: u32 = 120;
 const STATX: u32 = 256;
 const TIMESPEC: u32 = 16;
@@ -106,7 +108,7 @@ const UTSNAME: u32 = 390;
 const SOCKADDR: u32 = 16;
 const SOCKLEN: u32 = 4;
 const POLLFD: u32 = 8;
-const EPOLL_EVENT: u32 = 12;
+const EPOLL_EVENT: u32 = if cfg!(target_arch = "aarch64") { 16 } else { 12 };
 const IOVEC: u32 = 16;
 const MSGHDR: u32 = 56;
 const UTIMBUF: u32 = 16;

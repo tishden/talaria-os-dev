@@ -146,7 +146,7 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     // The tables just built are what the core runs on now: prove it with a page whose rights
     // change under us. A fresh frame is identity-mapped RW for the kernel; `protect_none`
     // must make it absent, `protect` present again — through `enc` on every write.
-    unsafe { cpu::enable_el0_counter(); }
+    unsafe { cpu::enable_el0_access(); }
     dirty_probe();
     if let Some(f) = crate::mem::alloc_frame() {
         crate::paging::split_to_4k(f);                      // a 4K page of the kernel's 2M GB1 (as the dirty probe)
@@ -246,8 +246,12 @@ pub static VIRTIO_WINDOWS: [core::sync::atomic::AtomicU64; dtb::MAX_VIRTIO] = [c
 pub fn start_secondary(i: usize, mpidr: u64) -> i64 {
     if i >= MAX_AP { return psci::INVALID_PARAMS; }
     unsafe extern "C" { fn ap_start(); }
-    let top = unsafe { core::ptr::addr_of!(AP_STACKS[i]) as u64 + AP_STACK as u64 };
-    psci::cpu_on(mpidr, ap_start as *const () as usize as u64, top)
+    psci::cpu_on(mpidr, ap_start as *const () as usize as u64, ap_stack_top(i))
+}
+/// The top of the boot stack of the secondary in slot `i` — also the stack its pickup loop
+/// returns to when a task exits on it (`sched::set_ap_stack`).
+pub fn ap_stack_top(i: usize) -> u64 {
+    core::ptr::addr_of!(AP_STACKS) as u64 + (i.min(MAX_AP - 1) as u64 + 1) * AP_STACK as u64
 }
 
 /// A secondary core, from `ap_start` (boot.rs): the same map, vectors and GIC state
@@ -256,7 +260,7 @@ pub fn start_secondary(i: usize, mpidr: u64) -> i64 {
 /// until the scheduler comes across).
 #[unsafe(no_mangle)]
 extern "C" fn rust_ap_main(ctx: u64) -> ! {
-    unsafe { mmu::enable_here(); }
+    unsafe { mmu::enable_here(); cpu::enable_el0_access(); }
     trap::init();
     let ok = unsafe { gic::init_cpu() };
     let me = cpu::cpu_index();

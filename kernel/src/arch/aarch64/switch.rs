@@ -43,20 +43,25 @@ unsafe fn fpu_save_live(area: *mut u8) {
         "mrs {t}, fpcr", "str {t}, [{a}, #512]", "mrs {t}, fpsr", "str {t}, [{a}, #520]",
         a = in(reg) area, t = out(reg) _, options(nostack));
 }
-/// Restore the FP/SIMD state from `area` into the live registers (the target of a switch:
-/// the stub's tail does not touch them when it enters another task's frame).
+/// Restore the FP/SIMD state of the task this core is about to enter. The registers are
+/// NOT loaded here: the scheduler still has Rust code to run before the `eret`, and on
+/// this machine any of it may use the V registers (LLVM copies structures through q0/q1)
+/// — the same hazard `fpu_save` avoids on the way in. The area's address goes into the
+/// per-core block (`fp_pending`), and the tail that enters the frame (`SCHED_TAIL`,
+/// `enter_frame_tail`) loads the registers as its last act before the general ones.
 /// # Safety
-/// C3 + C4, as `fpu_save`, and the area must hold a state saved by it.
+/// C3 + C4, as `fpu_save`; the area must hold a state saved by it and stay untouched
+/// until the entry (it is the task's own slot, and this core has claimed the task).
 #[inline]
 pub unsafe fn fpu_restore(area: *const u8) {
-    core::arch::asm!(
-        "ldp q0, q1, [{a}, #0]",     "ldp q2, q3, [{a}, #32]",    "ldp q4, q5, [{a}, #64]",    "ldp q6, q7, [{a}, #96]",
-        "ldp q8, q9, [{a}, #128]",   "ldp q10, q11, [{a}, #160]", "ldp q12, q13, [{a}, #192]", "ldp q14, q15, [{a}, #224]",
-        "ldp q16, q17, [{a}, #256]", "ldp q18, q19, [{a}, #288]", "ldp q20, q21, [{a}, #320]", "ldp q22, q23, [{a}, #352]",
-        "ldp q24, q25, [{a}, #384]", "ldp q26, q27, [{a}, #416]", "ldp q28, q29, [{a}, #448]", "ldp q30, q31, [{a}, #480]",
-        "ldr {t}, [{a}, #512]", "msr fpcr, {t}", "ldr {t}, [{a}, #520]", "msr fpsr, {t}",
-        a = in(reg) area, t = out(reg) _, options(nostack));
+    super::percpu::set_fp_pending(area as u64);
 }
+/// Is the saved image fit to be restored? Always, here: there is no control word in it
+/// whose reserved bits would fault the load (x86's `mxcsr`). `Err` carries the word.
+#[inline]
+pub fn fpu_image_check(_area: *const u8) -> Result<(), u32> { Ok(()) }
+/// How much of an entry's FP area a forked task inherits: all of it (q0..q31, fpcr, fpsr).
+pub const FPU_INHERIT: usize = FPU_BYTES;
 
 /// Enter a saved frame: interrupts masked, sp = the frame, the stubs' restore, `eret`.
 /// # Safety
@@ -65,37 +70,8 @@ pub unsafe fn fpu_restore(area: *const u8) {
 pub unsafe fn enter_saved_ctx(sp: u64) -> ! {
     core::arch::asm!("msr daifset, #2", "mov sp, {}", "b enter_frame_tail", in(reg) sp, options(noreturn));
 }
-core::arch::global_asm!(r#"
-.section .text
-.global enter_frame_tail
-enter_frame_tail:
-    ldp x2, x3, [sp, #256]
-    msr elr_el1, x2
-    msr spsr_el1, x3
-    and x4, x3, #0xF
-    cbnz x4, 1f
-    ldr x1, [sp, #248]
-    msr sp_el0, x1
-1:
-    ldp x0, x1, [sp, #0]
-    ldp x2, x3, [sp, #16]
-    ldp x4, x5, [sp, #32]
-    ldp x6, x7, [sp, #48]
-    ldp x8, x9, [sp, #64]
-    ldp x10, x11, [sp, #80]
-    ldp x12, x13, [sp, #96]
-    ldp x14, x15, [sp, #112]
-    ldp x16, x17, [sp, #128]
-    ldp x18, x19, [sp, #144]
-    ldp x20, x21, [sp, #160]
-    ldp x22, x23, [sp, #176]
-    ldp x24, x25, [sp, #192]
-    ldp x26, x27, [sp, #208]
-    ldp x28, x29, [sp, #224]
-    ldr x30, [sp, #240]
-    add sp, sp, #288
-    eret
-"#);
+// `enter_frame_tail` lives with the stubs (`trap.rs`): it is their restore, preceded by
+// the pending FP/SIMD image.
 
 /// Move onto the stack `top` and call `f` there; it never returns.
 /// # Safety

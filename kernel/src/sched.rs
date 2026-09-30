@@ -211,7 +211,7 @@ pub fn set_fpu(tid: usize, area: u64) {
     unsafe {
         let dst = core::ptr::addr_of_mut!(FPU[tid]) as *mut u8;
         core::ptr::write_bytes(dst, 0, FPU_AREA);                       // the XSAVE header must be clean
-        core::ptr::copy_nonoverlapping(area as *const u8, dst, 512);    // the legacy area from the syscall's frame
+        core::ptr::copy_nonoverlapping(area as *const u8, dst, crate::arch::switch::FPU_INHERIT); // the legacy area from the syscall's frame
         // XSTATE_BV = x87|SSE: XRSTOR will restore what was copied, while the AVX part
         // will be brought to the initial (zero) state — and that is what a new thread needs.
         if XSAVE_MASK.load(Ordering::Relaxed) != 0 { core::ptr::write_unaligned(dst.add(512) as *mut u64, 0x3); }
@@ -1135,11 +1135,12 @@ pub fn ap_loop(cpu: usize) -> ! {
                 if cr3 != 0 && cr3 != crate::paging::current_cr3() { note_cr3(cpu, cr3); crate::paging::switch(cr3); }
                 if FPU_VALID[t] {
                     let area = core::ptr::addr_of!(FPU[t]) as *const u8;
-                    let mxcsr = core::ptr::read_volatile(area.add(24) as *const u32);
-                    if mxcsr & 0xFFFF_0000 != 0 || area as usize & 0xF != 0 {
-                        crate::println!("[ap] t{}: a broken fxsave image mxcsr={:#x} area={:p} — I skip the fxrstor", t, mxcsr, area);
-                    } else {
-                        fpu_restore(area);
+                    // The machine's own test of the image (x86: `mxcsr`'s reserved bits; arm64
+                    // has none — read there, the same offset is the middle of q1, and a
+                    // thread with a negative double in it lost its restore).
+                    match crate::arch::switch::fpu_image_check(area) {
+                        Err(mxcsr) => crate::println!("[ap] t{}: a broken fxsave image mxcsr={:#x} area={:p} — I skip the fxrstor", t, mxcsr, area),
+                        Ok(()) => fpu_restore(area),
                     }
                 }
                 stack_wait(t);     // the core that released it may still be standing on its stack

@@ -1097,7 +1097,9 @@ fn rust_syscall_inner(raw: &mut Frame) -> u64 {
     // the identity on x86-64, the asm-generic table and `clone`'s tls/ctid swap on arm64
     // (docs/ARM64-PLAN.md §4.4). `raw.nr` keeps the process's number: a restarted call
     // (`SA_RESTART`) puts THAT back into the register.
-    let Some(nr) = crate::arch::abi::to_internal(raw.nr) else { return (-38i64) as u64; }; // -ENOSYS
+    // A number the machine's table does not have is reported once, as one the dispatcher
+    // does not implement is: a silent ENOSYS hides exactly what a port needs to see.
+    let Some(nr) = crate::arch::abi::to_internal(raw.nr) else { return unknown(raw.nr); }; // -ENOSYS
     let mut args = [raw.a1, raw.a2, raw.a3, raw.a4, raw.a5, raw.a6];
     crate::arch::abi::normalize(nr, &mut args);
     if filter_blocks(nr) {
@@ -1111,12 +1113,21 @@ fn rust_syscall_inner(raw: &mut Frame) -> u64 {
     if let Some(e) = crate::uaccess::gate(nr, args) {
         return e;
     }
+    // The structures and flag words whose layout is the process's architecture's (`struct
+    // stat`, `epoll_event`, the open flags): into the internal form before the handler, back
+    // out after it. Nothing on x86-64, whose layouts the internal ones are.
+    let user_args = args;
+    let mut bounce = crate::arch::abi::Bounce::uninit();
+    // SAFETY: S1 — the pointer arguments have just passed `uaccess::gate`.
+    unsafe { crate::arch::abi::enter(nr, &mut args, &mut bounce); }
     // the translation user fd -> an internal handle (the process's fd table)
     let mut g = raw.with_args(nr, args);
     if a1_is_fd(nr) { g.a1 = crate::proc::tr(args[0]) as u64; }
     if nr == 233 { g.a3 = crate::proc::tr(args[2]) as u64; }
     if nr == 9 && args[3] & 0x20 == 0 { g.a5 = crate::proc::tr(args[4]) as u64; }
     let r = dispatch(&g, raw);
+    // SAFETY: S1 — as `enter`: the same validated pointers, the same buffer.
+    let r = unsafe { crate::arch::abi::leave(nr, &user_args, &mut bounce, r) };
     // the new descriptors -> into the process's fd table
     match nr {
         // signalfd4(289) returns a new fd too
@@ -1452,7 +1463,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 core::ptr::write_bytes(u, 0, 390);
                 // release in the Linux format (glibc's ld.so: "FATAL: kernel too old" with a release < 3.2.0)
                 for (off, s) in [(0usize, &b"Linux"[..]), (65, b"talaria"), (130, b"5.15.0-talaria"),
-                                 (195, b"#1 SMP Talaria OS ring3"), (260, b"x86_64")] {
+                                 (195, b"#1 SMP Talaria OS ring3"), (260, crate::arch::abi::UTS_MACHINE)] {
                     for (i, &b) in s.iter().enumerate() { core::ptr::write(u.add(off + i), b); }
                 }
             }}
@@ -2493,7 +2504,11 @@ fn deliver_signals(f: &mut Frame, ret: u64) -> u64 {
             let t = crate::sched::current_id();
             // SA_RESTART: an interrupted (-EINTR) restartable syscall is repeated after the handler
             // (the return lands on the `syscall` instruction itself, the number back in the result register)
-            let restart = ret as i64 == -4 && flags & 0x1000_0000 != 0 && matches!(f.nr, 0 | 1 | 17 | 18 | 19 | 20 | 43 | 288 | 61 | 44 | 45 | 46 | 47 | 42);
+            // The list is in the INTERNAL numbers; the frame holds the process's own (arm64's
+            // `wait4` is 260, and its 61 is `getdents64` — read raw, a `waitpid` interrupted
+            // by SIGCHLD came back as EINTR under SA_RESTART).
+            let restart = ret as i64 == -4 && flags & 0x1000_0000 != 0
+                && matches!(crate::arch::abi::to_internal(f.nr), Some(0 | 1 | 17 | 18 | 19 | 20 | 43 | 288 | 61 | 44 | 45 | 46 | 47 | 42));
             let old_mask = crate::proc::sigmask_of(t);
             crate::arch::signal::write_syscall_context(uc, f, ret, usp, restart, old_mask);
             core::ptr::write_unaligned((uc + UC_SIGMASK) as *mut u64, old_mask); // uc_sigmask

@@ -127,22 +127,8 @@ pub struct ExcFrame {
     pub vec: u64, pub err: u64, pub rip: u64, pub cs: u64, pub rflags: u64, pub rsp: u64, pub ss: u64,
 }
 
-/// The call stack into the log: the addresses from the point of the fault to the callers.
-///
-/// The symbols are resolved on the HOST (`addr2line -f -C -e <binary> <address>`) — dragging
-/// a symbol table into the kernel for the sake of a line printed at a crash is pointless, and
-/// for the workload the kernel does not have one at all.
-fn backtrace(what: &str, rip: u64, rbp: u64, user: bool) {
-    let mut stk = [0u64; crate::obs::unwind::MAXDEPTH];
-    let n = crate::obs::unwind::walk(rip, rbp, user, &mut stk);
-    crate::print!("║ the stack {} ({} frame(s)):", what, n);
-    for i in 0..n { crate::print!(" {:#x}", stk[i]); }
-    crate::println!("");
-    if n == 1 {
-        crate::println!("║   the depth is 1 — the code is built without frame pointers (see build-prof.sh / -fno-omit-frame-pointer)");
-    }
-    crate::println!("║   the symbols: addr2line -f -C -e <binary> <address>");
-}
+/// The call stack into the log (`obs::unwind::print_backtrace`, shared with arm64).
+fn backtrace(what: &str, rip: u64, rbp: u64, user: bool) { crate::obs::unwind::print_backtrace(what, rip, rbp, user) }
 
 /// The common Rust handler of an exception: a full crash dump and a halt.
 /// Return into the interrupted context out of an exception (the `isr_common` frame + the FPU).

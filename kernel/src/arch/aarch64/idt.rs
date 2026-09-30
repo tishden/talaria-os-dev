@@ -13,6 +13,11 @@ pub static TICKS: AtomicU64 = AtomicU64::new(0);
 pub const IPI_VECTOR: usize = 1;
 pub const TLB_VECTOR: usize = 2;
 pub const WAKE_VECTOR: usize = 3;
+/// "Enter the scheduler now": what the shared code asks for when it sends an IPI on the
+/// TIMER's vector (a dedicated core has no tick; a thread marked dead in EL0 is taken off
+/// its core by exactly this call). A PPI cannot be sent to another core, so the request
+/// travels as this SGI and the IRQ vector treats it as a tick that re-arms nothing.
+pub const RESCHED_SGI: u32 = 4;
 /// The tick: the virtual timer's PPI (the tree says 27 on every machine seen).
 pub const TIMER_VECTOR: usize = 27;
 /// The network card's line and the first MSI: SPIs, chosen at 32 + a distance from what

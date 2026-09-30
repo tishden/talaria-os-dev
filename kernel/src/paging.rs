@@ -2263,7 +2263,11 @@ pub fn fork_cow_space(src: u64) -> u64 {
                             // (U/S — MAP_SHARED, shm) stays shared with the child too —
                             // PostgreSQL keeps its shared buffers that way; the rest of the window in
                             // a process's AS is closed (see `new_process_space`).
-                            if e1 & PTE_US != 0 && vaddr < (1u64 << 30) && e1 & ADDR_MASK == vaddr {
+                            // The window is the gigabyte with the private PD — GB0 on x86, the
+                            // RAM's first gigabyte on arm64 (`user_gb`); "< 1 GB" here left an
+                            // arm64 child without its parent's MAP_SHARED page (a rights fault on
+                            // the kernel's own 2M leaf at the child's first write).
+                            if e1 & PTE_US != 0 && (vaddr >> 30) as usize == user_gb() && e1 & ADDR_MASK == vaddr {
                                 pte_w(pte_ptr_in(dst, vaddr), e1);
                             }
                             continue;

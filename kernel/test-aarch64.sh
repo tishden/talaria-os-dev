@@ -48,6 +48,19 @@ bootd() {
   fi
 }
 
+# bootx SECS APPEND DISK [MEM]: as `boot`, with DISK (a path under the repository) on
+# virtio-blk and MEM megabytes (1024 by default).
+bootx() {
+  QEMU="timeout $1 qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp 4 -m ${4:-1024} -nographic \
+    -kernel /w/$IMG -append \"console=ttyAMA0 $2 talaria.smp=4 talaria.poweroff=1\" \
+    -drive id=d0,file=/w/$3,format=raw,if=none -device virtio-blk-device,drive=d0"
+  if command -v qemu-system-aarch64 >/dev/null 2>&1; then
+    sh -c "$(echo "$QEMU" | sed "s|/w/|$REPO/|g")" > "$LOG" 2>&1
+  else
+    docker run --rm $KVMDEV -v "$REPO:/w" -w /w talaria-qemu-aarch64 sh -c "$QEMU" > "$LOG" 2>&1
+  fi
+}
+
 PASS=0; FAIL=0
 assert() {
   if grep -qE "$1" "$LOG"; then echo "  PASS  $2"; PASS=$((PASS+1)); else echo "  FAIL  $2 (no /$1/)"; FAIL=$((FAIL+1)); fi
@@ -136,6 +149,139 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
   assertcount 'musl static binary -> Talaria OS!' 2                          'procdisk: both processes from the disk print'
   assert 'sched: all the 2 task\(s\) have finished'                           'procdisk: two processes in separate address spaces run to their end'
   assertnot '\[trap\]|PANIC|\[fault\]'                                        'procdisk: no trap, no fault — the spaces do not share a stack'
+  # ── the rest of the embedded set (docs/ARM64-PLAN.md §10.3, step 1): the sources that carried
+  # x86 asm or x86-only syscall names, built from the SAME files through kernel/user/tal_arch.h.
+  # `an unknown number` in any of these logs is a syscall the arm64 table or the dispatcher
+  # does not have — the plan's "zero ENOSYS over the set".
+  BAD='\[trap\]|PANIC|an unknown number'
+  echo "== ring 3 on arm64: the ported sources (efault, shmrace, smp2, smp4, futexlat) =="
+  boot 60 "talaria.test=efault"
+  assert 'efault: ALL OK'                                                     'efault: pointers the process does not own -> EFAULT (the kernel image, its frames, unmapped, non-canonical, read-only), valid buffers still work'
+  assertnot "$BAD"                                                           'efault: the kernel survives every bad pointer'
+  boot 60 "talaria.test=efault talaria.uacheck=0"
+  assert '\[trap\] sync from EL1h'                                           'efault A/B: with talaria.uacheck=0 the same program brings the kernel down (the gate tests what it claims)'
+  boot 90 "talaria.test=shmrace talaria.shmdelay=2000 talaria.stat=3000"
+  assert 'shmrace: ALL OK'                                                    'shmrace: four threads create shm at once — one name gives ONE object, one SysV key one segment'
+  assert 'stat: shm: creators waited for the tables [1-9][0-9]* times'        'shmrace: the race really happened (the kernel counted the waits)'
+  assertnot "$BAD"                                                           'shmrace: no trap, no unknown syscall'
+  boot 90 "talaria.test=shmrace talaria.shmdelay=2000 talaria.shmlock=0"
+  assert 'shmrace: FAIL one name -> one object'                               'shmrace A/B: with the tables lock off the same program gets TWO objects for one name'
+  boot 120 "talaria.test=smp2"
+  if [ "$KVM" = 1 ]; then
+    assert 'SMP2: the parallel speedup [12]\.[0-9]+ .the thread on an AP, the syscalls from the AP. ALL OK' 'smp2: sched_setaffinity migrates a thread onto a secondary, the speedup is ~2x'
+  else
+    assert 'SMP2: t1=[0-9]+ both=[0-9]+ speedup=[0-9.]+ wctr=100000000 tid=[0-9]+ cpu=1' 'smp2: the thread migrates onto a secondary and makes its syscalls from there (the speedup is for the stand to judge)'
+  fi
+  assertnot "$BAD"                                                           'smp2: no trap, no unknown syscall'
+  boot 150 "talaria.test=smp4"
+  assert 'SMP4: getaffinity ret=8 mask=0xf ncpu=4'                            'smp4: sched_getaffinity gives the online mask'
+  assert 'SMP4: the threads are on the cores 1/2/3'                           'smp4: three threads on the secondaries 1..3'
+  [ "$KVM" = 1 ] && assert 'SMP4: the parallel speedup [234]\.[0-9]+ on 4 cores .* ALL OK' 'smp4: the speedup on four cores is > 2.5x'
+  assertnot "$BAD"                                                           'smp4: no trap, no unknown syscall'
+  boot 200 "talaria.test=futexlat talaria.futexhang=3"
+  assert 'FUTEXLAT futex cross-core: RTT p50=[0-9]+ ns'                       'futexlat: a cross-core futex ping-pong through an unmodified musl'
+  assert 'FUTEXLAT: ALL OK'                                                   'futexlat: all four phases finish (a thread that EXITS on a secondary gives the core back)'
+  assertnot "$BAD|\\[futex\\] IT HAS HUNG"                                             'futexlat: no trap, no hung waiter'
+
+  # ── the modes that start FROM an ext2 disk (step 2) and the process model (step 3). The images
+  # are built here from kernel/user/aarch64, as test.sh builds x86's; a test that writes gets a copy.
+  TD=kernel/target/a64-disks; mkdir -p "$REPO/$TD"
+  U="$REPO/kernel/user/aarch64"
+  mkimg() { # mkimg NAME SIZE MANIFEST FILES... -> $TD/NAME.img
+    local name=$1 size=$2 man=$3 d rc; shift 3
+    d=$(mktemp -d) || return 1
+    for b in "$@"; do cp "$U/$b" "$d/" 2>/dev/null; done
+    echo hello > "$d/hello.txt"; mkdir -p "$d/dir"; echo inside > "$d/dir/inside.txt"; ln -s hello.txt "$d/link.txt"; ln -s dir "$d/dirlink"
+    [ -n "$man" ] && printf "$man" > "$d/cell.manifest"
+    "$REPO/kernel/mkext2.sh" "$d" "$REPO/$TD/$name.img" "$size" >/dev/null 2>&1; rc=$?
+    rm -rf "${d:?}"
+    [ $rc = 0 ] && [ -s "$REPO/$TD/$name.img" ]
+  }
+  if command -v mkfs.ext2 >/dev/null 2>&1 \
+     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls \
+     && mkimg ms 64M '' mapshared && mkimg core 32M '' crashme \
+     && mkimg coremt 32M 'binary=/crashme\nargs=crashme mt\nrestart=0\n' crashme \
+     && mkimg crashr 32M 'binary=/crashme\nargs=crashme mt\nrestart=1\n' crashme \
+     && mkimg forkap 32M 'binary=/crashme\nargs=crashme forkap\n' crashme \
+     && mkimg peek 32M 'binary=/crashme\nargs=crashme peek\nrestart=0\n' crashme; then
+    run() { cp "$REPO/$TD/$3.img" "$REPO/$TD/run.img"; bootx "$1" "$2" "$TD/run.img" "${4:-}"; }
+    echo "== the ext2 disk on arm64: the disk-borne modes (sigtest, mbench, schedapi, mapshared, fputest, memrace) =="
+    run 150 "talaria.test=sigtest" ext2
+    assert 'sigtest: ALL OK'                                                  'sigtest: fd tables, signals (handler, mask, SIGCHLD, sigwait, signalfd), fork/COW, MAP_SHARED, SysV shm, eventfd/timerfd/epoll ET, procfs, fstatat — the arm64 stat, epoll_event and sigcontext layouts under real code'
+    assertnot "$BAD|\[fault\]"                                              'sigtest: no trap, no fault, no unknown syscall'
+    run 150 "talaria.mode=proc" ext2
+    assert 'sigtest: ALL OK'                                                  'proc-mode: a process by /cell.manifest (the launch path of the databases)'
+    assertnot "$BAD|\[fault\]"                                              'proc-mode: no trap, no fault, no unknown syscall'
+    run 150 "talaria.test=mbench" ext2
+    assert 'RESULT mbench syscall [0-9]+ ns'                                  'mbench: the syscall primitive is timed (the number is for the stand)'
+    assert 'mbench: ALL OK'                                                   'mbench: the primitives of the hot loop with the binary that goes to Linux'
+    assertnot "$BAD"                                                         'mbench: no trap, no unknown syscall'
+    run 150 "talaria.test=schedapi" ext2
+    assert 'schedapi: ALL OK'                                                 'schedapi: yield gives the core away, membarrier, the binding to cores and back, the rlimits are the real walls'
+    assertnot "$BAD"                                                         'schedapi: no trap (the vDSO clock reads the counter from EL0 on EVERY core)'
+    run 150 "talaria.test=mapshared" ms
+    assert 'mapshared: ALL OK'                                                'mapshared: mmap(MAP_SHARED, fd) — read/write and the mapping see the same bytes, msync reaches the disk'
+    assertnot "$BAD"                                                         'mapshared: no trap, no unknown syscall'
+    run 150 "talaria.test=fputest" ext2
+    assert 'fputest: ok the v survived a signal handler'                      'fputest: v16..v31 survive a signal handler that clobbers them'
+    assert 'fputest: ok x0, x1, x8, x16, x17 and x30 survived a signal handler' 'fputest: the registers a syscall return may forget come back from rt_sigreturn'
+    assert 'fputest: 8 threads on 4 cores'                                    'fputest: twice as many threads as cores — every core preempts'
+    assert 'fputest: ALL OK'                                                  'fputest: the FP/SIMD state survives a syscall, a signal and preemption on four cores'
+    assertnot "$BAD|is spoilt"                                               'fputest: not a single thread saw foreign registers'
+    run 200 "talaria.test=memrace" ext2
+    assert 'memrace: ALL OK'                                                  'memrace: parallel mmap/mprotect/DONTNEED/munmap on four cores do not spoil the memory'
+    assertnot "$BAD|AN UNEXPECTED SIGSEGV"                                   'memrace: no trap, no unexpected fault'
+    echo "== processes on arm64: execve, fork over a large space, children on the secondaries =="
+    run 150 "talaria.test=execmt" ext2
+    assert "exec: the process's threads finished: 3"                          'execmt: the exec takes ALL the sister threads off their cores (the reschedule SGI)'
+    assert 'execmt: ALL OK'                                                   'execmt: a multithreaded execve — the new image is alive, argv/env arrived, threads start again'
+    assertnot "$BAD|did not stop within"                                     'execmt: no trap, the sisters stopped in time'
+    run 400 "talaria.test=forktls" ext2 4096
+    assert 'forktls: matched 100, did not match 0'                            'forktls: a hundred forks of a 1.5 GB address space — the TPIDR_EL0 and the TLS of every child are intact'
+    assert 'forktls: ALL OK'                                                  'forktls: the outcome'
+    assertnot "$BAD|THE PARENT is spoilt|ATTENTION: the COW refcount table|\[fault\]" 'forktls: the parent is not spoilt, no fault over a hundred forks'
+    run 150 "talaria.mode=proc" forkap
+    assert 'crashme: forkap ALL OK'                                           'forkap: 40 children on the secondaries are born, work and are reaped by waitpid (an ignored SIGCHLD does not interrupt the wait)'
+    assert "it has left the tables of the finished process onto the kernel.s CR3" 'forkap: an idling secondary leaves the tables of a dead process'
+    assertnot "$BAD"                                                         'forkap: freeing the spaces of dead processes does not bring the machine down'
+    echo "== crashes on arm64: the core dump, the supervisor, the isolation =="
+    run 90 "talaria.test=core talaria.core=/core.elf" core
+    assert '\[core\] [0-9]+ B into /core.elf: threads [0-9]+, memory segments' 'coredump: a fatal signal to the workload writes an ELF core dump (the process dies, the machine lives)'
+    assert 'the stack workload \([2-8] frame'                                 'coredump: the stack of the crashed workload is in the log (the x29 chain)'
+    assert 'tpidr=0x[0-9a-f]+'                                                'coredump: the crash line names the thread pointer'
+    assertnot 'THE TLS IS BROKEN|\[trap\]|PANIC'                            'coredump: a healthy TLS is not called broken; the kernel is intact'
+    if command -v debugfs >/dev/null 2>&1; then
+      CORE=$(mktemp -d); debugfs -R "dump /core.elf $CORE/core.elf" "$REPO/$TD/run.img" >/dev/null 2>&1
+      host() { if eval "$1"; then echo "  PASS  $2"; PASS=$((PASS+1)); else echo "  FAIL  $2"; FAIL=$((FAIL+1)); fi; }
+      RE=readelf; command -v aarch64-linux-gnu-readelf >/dev/null 2>&1 && RE=aarch64-linux-gnu-readelf
+      host '[ -s "$CORE/core.elf" ]'                                                       'core (host): /core.elf is on the volume after the crash'
+      host '$RE -h "$CORE/core.elf" 2>/dev/null | grep -q "AArch64"'                        'core (host): an ELF core for AArch64 (e_machine 183)'
+      host '$RE -n "$CORE/core.elf" 2>/dev/null | grep -q NT_PRSTATUS'                      'core (host): the note NT_PRSTATUS is in place'
+      GDB=""; for g in gdb-multiarch aarch64-linux-gnu-gdb gdb; do
+        command -v $g >/dev/null 2>&1 && $g --configuration 2>/dev/null | grep -q aarch64 && { GDB=$g; break; }
+      done
+      if [ -n "$GDB" ]; then
+        host '$GDB -batch -nx -ex bt "$U/crashme" "$CORE/core.elf" 2>/dev/null | grep -qE "main \(.*\) at crashme.c"' 'core (host): gdb opens the dump and prints a bt with names (main () at crashme.c)'
+        host '$GDB -batch -nx -ex "info registers pc" "$U/crashme" "$CORE/core.elf" 2>/dev/null | grep -q "^pc "'       'core (host): gdb reads the registers from the dump'
+      else echo "  SKIP  core (host): no gdb that knows aarch64"; fi
+      rm -rf "${CORE:?}"
+    else echo "  SKIP  core (host): no debugfs"; fi
+    run 120 "talaria.mode=cell talaria.core=/core.elf" coremt
+    assert '\[core\] [0-9]+ B into /core.elf: threads 4,'                     'coredump-mt: the crash of one thread of a cell on four cores writes a dump with ALL the threads'
+    assert "supervise: the workload.s threads were killed by signal 11"       'coredump-mt: the crash of one thread = the crash of the process (the supervisor learns it on the boot core)'
+    assertnot "the main thread is alive after the sister.s crash|\[trap\]|PANIC" 'coredump-mt: the sisters do not go on working; the kernel is intact'
+    run 150 "talaria.mode=cell talaria.core=/core.elf" crashr
+    assertcount "supervise: the workload.s threads were killed by signal 11" 2 'restart-mt: a crash on four cores -> a restart -> the second instance reaches the supervisor too'
+    assert 'the restart limit .1. is exhausted'                               'restart-mt: the supervisor ran both instances and halted'
+    assertnot 'the journal is busy with a foreign|\[trap\]|PANIC'            'restart-mt: no journal transaction taken away by the killed thread, the kernel intact'
+    for m in cell proc; do
+      run 90 "talaria.mode=$m" peek
+      assert 'the signal 11 to the thread t[0-9]+: the rip 0x[0-9a-f]+, the address 0x48000000' "isolation ($m): a read of the RAM through the identity window from EL0 -> SIGSEGV"
+      assertnot 'READ .* the window is OPEN|\[trap\]|PANIC'                  "isolation ($m): the workload did not read the memory of the kernel"
+    done
+  else
+    echo "== the ext2 disk on arm64: SKIPPED — no mkfs.ext2 (e2fsprogs) on the host =="
+  fi
 else
   echo "== ring 3 on arm64: SKIPPED — no kernel/user/aarch64 binaries here (make -C kernel/user aarch64) =="
 fi

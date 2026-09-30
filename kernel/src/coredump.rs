@@ -46,7 +46,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ── ELF ──────────────────────────────────────────────────────────────────────
 const ET_CORE: u16 = 4;
-const EM_X86_64: u16 = 62;
+/// The machine of the dump: the one this kernel runs (`EM_X86_64` 62, `EM_AARCH64` 183).
+const EM_THIS: u16 = crate::arch::ELF_MACHINE;
 const PT_LOAD: u32 = 1;
 const PT_NOTE: u32 = 4;
 const PF_R: u32 = 4;
@@ -341,7 +342,7 @@ fn write_core(sig: u32, pid: i32, name: &[u8], tids: &[usize], segs: &[Seg],
     let mut w = Writer { fd, off: 0, ok: true };
     // ── Ehdr ──
     w.put(&[0x7F, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    w.put_u16(ET_CORE); w.put_u16(EM_X86_64); w.put_u32(1);
+    w.put_u16(ET_CORE); w.put_u16(EM_THIS); w.put_u32(1);
     w.put_u64(0); w.put_u64(ehsz); w.put_u64(0);    // entry, phoff, shoff
     w.put_u32(0); w.put_u16(ehsz as u16);
     w.put_u16(phsz as u16); w.put_u16(nph as u16);
