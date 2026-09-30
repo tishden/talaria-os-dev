@@ -17,14 +17,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include "tal_arch.h"
 
 static __thread volatile unsigned long canary;
 
-static unsigned long tp(void) {              /* the TLS self-pointer: [fs:0] */
-    unsigned long v;
-    __asm__ volatile ("mov %%fs:0, %0" : "=r"(v));
-    return v;
-}
+static unsigned long tp(void) { return tal_tp(); }   /* the TLS self-pointer: [fs:0] / TPIDR_EL0 */
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);

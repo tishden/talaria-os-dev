@@ -20,6 +20,19 @@
 #include <sys/uio.h>
 #include <time.h>
 
+/* The legacy calls arm64's table does not have: `open` and `pipe` exist there only as
+   `openat` and `pipe2`. The pointer the kernel must refuse is the same one. */
+#ifdef SYS_open
+#define raw_open(path, fl) syscall(SYS_open, (path), (fl))
+#else
+#define raw_open(path, fl) syscall(SYS_openat, AT_FDCWD, (path), (fl))
+#endif
+#ifdef SYS_pipe
+#define raw_pipe(p) syscall(SYS_pipe, (p))
+#else
+#define raw_pipe(p) syscall(SYS_pipe2, (p), 0)
+#endif
+
 static int fails;
 
 static void expect_efault(long r, const char *what) {
@@ -34,12 +47,21 @@ static void expect_ok(long r, long want, const char *what) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0); /* keep printf and raw write() in order */
-    /* Kernel image (linked at 2 MiB) and the frame allocator area above it:
-       identity-mapped in the process address space, but without U/S. */
+    /* Kernel image (linked at 2 MiB on x86, at RAM base + 512 KiB on arm64's `virt`) and
+       the frame allocator area above it: identity-mapped in the process address space,
+       but without U/S (arm64: without the EL0 access bit). */
+#if defined(__aarch64__)
+    void *kimg = (void *)0x40081000;
+    void *kframes = (void *)0x43600000;
+    /* Bits 55..48 disagree with the rest: neither TTBR's half, and the top-byte-ignore
+       rule does not cover them. */
+    void *noncanon = (void *)0x0080800000001000ull;
+#else
     void *kimg = (void *)0x201000;
     void *kframes = (void *)0x3600000;
-    void *unmapped = (void *)0x700000000000ull;
     void *noncanon = (void *)0xffff800000001000ull;
+#endif
+    void *unmapped = (void *)0x700000000000ull;
     char buf[64];
     struct timespec ts;
 
@@ -56,14 +78,14 @@ int main(void) {
     expect_efault(syscall(SYS_fstat, 1, kframes), "fstat(1, kernel frames)");
     expect_efault(syscall(SYS_clock_gettime, CLOCK_MONOTONIC, kimg), "clock_gettime(kernel image)");
     expect_efault(syscall(SYS_uname, kframes), "uname(kernel frames)");
-    expect_efault(syscall(SYS_pipe, kframes), "pipe(kernel frames)");
+    expect_efault(raw_pipe(kframes), "pipe(kernel frames)");
 
     /* The kernel would READ here (and hand the data back or out). */
     expect_efault(syscall(SYS_write, 1, kimg, 32), "write(stdout, kernel image)");
     struct iovec iov = { kimg, 32 };
     expect_efault(syscall(SYS_writev, 1, &iov, 1), "writev(stdout, iov -> kernel image)");
     expect_efault(syscall(SYS_writev, 1, kframes, 1), "writev(stdout, iov array in kernel)");
-    expect_efault(syscall(SYS_open, kimg, O_RDONLY), "open(path in kernel image)");
+    expect_efault(raw_open(kimg, O_RDONLY), "open(path in kernel image)");
     expect_efault(syscall(SYS_nanosleep, kframes, NULL), "nanosleep(kernel frames)");
     expect_efault(syscall(SYS_futex, kframes, 0 /* FUTEX_WAIT */, 0, NULL, NULL, 0), "futex(kernel frames)");
 
@@ -72,9 +94,9 @@ int main(void) {
     munmap(two + 4096, 4096);
     expect_efault(syscall(SYS_read, z, two + 4096 - 16, 64), "read(/dev/zero, straddles unmapped page)");
     memset(two + 4096 - 4, 'a', 4); /* no NUL before the unmapped page */
-    expect_efault(syscall(SYS_open, two + 4096 - 4, O_RDONLY), "open(path runs into unmapped page)");
+    expect_efault(raw_open(two + 4096 - 4, O_RDONLY), "open(path runs into unmapped page)");
     memcpy(two + 4096 - 4, "/x", 3);
-    expect_ok(syscall(SYS_open, two + 4096 - 4, O_RDONLY) == -1 && errno == ENOENT, 1, "open(short path at page end) reaches the fs");
+    expect_ok(raw_open(two + 4096 - 4, O_RDONLY) == -1 && errno == ENOENT, 1, "open(short path at page end) reaches the fs");
 
     /* Destination is read-only. */
     char *ro = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

@@ -27,6 +27,7 @@
 #include <sys/shm.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "tal_arch.h"
 
 #define NT 4
 #define SZ 4096
@@ -42,7 +43,7 @@ static void meet(void)
     int gen = barrier_gen;
     if (++barrier_cnt == NT) { barrier_cnt = 0; barrier_gen++; }
     pthread_mutex_unlock(&bm);
-    while (barrier_gen == gen) { __asm__ __volatile__("pause"); }
+    while (barrier_gen == gen) { tal_relax(); }
 }
 
 static int fails;

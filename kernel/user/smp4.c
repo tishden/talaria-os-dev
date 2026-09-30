@@ -10,11 +10,8 @@
 #include <sched.h>
 #include <sys/syscall.h>
 
-static inline uint64_t rdtsc(void) {
-    unsigned lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return (uint64_t)hi << 32 | lo;
-}
+#include "tal_arch.h"
+#define rdtsc tal_ticks   /* the TSC on x86, CNTVCT_EL0 on arm64 */
 
 #define ITERS 100000000ULL
 #define NW 3
