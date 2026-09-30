@@ -114,7 +114,8 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     crate::println!("talaria: cpu: implementer {:#x} part {:#x} r{}p{}, mpidr={:#x}",
         (midr >> 24) & 0xFF, (midr >> 4) & 0xFFF, (midr >> 20) & 0xF, midr & 0xF, cpu::mpidr());
     let hz = cpu::counter_hz();
-    crate::println!("talaria: the counter: {} Hz ({} ns per tick), now {}", hz, if hz > 0 { 1_000_000_000 / hz } else { 0 }, cpu::counter());
+    // In picoseconds: Graviton3 counts at 1.05 GHz (952 ps), QEMU's TCG at 62.5 MHz (16 000 ps).
+    crate::println!("talaria: the counter: {} Hz ({} ps per tick), now {}", hz, if hz > 0 { 1_000_000_000_000 / hz } else { 0 }, cpu::counter());
 
     let (Some(tree), Some(s)) = (tree, summary) else {
         crate::println!("talaria: NO DEVICE TREE at x0 — the loader gave {:#x}; without ACPI or a tree the machine cannot be described", dtb);

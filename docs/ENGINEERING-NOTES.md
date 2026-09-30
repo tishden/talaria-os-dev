@@ -330,8 +330,43 @@ A green gate that cannot fail is not a gate. This has cost real defects.
   `aws ec2 describe-instances` (nothing there) and CloudTrail
   (`lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=RunInstances`,
   the `errorMessage` names the zones that DO have capacity) do. `main.tf` now takes
-  `az`, the script defaults to ap-northeast-1a and gives apply six minutes, after
-  which it prints CloudTrail's last error and stops.
+  `az` and the script walks a list of zones (default 1d, 1a, 1c), giving each six
+  minutes of apply and printing CloudTrail's last error before the next. The zone
+  with capacity CHANGED between two launches ten minutes apart (1c refused; then 1a
+  refused, naming 1c and 1d) — do not hard-code one.
+* **A Graviton metal comes up in about a minute**, not the 10-20 an x86 metal takes:
+  ssh answered 76 s after `apply` started (the instance existed after ~60 s),
+  provisioning (docker, git, gcc, binutils, the pinned nightly with
+  `aarch64-unknown-none`) took 89 s, the stand image and the kernel built natively
+  in under two minutes. The whole first bring-up, three launches included, cost
+  under an hour of `c7g.metal`.
+* **AL2023 has no `cc`.** The kernel's build scripts (`proc-macro2`, `heapless`,
+  `compiler_builtins`...) link host programs, and cargo fails with "linker `cc`
+  not found" — `gcc` goes into the provisioning list, and on a native host the
+  vDSO's cross assembler is plain `gcc` (`VDSO_CC_AARCH64=gcc`).
+* **The container does not see `/dev/kvm` unless it is handed in.** The arm64 gate
+  and `runq-aarch64.sh` ran under TCG on x86 hosts and never passed `--device
+  /dev/kvm`; on the stand QEMU said "Could not access KVM kernel module" and the gate
+  reported 31 failures in eight seconds — every assertion, because nothing booted.
+  Both scripts now pass the device when it exists (`test.sh` always did).
+* **A gate whose boots run to their timeouts costs its timeouts.** Under KVM every
+  boot of the arm64 gate ended in a second and then sat until `timeout` killed
+  QEMU: 6 min 37 s for five boots, and a fifty-run loop would have been five and a
+  half hours. `talaria.poweroff=1` (PSCI `SYSTEM_OFF`, on which QEMU exits) at the
+  end of the arm64 sequence made the gate 5.1 s under KVM and 22 s under TCG —
+  the same knob, the same meaning as on x86.
+* **A detached series over ssh hangs the ssh** even with `setsid nohup ... &`,
+  `>/dev/null 2>&1 </dev/null` — the docker client keeps something of the session
+  open; the series RUNS, only the ssh call does not return. Launch it under a
+  `timeout`, or with `ssh -f`, and poll for a done-file.
+* **Copy the logs off BEFORE the destroy stands in the same command line.** The
+  hand-run series wrote to `out/` on the instance; the `scp` that was to fetch them
+  ran silenced (`2>/dev/null`), failed on its two-remote-source form, and the
+  `terraform destroy` chained after it went ahead — the raw files went with the
+  instance. The verdict lines had been read over ssh and are in the docs, but the
+  record is a transcript, not the files. The stand script tees every step into
+  `infra/aws/logs/` as it goes; a hand-run series must do the same (`| tee` on the
+  runner's side), and a destroy never follows a copy whose result was not checked.
 
 ---
 

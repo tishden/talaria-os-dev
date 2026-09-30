@@ -428,7 +428,51 @@ Numbers that only appear on real storage, and the defects they exposed:
 
 ---
 
-## 10. Reproducing any of this
+## 10. The arm64 KVM stand: the first facts and numbers (2026-09-30)
+
+Stand: `c7g.metal` (Graviton3, Neoverse V1, 64 cores, no SMT), ap-northeast-1d,
+AL2023 arm64, QEMU 8.2.2 built natively in the stand image, `-M virt,gic-version=3,its=on
+-enable-kvm -cpu host -smp 4 -m 1024`. The kernel is the `arm64-port` branch at
+`0bda853` plus the `talaria.poweroff=1` end (`kernel/build-aarch64.sh` on the stand,
+`AARCH64_OBJCOPY=objcopy VDSO_CC_AARCH64=gcc`). One bring-up, `infra/aws/kvm-stand-aarch64.sh`;
+the pitfalls are in `docs/ENGINEERING-NOTES.md` §5.1.
+
+**The facts the plan asked for (§9.2 A)**, from the banner under KVM:
+
+| fact | value |
+|---|---|
+| MIDR | implementer 0x41, part 0xd40 r1p1 — Neoverse V1 |
+| `CNTFRQ_EL0` | **1 050 000 000 Hz** (952 ps per tick; QEMU's TCG gives 62.5 MHz) |
+| hardware dirty bit | FEAT_HAFDBS DBM works: the probe reads true / false / true |
+| PSCI | 1.1 through `hvc` |
+| GICv3 | 256 SPIs, the ITS at 0x8080000, the redistributor of every core found |
+| the tick | PPI 27 at 1000 µs: **49 ticks in 50 ms** (the gate's KVM window is 49-51; TCG gave 48-49) |
+| the cores | 4 of 4 up through PSCI `CPU_ON`, each took its SGI and 21 ticks of its own |
+| EL0 | three `svc` round trips and a controlled `brk`; the vDSO `__kernel_clock_gettime` read from EL0 lands inside the kernel's bracket |
+| the gate | `TAL_KVM=1 kernel/test-aarch64.sh`: **36/36**, 5.1 s for five boots |
+
+**The four probes TCG could not judge (§9.2 B-E):**
+
+| probe | what it tells | result |
+|---|---|---|
+| `ring` — the `fastring` SPSC protocol with the §4.13 fences, core 1 produces, core 0 consumes, 32-word slots with a checksum | are the fences enough on a weak machine? | 200 M slots at `-smp 2`, 4 and 8: **0 corrupted, 0 with a wrong length** in every run; 9.6 / 9.8 / 8.9 M slots/s (20.8 / 20.5 / 22.4 s). A first run of 20 M at `-smp 2`: 0 / 0, 9.9 M slots/s |
+| `bbm` — 48 regions of 2 MiB, 2000 rights flips each on core 0 while core 1 reads through a guarded load | break-before-make: a stale translation or a TLB conflict abort? | 49 227 562 reads, 776 201 faults (the PROT_NONE phases), **0 wrong values, 0 conflict aborts**, 167 ms |
+| `icache` — a frame executed at EL0, rewritten WITH `icache::sync`, then rewritten WITHOUT | how does a stale instruction line look? | A 0xa, B (with sync) **0xb**; C (without sync) answered 0xc — coherent, in this run and the ten repeats below |
+| `svccost` — 50 000 `svc` round trips from EL0, timed by the counter | ns per syscall entry, with and without the 528-byte FP/SIMD save | **55 ns with the save, 41 ns without — the save costs 14 ns**; four runs, the same three numbers each time |
+| the gate in a loop — 50 runs of `test-aarch64.sh`, 250 boots of 4 cores | the SMP bring-up paths (PSCI `CPU_ON`, the redistributor wake, SGIs) under a real weak machine | **0 of 50 runs failed**, 36/36 each, about 5 s a run |
+
+The `icache` probe's unsynchronised rewrite (C) answered the NEW code in all ten
+repeats under KVM as well: on one core, one fresh page, the stale line the plan's
+§4.12 warned about did not appear. The sync stays (the architecture does not
+promise what this core did); a gate that can show the failure needs a harder shape.
+
+The x86 references for the last line: 28 ns for a nop syscall on the i7-3820
+microvm stand (§5), 95 ns as `mbench` measures the full path on the EC2 stands.
+The plan's §4.5 asked whether the eager FP/SIMD save is visible: it is a quarter of
+the entry, 14 ns — enough to keep the lazy-save candidate on the list for phase 9,
+not enough to do it before the workloads run.
+
+## 11. Reproducing any of this
 
 ```sh
 # the local comparative suite (one workload, both sides, on this machine)

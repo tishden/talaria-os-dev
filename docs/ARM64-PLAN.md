@@ -8,6 +8,13 @@ the kernel leans on, what replaces it, in which order it is built, and by which
 gate each step is judged. The numbers here are estimates and are marked as such;
 the measurements come later and go to `docs/MEASUREMENTS.md`.
 
+Status (2026-09-30, branch `arm64-port`): **the KVM stand has run (§9): every fact the
+plan asked for is in `docs/MEASUREMENTS.md` §10, the four probes TCG could not judge
+passed on Graviton3 (§4.13), and `svc` costs 55 ns with the FP/SIMD save, 41 without.**
+On the x86 side the signal frame's layout is behind `arch::signal` and the syscall
+`Frame` is read by neutral names (§4.5) — phase 3's design item. The paragraph below
+is the status of the day before, kept for what it lists.
+
 Status (2026-09-29, branch `arm64-port`): **phase 0 in progress; phases 1 and 2
 have their logic proved under TCG.** `arch/x86_64/cpu.rs` holds the privileged-instruction primitives
 and 21 shared modules call them instead of inline `asm!`; seven whole x86 modules
@@ -628,6 +635,26 @@ or the core boundary:**
   When these drivers come over, the fences become `arch::barrier::dma_wmb` (`dmb oshst`)
   as §4.11 says; noted here so the audit does not count them as done.
 
+**What the KVM stand found (2026-09-30, `c7g.metal`, Neoverse V1; the numbers in
+`docs/MEASUREMENTS.md` §10):**
+
+* `ring` — the `fastring` fence set as corrected above, 200 million 32-word slots
+  between core 1 and core 0 at `-smp 2`, 4 and 8: zero corrupted slots, zero wrong
+  lengths, in every run (about 9-10 million slots a second, 20-22 s a run). The
+  producer/consumer protocol of `fastpath.rs` is correct on a weak machine as written.
+* `bbm` — 48 regions × 2000 rights flips on one core under a reader on another: 49
+  million reads, 776 thousand faults in the PROT_NONE phases, zero wrong values, zero
+  TLB conflict aborts. The break-before-make discipline of `paging.rs` (§4.3) holds.
+* `icache` — the frame rewritten WITH `icache::sync` answered anew every time; the
+  rewrite WITHOUT it was ALSO observed coherent on this core in every repeat — the
+  failure §4.12 warned about did not show in this form (one page, one core, a fresh
+  frame). It is not evidence that the sync is unneeded; it is evidence that a gate for
+  it needs a harder shape (a hot line on another core), and that is noted for phase 3.
+* `svccost` — 55 ns with the eager 528-byte FP/SIMD save, 41 ns without: the save is
+  14 ns, a quarter of the entry. The lazy-save decision (§4.5) stays open for phase 9.
+* Fifty runs of the bring-up gate in a loop (250 boots of 4 cores: PSCI, the
+  redistributor wake, SGIs): **0 of 50 failed**, 36/36 every time, about 5 s a run.
+
 ### 4.14. Observability
 
 `obs/unwind` walks `x29` (`[fp] = caller's fp, [fp+8] = lr`); the kernel is
@@ -822,13 +849,13 @@ Items 1-3 are in the tree; item 4 is the open design work.
 
 | # | Step | The gate / what is recorded |
 |---|---|---|
-| A | `kvm-stand-aarch64.sh` brings `c7g.metal` up and provisions it; `kernel/build-aarch64.sh`; `kernel/test-aarch64.sh` under `-enable-kvm -cpu host` | 25/25 as under TCG; the banner's facts go to `docs/MEASUREMENTS.md`: MIDR (Arm 0x41, part 0xd40 — Neoverse V1), `CNTFRQ` on Graviton3, HAFDBS present, PSCI version, GIC SPIs, the tick count in 50 ms |
-| B | `talaria.test=ring` at `-smp 2/4/8`, several minutes each | corrupted slots = 0; if not, the fence set of §4.13 is wrong and this is the day to learn it |
-| C | `talaria.test=icache` | the resynchronised probe answers anew; the unsynchronised repeat shows the stale line (records how the failure LOOKS — the plan's §4.12 said "silent") |
-| D | `talaria.test=bbm` | no conflict abort, no stale value across the flip |
-| E | `talaria.test=svccost` | ns per `svc` with and without the FP/SIMD save — the number the lazy-save decision is made on |
-| F | 50 boots of `test-aarch64.sh` in a loop (`-smp 4`) | zero failures: the bring-up's SMP paths (PSCI, the redistributor wake, SGIs) under a real weak machine |
-| G | `lab-down`; the hours and the bring-up time go to `docs/ENGINEERING-NOTES.md` §5 | the stand's economics decide how often the full set runs |
+| A | `kvm-stand-aarch64.sh` brings `c7g.metal` up and provisions it; `kernel/build-aarch64.sh`; `kernel/test-aarch64.sh` under `-enable-kvm -cpu host` | DONE 2026-09-30: 36/36 in 5.1 s; MIDR 0x41/0xd40 r1p1 (Neoverse V1), `CNTFRQ` 1.05 GHz, HAFDBS DBM works, PSCI 1.1, 256 SPIs, 49 ticks in 50 ms — `docs/MEASUREMENTS.md` §10 |
+| B | `talaria.test=ring` at `-smp 2/4/8`, several minutes each | DONE: 200 M slots each, 0 corrupted at 2, 4 and 8 |
+| C | `talaria.test=icache` | DONE: the synced rewrite answers anew; the unsynced one was coherent too, every repeat — the failure needs a harder shape (§4.13) |
+| D | `talaria.test=bbm` | DONE: 49 M reads, 0 wrong values, 0 conflict aborts |
+| E | `talaria.test=svccost` | DONE: 55 ns with the save, 41 without |
+| F | 50 runs of `test-aarch64.sh` in a loop (`-smp 4`, 250 boots) | DONE: 0 of 50 runs failed, 250 boots |
+| G | `lab-down`; the hours and the bring-up time go to `docs/ENGINEERING-NOTES.md` §5 | DONE: §5.1 — a Graviton metal is up in a minute, the first bring-up cost under an hour of `c7g.metal` |
 
 Not in this session, on purpose: the UEFI path (phase 6 needs the aarch64 stub, not
 written), the workloads (phase 7 needs `syscall.rs` over — phase 3 first), and the
