@@ -747,31 +747,40 @@ KVM on the arm64 metal. `validate.sh` follows the same switch.
 
 ---
 
-## 9. The next session: the KVM stand on `c6g.metal`
+## 9. The next session: the KVM stand on `c7g.metal`
 
 The first session did what §9 used to list — the toolchains, the `arch/` split (to the
 last `asm!`), first light and phases 1-3(a) under TCG, the gate in CI. What TCG cannot
 show is now the whole of what is left to learn, and it needs an arm64 host with KVM.
-The choice is **`c6g.metal`** (Graviton2, Neoverse N1, ARMv8.2-A, 64 cores, no SMT,
-`ap-northeast-1` where the vCPU quota fits): it has every feature the target asks for
-(LSE, the Crypto Extensions, FEAT_HAFDBS for the dirty bit) at the lowest price of the
-metal types that do; `a1.metal` (Cortex-A72) does not — no LSE, no HAFDBS — and
-`c7g.metal` is the same work at a higher price, worth it only when the numbers of
-phase 9 must match the production generation. A metal instance takes 10-20 minutes to
-come up and costs about $2.2 an hour: the session is planned as ONE bring-up of a few
-hours, with everything that can be prepared in advance prepared in advance.
+The choice is **`c7g.metal`** (Graviton3, Neoverse V1, ARMv8.4-A, 64 cores, no SMT,
+`ap-northeast-1` where the vCPU quota fits): the generation the first production
+target (`c7g.*`) will be, with every feature the target asks for (LSE, the Crypto
+Extensions, FEAT_HAFDBS for the dirty bit, PMUv3). `c6g.metal` (Graviton2, N1) would do
+for the logic and the audit at a slightly lower price; `a1.metal` (Cortex-A72) would not
+— no LSE, no HAFDBS. A metal instance takes 10-20 minutes to come up and costs about
+$2.3 an hour: the session is planned as ONE bring-up of a few hours, with everything
+that can be prepared in advance prepared in advance — and it has been:
+`infra/aws/kvm-stand-aarch64.sh` is the whole of §9.2 as one command.
 
-### 9.1. Before the stand is paid for (the dev box, no clock running)
+### 9.1. Before the stand is paid for (the dev box, no clock running) — DONE 2026-09-30
 
-1. **The stand's recipe in `infra/aws/`.** `main.tf` looks the AMI up by
+Items 1-3 are in the tree; item 4 is the open design work.
+
+1. **The stand's recipe in `infra/aws/`** — done: `main.tf` takes `arch` (the AMI
+   `al2023-ami-2023*-${arch}`), and `kvm-stand-aarch64.sh` runs §9.2 end to end:
+   apply, ssh, provision, upload, the stand image built natively, the kernel, the gate
+   under KVM, the four probes, fifty boots, destroy (`KEEP=1` to keep). The original
+   text of the item: `main.tf` looks the AMI up by
    `al2023-ami-2023*-x86_64`: the arm64 twin (`*-arm64`) selected by a variable, and
    `instance_type = c6g.metal`. A user-data or an `ansible` play that installs docker,
    git, `binutils` (a native `objcopy`), the pinned nightly with
    `aarch64-unknown-none`, builds `services/docker/Dockerfile.qemu-aarch64` NATIVELY
    (the `fedora:40` base pulls its arm64 variant) and clones the `arm64-port` branch.
    Check `/dev/kvm` exists and is group-readable in the play, not by hand.
-2. **The probes TCG forgives, written now, judged there** — each a `talaria.test=`
-   value the arm64 `kmain` dispatches on (`cmdline.rs` is over, `test_is` works):
+2. **The probes TCG forgives, written now, judged there** — done, in
+   `arch/aarch64/probes.rs`, each a `talaria.test=` value; under TCG all four run and
+   their machinery is proved (a job on a secondary core, the guarded load with its
+   EL1 fixup, the EL0 state machines), which is what `test-aarch64.sh` asserts:
    * `ring` — the §4.13 fences under a weak machine: a producer core and a consumer
      core over an SPSC ring in the `fastring` layout (the exact code path of
      `fastpath.rs`, minus the card), a checksum per slot, a few seconds and millions of
@@ -786,9 +795,9 @@ hours, with everything that can be prepared in advance prepared in advance.
    * `svccost` — the first arm64 number for §4.5: a hundred thousand `svc` round trips
      timed by the counter from EL0, printed as ns per call, with and without the
      528-byte FP/SIMD save in the vector (the lazy-save decision needs both).
-3. **The timing lines already printed are made judgeable under KVM**: the 50-ms tick
-   count (48-49 under TCG, ~50 expected under KVM), and the `test-aarch64.sh` gate gains
-   a `TAL_KVM=1` mode that tightens them.
+3. **The timing lines already printed are made judgeable under KVM** — done:
+   `TAL_KVM=1 kernel/test-aarch64.sh` requires 49-51 ticks in 50 ms (TCG gives 48-49),
+   and the gate runs the four probes as four more boots (36 assertions in all).
 4. **The dev-box work that does not need the stand goes on in parallel**: the
    `arch/x86_64/signal.rs` extraction (the x86 `ucontext`/`gregs`, `fork_regs`,
    `exit_uregs`, `sigreturn`) and the neutral `Frame` — phase 3's design item, with its
@@ -798,7 +807,7 @@ hours, with everything that can be prepared in advance prepared in advance.
 
 | # | Step | The gate / what is recorded |
 |---|---|---|
-| A | `lab-up` with `c6g.metal`; the recipe of 9.1.1 runs; `kernel/build-aarch64.sh`; `kernel/test-aarch64.sh` under `-enable-kvm -cpu host` | 25/25 as under TCG; the banner's facts go to `docs/MEASUREMENTS.md`: MIDR (Arm 0x41, part 0xd0c), `CNTFRQ` on Graviton2, HAFDBS present, PSCI version, GIC SPIs, the tick count in 50 ms |
+| A | `kvm-stand-aarch64.sh` brings `c7g.metal` up and provisions it; `kernel/build-aarch64.sh`; `kernel/test-aarch64.sh` under `-enable-kvm -cpu host` | 25/25 as under TCG; the banner's facts go to `docs/MEASUREMENTS.md`: MIDR (Arm 0x41, part 0xd40 — Neoverse V1), `CNTFRQ` on Graviton3, HAFDBS present, PSCI version, GIC SPIs, the tick count in 50 ms |
 | B | `talaria.test=ring` at `-smp 2/4/8`, several minutes each | corrupted slots = 0; if not, the fence set of §4.13 is wrong and this is the day to learn it |
 | C | `talaria.test=icache` | the resynchronised probe answers anew; the unsynchronised repeat shows the stale line (records how the failure LOOKS — the plan's §4.12 said "silent") |
 | D | `talaria.test=bbm` | no conflict abort, no stale value across the flip |
