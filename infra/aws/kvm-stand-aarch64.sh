@@ -7,6 +7,10 @@
 #
 #   infra/aws/kvm-stand-aarch64.sh [type] [region]      # default c7g.metal ap-northeast-1
 #   KEEP=1 ...                                          # leave the instance up for hand work
+#   AZ=ap-northeast-1d,ap-northeast-1a ...              # the zones to try, in order (a metal type is
+#                                                       # out of capacity per zone, and the zone with
+#                                                       # it changes by the minute — 2026-09-30: 1c
+#                                                       # refused, then 1a refused naming 1c and 1d)
 #   RINGN=5000000 ...                                   # slots for the ring probe (default 2M)
 #
 # Everything the run prints lands in infra/aws/logs/aarch64-<stamp>/ — the gate's and the
@@ -16,6 +20,9 @@
 set -eu
 TYPE=${1:-c7g.metal}
 REGION=${2:-ap-northeast-1}   # the vCPU quota there fits a 64-core metal
+AZS=${AZ:-ap-northeast-1d,ap-northeast-1a,ap-northeast-1c}
+AZ=${AZS%%,*}
+TFVARS="-var instance_type=$TYPE -var region=$REGION -var arch=arm64 -var az=$AZ"
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -26,18 +33,29 @@ T0=$(date +%s)
 cleanup() {
   if [ "${KEEP:-0}" = 1 ]; then
     echo "KEEP=1: the instance stays up. Destroy it yourself:"
-    echo "   terraform -chdir=$HERE destroy -auto-approve -var instance_type=$TYPE -var region=$REGION -var arch=arm64"
+    echo "   terraform -chdir=$HERE destroy -auto-approve $TFVARS"
     return
   fi
   echo "== terraform destroy =="
-  terraform -chdir="$HERE" destroy -auto-approve -var "instance_type=$TYPE" -var "region=$REGION" -var "arch=arm64" >>"$LOGD/terraform.log" 2>&1 || \
+  terraform -chdir="$HERE" destroy -auto-approve $TFVARS >>"$LOGD/terraform.log" 2>&1 || \
     echo "destroy FAILED — check the console, a metal instance left running is expensive"
 }
 trap cleanup EXIT
 
-echo "== terraform apply: $TYPE in $REGION (metal takes 10-20 min to come up) =="
 terraform -chdir="$HERE" init -input=false >>"$LOGD/terraform.log" 2>&1
-terraform -chdir="$HERE" apply -auto-approve -var "instance_type=$TYPE" -var "region=$REGION" -var "arch=arm64" >>"$LOGD/terraform.log" 2>&1
+# A capacity refusal is retried by the AWS provider FOREVER ("Still creating..." with no
+# instance behind it): each zone gets 6 minutes of apply; if no instance exists by then,
+# CloudTrail has the reason (printed), and the next zone of the list is tried.
+for AZ in $(echo "$AZS" | tr ',' ' '); do
+  TFVARS="-var instance_type=$TYPE -var region=$REGION -var arch=arm64 -var az=$AZ"
+  echo "== terraform apply: $TYPE in $REGION/$AZ (metal takes 10-20 min to come up) =="
+  if timeout 360 terraform -chdir="$HERE" apply -auto-approve $TFVARS >>"$LOGD/terraform.log" 2>&1; then break; fi
+  echo "apply did not finish in 6 min in $AZ — the last RunInstances error from CloudTrail:"
+  aws cloudtrail lookup-events --region "$REGION" --lookup-attributes AttributeKey=EventName,AttributeValue=RunInstances --max-results 1 \
+    --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null | sed -n 's/.*"errorMessage":"\([^"]*\)".*/   \1/p'
+  AZ=""
+done
+[ -n "$AZ" ] || { echo "no zone of $AZS gave a $TYPE"; exit 1; }
 IP=$(terraform -chdir="$HERE" output -raw public_ip)
 echo "instance: $IP"
 
