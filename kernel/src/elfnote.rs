@@ -21,8 +21,9 @@ pub const NT_PRSTATUS: u32 = 1;
 /// The type of the note with the process's name.
 pub const NT_PRPSINFO: u32 = 3;
 
-/// The descriptor of `NT_PRSTATUS` (`elf_prstatus` on x86-64).
-pub const PRSTATUS_DESC: usize = 336;
+/// The descriptor of `NT_PRSTATUS` (`elf_prstatus`): 112 bytes before the registers, the
+/// registers, `pr_fpvalid` and the trailing alignment — 336 on x86-64, 392 on arm64.
+pub const PRSTATUS_DESC: usize = 112 + NREGS * 8 + 8;
 /// The descriptor of `NT_PRPSINFO` (`elf_prpsinfo`).
 pub const PRPSINFO_DESC: usize = 136;
 /// The header of a note plus the name "CORE" padded to 4: 12 + 8.
@@ -64,8 +65,10 @@ impl Buf<'_> {
 
 /// The registers in the order of `user_regs_struct` — exactly what GDB expects
 /// in an `NT_PRSTATUS`. The order is not ours and must not be changed: fields
-/// swapped round give not "a format error" but a PLAUSIBLE wrong stack.
-pub const NREGS: usize = 27;
+/// swapped round give not "a format error" but a PLAUSIBLE wrong stack. 27 on
+/// x86-64, 34 on arm64 (`user_pt_regs`: regs[31], sp, pc, pstate); the order itself
+/// is `arch::signal::prstatus_regs`'s.
+pub const NREGS: usize = if cfg!(target_arch = "aarch64") { 34 } else { 27 };
 
 /// Build the note `NT_PRSTATUS`.
 pub fn prstatus(sig: u32, pid: i32, regs: &[u64; NREGS]) -> [u8; PRSTATUS_LEN] {

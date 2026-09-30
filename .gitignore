@@ -66,3 +66,6 @@ bench/suite/infra/ansible/files/*
 bench/suite/infra/ansible/inventory.ini
 infra/ansible/inventory.ini
 bench/suite/lib/build/
+
+# The arm64 ring-3 binaries (`make -C kernel/user aarch64`): built, never committed, like their x86 twins.
+kernel/user/aarch64/

@@ -128,19 +128,12 @@ impl Writer {
 /// The registers in the order of `user_regs_struct` — that is exactly what GDB expects in an `NT_PRSTATUS`.
 /// The order is not ours and must not be changed: fields swapped round would give not
 /// "a format error" but a PLAUSIBLE wrong stack.
-fn user_regs(f: &crate::idt::ExcFrame, fs_base: u64) -> [u64; 27] {
-    [
-        f.r15, f.r14, f.r13, f.r12, f.rbp, f.rbx, f.r11, f.r10, f.r9, f.r8,
-        f.rax, f.rcx, f.rdx, f.rsi, f.rdi,
-        f.rax,          // orig_rax: for an exception's frame it makes no sense
-        f.rip, f.cs, f.rflags, f.rsp, f.ss,
-        fs_base, 0,     // fs_base, gs_base
-        0, 0, 0, 0,     // ds, es, fs, gs
-    ]
+fn user_regs(f: &crate::idt::ExcFrame, fs_base: u64) -> [u64; crate::elfnote::NREGS] {
+    crate::arch::signal::prstatus_regs(f, fs_base)
 }
 
 /// Write the note `NT_PRSTATUS` (the bytes are built by `elfnote`, which is tested on the host).
-fn note_prstatus(w: &mut Writer, sig: u32, pid: i32, regs: &[u64; 27]) {
+fn note_prstatus(w: &mut Writer, sig: u32, pid: i32, regs: &[u64; crate::elfnote::NREGS]) {
     w.put(&crate::elfnote::prstatus(sig, pid, regs));
     w.pad4();
 }
@@ -226,10 +219,10 @@ fn dump_process_inner(f: &crate::idt::ExcFrame, sig: u32) -> u64 {
     // from the context saved by the scheduler.
     let mut segs = [Seg { vaddr: 0, len: 0, flags: 0 }; MAXSEG];
     let mut ns = 0usize;
-    if let Some(s) = stack_seg(f.rsp, true) { segs[ns] = s; ns += 1; }
+    if let Some(s) = stack_seg(crate::arch::signal::exc_sp(f), true) { segs[ns] = s; ns += 1; }
     for i in 1..nt {
         if ns >= MAXSEG { break; }
-        let rsp = frame_of_task(tids[i]).rsp;
+        let rsp = crate::arch::signal::exc_sp(&frame_of_task(tids[i]));
         if let Some(s) = stack_seg(rsp, true) {
             if !segs[..ns].iter().any(|o| o.vaddr == s.vaddr) { segs[ns] = s; ns += 1; }
         }
@@ -275,7 +268,7 @@ pub fn dump_kernel(f: &crate::idt::ExcFrame, sig: u32) -> u64 {
     let mut ns = 0usize;
     // The kernel's stack is the memory over which gdb will unwind the calls. `user=false`:
     // the kernel's pages are supervisor ones, the U/S bit must not be required.
-    if let Some(s) = stack_seg(f.rsp, false) { segs[ns] = s; ns += 1; }
+    if let Some(s) = stack_seg(crate::arch::signal::exc_sp(f), false) { segs[ns] = s; ns += 1; }
     let tids = [cur];
     let r = write_core(sig, 0, b"talaria-kernel\0", &tids, &segs[..ns], f, false);
     IN_DUMP.store(false, Ordering::SeqCst);
@@ -313,7 +306,7 @@ pub fn dump_task(t: usize) -> u64 {
     let mut ns = 0usize;
     for i in 0..nt {
         if ns >= MAXSEG { break; }
-        let rsp = frame_of_task(tids[i]).rsp;
+        let rsp = crate::arch::signal::exc_sp(&frame_of_task(tids[i]));
         if let Some(sg) = stack_seg(rsp, true) {
             if !segs[..ns].iter().any(|o| o.vaddr == sg.vaddr) { segs[ns] = sg; ns += 1; }
         }
@@ -436,21 +429,10 @@ fn proc_name(t: usize, out: &mut [u8; 16]) {
 /// A frame "as if" for a thread that stands in the scheduler: it has no exact registers,
 /// but the rip/rsp/rbp are enough for gdb to show where it stood.
 fn frame_of_task(t: usize) -> crate::idt::ExcFrame {
-    let mut f: crate::idt::ExcFrame = unsafe { core::mem::zeroed() };
     // The thread stopped on the way out of a syscall: its place is there, in user space
     // (the context saved after that is the exit path in the kernel).
     if !crate::sched::task_alive(t) {
-        if let Some(r) = crate::sched::exit_uregs(t) {
-            f.rip = r[0]; f.rsp = r[1]; f.rbp = r[2]; f.rbx = r[3];
-            f.r12 = r[4]; f.r13 = r[5]; f.r14 = r[6]; f.r15 = r[7]; f.rflags = r[8];
-            f.rax = r[9]; // the number of the syscall the thread stood in
-            f.cs = 0x2B; f.ss = 0x23;
-            return f;
-        }
+        if let Some(r) = crate::sched::exit_uregs(t) { return crate::arch::signal::frame_of_exit_uregs(&r); }
     }
-    f.rip = crate::sched::saved_rip(t);
-    f.rsp = crate::sched::saved_user_rsp(t);
-    f.rbp = crate::sched::saved_user_rbp(t);
-    f.cs = 0x2B; f.ss = 0x23; f.rflags = 0x202;
-    f
+    crate::arch::signal::frame_of_saved(crate::sched::saved_rip(t), crate::sched::saved_user_rsp(t), crate::sched::saved_user_rbp(t))
 }

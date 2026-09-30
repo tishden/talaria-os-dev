@@ -21,6 +21,7 @@ pub const MAXCPU: usize = 64;
 ///   +40 sched_root  the root table the core is switching to
 ///   +48 (unused on arm64: x86's PV EOI word)
 ///   +56 off_stack   the task whose kernel stack the core is leaving
+///   +64 fp_area     the FP/SIMD area of the current entry (the stubs write it)
 #[repr(C, align(64))]
 pub struct PerCpu {
     pub ursp: u64,
@@ -31,10 +32,13 @@ pub struct PerCpu {
     pub sched_root: u64,
     pub _pv_eoi: u64,
     pub off_stack: u64,
+    /// +64: the 528-byte FP/SIMD area the current entry's stub saved below its frame
+    /// (`switch::fpu_save` copies a task's state from there, not from the live registers).
+    pub fp_area: u64,
 }
 
 static mut CPUS: [PerCpu; MAXCPU] = {
-    const Z: PerCpu = PerCpu { ursp: 0, kstack_top: 0, sig_newrsp: 0, cpu: 0, cur_task: u64::MAX, sched_root: 0, _pv_eoi: 0, off_stack: u64::MAX };
+    const Z: PerCpu = PerCpu { ursp: 0, kstack_top: 0, sig_newrsp: 0, cpu: 0, cur_task: u64::MAX, sched_root: 0, _pv_eoi: 0, off_stack: u64::MAX, fp_area: 0 };
     [Z; MAXCPU]
 };
 
@@ -57,6 +61,8 @@ pub fn init(cpu: usize) {
     ONLINE.fetch_or(1 << cpu, Ordering::SeqCst);
 }
 
+/// This core's block (the diagnostics).
+pub fn block_ptr() -> *mut PerCpu { block() }
 #[inline(always)]
 fn block() -> *mut PerCpu {
     let p: u64;
@@ -96,3 +102,6 @@ pub fn pv_eoi_addr(_cpu: usize) -> u64 { 0 }
 pub fn set_kstack_top(v: u64) { unsafe { (*block()).kstack_top = v; } }
 #[inline]
 pub fn kstack_top() -> u64 { unsafe { (*block()).kstack_top } }
+
+/// The FP/SIMD area the current entry saved (0 — none: a kernel context that never entered).
+#[inline] pub fn fp_area() -> u64 { unsafe { (*block()).fp_area } }

@@ -296,7 +296,7 @@ fn stuck_note(cpu: usize, task: usize, frame: u64) {
     if limit == 0 || cpu >= MAXCPU || frame == 0 { return; }
     // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
     // touches, and what crosses cores is atomic (see the module's note).
-    let rip = unsafe { core::ptr::read_volatile((frame + 15 * 8) as *const u64) };
+    let rip = crate::arch::switch::ctx_pc(frame);
     let same = STUCK_TASK[cpu].load(Relaxed) == task as u64;
     STUCK_TASK[cpu].store(task as u64, Relaxed);
     let n = if same { STUCK_N[cpu].fetch_add(1, Relaxed) + 1 } else { STUCK_N[cpu].store(1, Relaxed); 1 };
@@ -305,9 +305,9 @@ fn stuck_note(cpu: usize, task: usize, frame: u64) {
         // SAFETY: C3 — the interrupt/syscall FRAME of the thread this core interrupted: it lies
         // on that thread's kernel stack, which is alive for as long as the thread is, and the
         // offsets are the ones the stub pushed.
-        let cs = unsafe { core::ptr::read_volatile((frame + 16 * 8) as *const u64) };
+        let cs = crate::arch::switch::ctx_mode(frame);
         crate::println!("[stuck] core {}: t{} has been holding it for {} ticks, rip={:#x} (the previous one {:#x}) ring{} — {}",
-            cpu, task, n, rip, prev, if cs & 3 == 3 { 3 } else { 0 },
+            cpu, task, n, rip, prev, if crate::arch::switch::mode_is_user(cs) { 3 } else { 0 },
             if rip == prev { "IT STANDS STILL" } else { "it spins" });
         crate::sync::dump_tasks();
         STUCK_N[cpu].store(0, Relaxed);
@@ -393,10 +393,7 @@ fn prof_note(frame: u64) {
     // SAFETY: C3 — the interrupt/syscall FRAME of the thread this core interrupted: it lies
     // on that thread's kernel stack, which is alive for as long as the thread is, and the
     // offsets are the ones the stub pushed.
-    let (rip, cs) = unsafe {
-        (core::ptr::read_volatile((frame + 15 * 8) as *const u64),
-         core::ptr::read_volatile((frame + 16 * 8) as *const u64))
-    };
+    let (rip, cs) = (crate::arch::switch::ctx_pc(frame), crate::arch::switch::ctx_mode(frame));
     {   // The raw ring: A STACK rather than one address, and not at every tick (see PROF_DIV).
         // The unwinding goes BEFORE any processing: the chain of frames is alive exactly
         // now, while the interrupted context has not been touched yet.
@@ -491,8 +488,8 @@ fn ctx_in_kernel(t: usize) -> bool {
         let sp = core::ptr::read_volatile(core::ptr::addr_of!(RSP[t]));
         let top = core::ptr::read_volatile(core::ptr::addr_of!(KSTACK[t]));
         let pages = { let k = core::ptr::read_volatile(core::ptr::addr_of!(KSZ[t])); if k != 0 { k } else { KSTACK_PAGES } };
-        if sp == 0 || top == 0 || sp < top - pages * 4096 || sp + 20 * 8 > top { return false; }
-        core::ptr::read_volatile((sp + 16 * 8) as *const u64) & 3 == 0
+        if sp == 0 || top == 0 || sp < top - pages * 4096 || sp + crate::arch::switch::CTX_WORDS as u64 * 8 > top { return false; }
+        !crate::arch::switch::ctx_is_user(sp)
     }
 }
 /// It is dead but has not stopped yet: it stands on a core or was preempted in the middle of the kernel and
@@ -527,15 +524,11 @@ fn park_dead_in_user(t: usize, sp: u64) {
     unsafe {
         // The frame's layout is `timer_stub_sched`: 0..14 GP (r15..rax), 15 rip,
         // 16 cs, 17 rflags, 18 rsp, 19 ss.
-        let g = |k: u64| core::ptr::read_volatile((sp + k * 8) as *const u64);
-        if g(16) & 3 != 3 { return; }
-        set_exit_uregs(t, [g(15), g(18), g(8), g(13), g(3), g(2), g(1), g(0), g(17), u64::MAX]);
-        let w = |k: u64, v: u64| core::ptr::write_volatile((sp + k * 8) as *mut u64, v);
-        w(15, dead_park as *const () as u64);
-        w(16, 0x08);                                  // kernel CS
-        w(17, 0x2);                                   // IF=0: the exit will decide itself when to open them
-        w(18, ((sp - 512) & !0xF) - 8);               // its own kernel stack, as after a call
-        w(19, 0x10);                                  // kernel SS
+        if !crate::arch::switch::ctx_is_user(sp) { return; }
+        set_exit_uregs(t, crate::arch::switch::ctx_exit_uregs(sp));
+        // the next entry lands in the kernel, interrupts off (the exit opens them itself), on
+        // its own kernel stack as after a call
+        crate::arch::switch::ctx_park(sp, dead_park, ((sp - 512) & !0xF) - 8);
     }
 }
 extern "C" fn dead_park() -> ! {
@@ -709,10 +702,7 @@ pub fn ctx_enter(t: usize, cpu: usize, sp: u64) {
     let prev = CTX_LAST_CPU[t].swap(cpu as u8, Ordering::SeqCst);
     // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
     // touches, and what crosses cores is atomic (see the module's note).
-    let (rip, cs, rfl) = unsafe { (
-        core::ptr::read_volatile((sp + 15 * 8) as *const u64),
-        core::ptr::read_volatile((sp + 16 * 8) as *const u64),
-        core::ptr::read_volatile((sp + 17 * 8) as *const u64)) };
+    let (rip, cs, rfl) = (crate::arch::switch::ctx_pc(sp), crate::arch::switch::ctx_mode(sp), crate::arch::switch::ctx_flags(sp));
     if !CTX_FRESH[t].swap(false, Ordering::SeqCst) {
         let n = CTX_STALE.fetch_add(1, Ordering::Relaxed);
         if n < 4 {
@@ -722,7 +712,7 @@ pub fn ctx_enter(t: usize, cpu: usize, sp: u64) {
                 CURRENT.load(Ordering::Relaxed), crate::syscall::LAST_SYS[t].load(Ordering::Relaxed) >> 48);
         }
     }
-    if (cs != 0x8 && cs != 0x2B) || rfl & 2 == 0 || rfl >> 22 != 0 {
+    if !crate::arch::switch::ctx_plausible(sp) {
         let n = CTX_BAD.fetch_add(1, Ordering::Relaxed);
         if n < 4 {
             crate::println!("sched: AT THE ADDRESS RSP[t{}] THERE IS NO FRAME (the entry is by core {}, the previous entry was by core {}): rsp={:#x} \
@@ -1140,7 +1130,7 @@ pub fn ap_loop(cpu: usize) -> ! {
                 note_run_start(t);
                 crate::percpu::set_sig_newrsp(SIGRSP[t]); // the deferred rsp substitution has arrived with the task
                 crate::user::set_rsp0(KSTACK[t]);
-                wrmsr(IA32_FS_BASE, FSBASE[t]);
+                set_tls_base(FSBASE[t]);
                 let cr3 = CR3[t];
                 if cr3 != 0 && cr3 != crate::paging::current_cr3() { note_cr3(cpu, cr3); crate::paging::switch(cr3); }
                 if FPU_VALID[t] {
@@ -1298,11 +1288,11 @@ fn tick_gap_note(c: usize, cur: u64, frame: u64) {
     if frame != 0 {
         // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
         // touches, and what crosses cores is atomic (see the module's note).
-        let rip = unsafe { core::ptr::read_volatile((frame + 15 * 8) as *const u64) };
+        let rip = crate::arch::switch::ctx_pc(frame);
         // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
         // touches, and what crosses cores is atomic (see the module's note).
-        let cs = unsafe { core::ptr::read_volatile((frame + 16 * 8) as *const u64) };
-        GAP_RIP[c].store((rip & 0x7FFF_FFFF_FFFF_FFFF) | if cs & 3 == 3 { 1 << 63 } else { 0 }, Ordering::Relaxed);
+        let cs = crate::arch::switch::ctx_mode(frame);
+        GAP_RIP[c].store((rip & 0x7FFF_FFFF_FFFF_FFFF) | if crate::arch::switch::mode_is_user(cs) { 1 << 63 } else { 0 }, Ordering::Relaxed);
     }
     GAP_SYS[c].store(crate::syscall::LAST_SYS[t].load(Ordering::Relaxed), Ordering::Relaxed);
     GAP_ARG0[c].store(crate::syscall::LAST_ARG0[t].load(Ordering::Relaxed), Ordering::Relaxed);
@@ -1839,18 +1829,15 @@ unsafe fn enter_ctx(sp: u64) -> ! {
 /// `rflags`/`gp`/`fpu` must be that task's user state at the entry, and `cpu` an online
 /// core allowed by the task's mask. It does not return: the task continues on the target
 /// core.
-pub unsafe fn migrate_current_to(cpu: usize, rip: u64, ursp: u64, rflags: u64, gp: [u64; 15], fpu: u64) -> ! {
+pub unsafe fn migrate_current_to(cpu: usize, rip: u64, ursp: u64, rflags: u64, gp: crate::arch::switch::Gp, fpu: u64) -> ! {
     let t = current_id();
     let from = crate::percpu::cpu_id();
     let kpages = 4u64;
     let kstack = crate::mem::alloc_contig(kpages).expect("migrate kstack") + kpages * 4096;
-    let mut sp = kstack & !0xF;
-    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(*sp as *mut u64, v); };
-    push(&mut sp, 0x23); push(&mut sp, ursp); push(&mut sp, rflags | 0x202); push(&mut sp, 0x2B); push(&mut sp, rip);
-    for k in 0..15 { push(&mut sp, gp[k]); } // gp[0]=rax is pushed first (popped last)
+    let sp = crate::arch::switch::build_user_ctx(kstack, rip, ursp, rflags | crate::arch::switch::USER_FLAGS_IRQ_ON, &gp);
     let old_kstack = KSTACK[t]; let old_pages = KSZ[t];
     RSP[t] = sp; KSTACK[t] = kstack; KSZ[t] = kpages; ctx_saved(t);
-    FSBASE[t] = rdmsr(IA32_FS_BASE);
+    FSBASE[t] = tls_base();
     set_fpu(t, fpu);
     if old_kstack != 0 && old_pages != 0 { queue_dead_kstack(t, old_kstack - old_pages * 4096, old_pages); }
     AP_TAKEN[t].store(false, Ordering::SeqCst); // nobody executes the task any more
@@ -2024,16 +2011,13 @@ pub fn alloc_kstack() -> Option<u64> {
 /// `clone`'s path: the frame is the parent's, with the child's rsp and rax=0).
 /// `kstack_top` must be the top of a kernel stack allocated for this slot, and `rip`/`rsp`
 /// must be user addresses mapped in the target address space.
-pub unsafe fn spawn_user_ctx(rip: u64, rsp: u64, rflags: u64, fsbase: u64, kstack_top: u64, gp: [u64; 15]) -> usize {
+pub unsafe fn spawn_user_ctx(rip: u64, rsp: u64, rflags: u64, fsbase: u64, kstack_top: u64, gp: crate::arch::switch::Gp) -> usize {
     let i = match reuse_slot() { Some(i) => i, None => {
         if NREADY.load(Ordering::SeqCst) >= NTASKS { return usize::MAX; } // the task limit -> an EAGAIN at the caller
         let i = NREADY.load(Ordering::SeqCst);
         PENDING[i].store(true, Ordering::SeqCst); // BEFORE NREADY grows: otherwise the slot is visible with an empty RSP
         NREADY.fetch_add(1, Ordering::SeqCst); i } };
-    let mut sp = kstack_top & !0xF;
-    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(*sp as *mut u64, v); };
-    push(&mut sp, 0x23); push(&mut sp, rsp); push(&mut sp, rflags); push(&mut sp, 0x2B); push(&mut sp, rip);
-    for k in 0..15 { push(&mut sp, gp[k]); }
+    let sp = crate::arch::switch::build_user_ctx(kstack_top, rip, rsp, crate::arch::switch::user_flags(rflags), &gp);
     RSP[i] = sp; KSTACK[i] = kstack_top; FSBASE[i] = fsbase; DEAD[i] = false; GONE[i] = false; EXITREG_OK[i] = false; ctx_saved(i);
     PROC[i] = PROC[current_id()]; // a thread: the same process
     i
@@ -2061,14 +2045,14 @@ pub fn task_count() -> usize { NREADY.load(Ordering::Relaxed) }
 /// The task's saved rsp (0 — it was not saved) and the rip it will continue from:
 /// in the switch frame there are first 15 GP registers, then the hardware iret frame.
 /// Only for the diagnostics: for an EXECUTING task the value is stale.
-pub fn saved_rip(i: usize) -> u64 { saved_slot(i, 15) }
+pub fn saved_rip(i: usize) -> u64 { let sp = saved_sp(i); if sp == 0 { 0 } else { crate::arch::switch::ctx_pc(sp) } }
 /// The stack pointer and the frame pointer of a STOPPED thread — from the same
 /// saved frame. They are needed by a core dump: the threads that did not crash have no other
 /// registers, while these three are enough for gdb to show WHERE the thread stood.
 /// The offsets are `timer_stub_sched`'s layout (see its prologue): 8=rbp, 15=rip,
 /// 18=rsp.
-pub fn saved_user_rsp(i: usize) -> u64 { saved_slot(i, 18) }
-pub fn saved_user_rbp(i: usize) -> u64 { saved_slot(i, 8) }
+pub fn saved_user_rsp(i: usize) -> u64 { let sp = saved_sp(i); if sp == 0 { 0 } else { crate::arch::switch::ctx_sp(sp) } }
+pub fn saved_user_rbp(i: usize) -> u64 { let sp = saved_sp(i); if sp == 0 { 0 } else { crate::arch::switch::ctx_fp(sp) } }
 /// A thread's FS_BASE (TLS): without it gdb will not find the `__thread` variables.
 pub fn saved_fsbase(i: usize) -> u64 {
     if i >= NTASKS { return 0; }
@@ -2079,7 +2063,7 @@ pub fn saved_fsbase(i: usize) -> u64 {
 /// The task's saved context in its entirety (15 GP in the order r15..rax, rip, cs,
 /// rflags, rsp, ss) — for the debugger. None — there is no task or it has never been
 /// taken off a core (the context is not on its kernel stack).
-pub fn saved_ctx(i: usize) -> Option<[u64; 20]> {
+pub fn saved_ctx(i: usize) -> Option<[u64; crate::arch::switch::CTX_WORDS]> {
     if i >= NTASKS || !task_alive(i) { return None; }
     // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
     // touches, and what crosses cores is atomic (see the module's note).
@@ -2087,21 +2071,16 @@ pub fn saved_ctx(i: usize) -> Option<[u64; 20]> {
         let sp = core::ptr::read_volatile(core::ptr::addr_of!(RSP[i]));
         let top = core::ptr::read_volatile(core::ptr::addr_of!(KSTACK[i]));
         let pages = { let k = core::ptr::read_volatile(core::ptr::addr_of!(KSZ[i])); if k != 0 { k } else { KSTACK_PAGES } };
-        if sp == 0 || top == 0 || sp < top - pages * 4096 || sp + 20 * 8 > top { return None; }
-        let mut c = [0u64; 20];
-        for k in 0..20 { c[k] = core::ptr::read_volatile((sp + k as u64 * 8) as *const u64); }
-        Some(c)
+        if sp == 0 || top == 0 || sp < top - pages * 4096 || sp + crate::arch::switch::CTX_WORDS as u64 * 8 > top { return None; }
+        Some(crate::arch::switch::ctx_words(sp))
     }
 }
-fn saved_slot(i: usize, k: u64) -> u64 {
+/// The task's saved stack pointer (0 — none): the frame the `ctx_*` accessors read.
+fn saved_sp(i: usize) -> u64 {
     if i >= NTASKS { return 0; }
     // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
     // touches, and what crosses cores is atomic (see the module's note).
-    let sp = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(RSP[i])) };
-    if sp == 0 { return 0; }
-    // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
-    // touches, and what crosses cores is atomic (see the module's note).
-    unsafe { core::ptr::read_volatile((sp + k * 8) as *const u64) }
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(RSP[i])) }
 }
 /// The task already occupies a slot but is still being assembled (see PENDING). It must not be touched.
 pub fn task_pending(i: usize) -> bool { i < NTASKS && PENDING[i].load(Ordering::SeqCst) }
@@ -2523,24 +2502,12 @@ pub static BSP_IDLE: AtomicBool = AtomicBool::new(false);
 /// `stack_top` must be the top of a stack nobody else uses.
 pub unsafe fn spawn(entry: extern "C" fn() -> !, stack_top: u64) {
     let i = NREADY.fetch_add(1, Ordering::SeqCst);
-    let mut sp = stack_top & !0xF;
-    // the iret frame: ss, rsp, rflags, cs, rip
-    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(*sp as *mut u64, v); };
-    push(&mut sp, 0x10);            // SS (kernel data)
-    // The task's RSP: the entry into entry is as after a call, rsp = 8 (mod 16). With rsp = 0
-    // (mod 16) the compiler puts the xmm spills at an address aligned "to 8",
-    // and the very first movaps gives a #GP (it was caught in ioyacct: obs::comm).
-    push(&mut sp, (stack_top & !0xF) - 8);
-    push(&mut sp, 0x202);           // RFLAGS (IF=1)
-    push(&mut sp, 0x08);            // CS (kernel code)
-    push(&mut sp, entry as usize as u64); // RIP
-    for _ in 0..15 { push(&mut sp, 0); } // r15..rax = 0
+    let sp = crate::arch::switch::build_kernel_ctx(stack_top, entry);
     RSP[i] = sp; KSTACK[i] = 0; FSBASE[i] = 0; PROC[i] = i as u8; PPID[i] = -1; ctx_saved(i);
     acct_born(i);
 }
 
-use crate::arch::cpu::{rdmsr, wrmsr};
-const IA32_FS_BASE: u32 = 0xC000_0100;
+use crate::arch::cpu::{set_tls_base, tls_base};
 
 /// Create a ring-3 thread: an initial iret frame in ring 3 (SS/RSP/RFLAGS IF=1/CS/RIP)
 /// on its kernel stack; rdi = arg. The scheduler gives it a time slice on a par with the kernel.
@@ -2549,14 +2516,7 @@ const IA32_FS_BASE: u32 = 0xC000_0100;
 /// mapped in the address space the task will run in.
 pub unsafe fn spawn_user(entry: u64, ustack_top: u64, kstack_top: u64, arg_rdi: u64, fs_base: u64) {
     let i = NREADY.fetch_add(1, Ordering::SeqCst);
-    let mut sp = kstack_top & !0xF;
-    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(*sp as *mut u64, v); };
-    push(&mut sp, 0x23);           // SS (user data DPL3)
-    push(&mut sp, ustack_top);     // the user's RSP
-    push(&mut sp, 0x202);          // RFLAGS (IF=1 — the timer preempts)
-    push(&mut sp, 0x2B);           // CS (user code64 DPL3)
-    push(&mut sp, entry);          // RIP
-    for k in 1..=15 { push(&mut sp, if k == 6 { arg_rdi } else { 0 }); } // rdi = push#6
+    let sp = crate::arch::switch::build_user_ctx(kstack_top, entry, ustack_top, crate::arch::switch::USER_FLAGS_IRQ_ON, &crate::arch::switch::gp_with_arg(arg_rdi));
     RSP[i] = sp; KSTACK[i] = kstack_top; FSBASE[i] = fs_base; PROC[i] = i as u8; PPID[i] = -1; ctx_saved(i);
     acct_born(i);
     crate::proc::init_proc(i);
@@ -2568,7 +2528,7 @@ pub unsafe fn spawn_user(entry: u64, ustack_top: u64, kstack_top: u64, arg_rdi: 
 /// C1 + C3, and `cr3` must be a COMPLETE page table of the new process (its kernel half
 /// copied): the task will be entered under it.
 pub unsafe fn spawn_process(entry: u64, ustack_top: u64, kstack_top: u64, cr3: u64) -> usize {
-    spawn_process_ctx(entry, ustack_top, 0x202, kstack_top, cr3, 0)
+    spawn_process_ctx(entry, ustack_top, crate::arch::switch::USER_FLAGS_IRQ_ON, kstack_top, cr3, 0)
 }
 
 /// fork: a process in its own AS with ALL the parent's registers (gp in the order
@@ -2576,7 +2536,7 @@ pub unsafe fn spawn_process(entry: u64, ustack_top: u64, kstack_top: u64, cr3: u
 /// # Safety
 /// C1 + C3, as `spawn_process`; the registers are the forking thread's frame, and the
 /// child's rax is set to 0 by the caller.
-pub unsafe fn spawn_process_regs(entry: u64, ustack_top: u64, rflags: u64, kstack_top: u64, cr3: u64, gp: [u64; 15]) -> usize {
+pub unsafe fn spawn_process_regs(entry: u64, ustack_top: u64, rflags: u64, kstack_top: u64, cr3: u64, gp: crate::arch::switch::Gp) -> usize {
     let i = match reuse_slot() { Some(i) => i, None => {
         // THE TASK CEILING IS A REFUSAL RATHER THAN A WRITE PAST THE BOUNDARY.
         //
@@ -2591,10 +2551,7 @@ pub unsafe fn spawn_process_regs(entry: u64, ustack_top: u64, rflags: u64, kstac
         let i = NREADY.load(Ordering::SeqCst);
         PENDING[i].store(true, Ordering::SeqCst); // BEFORE NREADY grows (see PENDING)
         NREADY.fetch_add(1, Ordering::SeqCst); i } };
-    let mut sp = kstack_top & !0xF;
-    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(*sp as *mut u64, v); };
-    push(&mut sp, 0x23); push(&mut sp, ustack_top); push(&mut sp, rflags | 0x2); push(&mut sp, 0x2B); push(&mut sp, entry);
-    for k in 0..15 { push(&mut sp, gp[k]); } // rax is pushed first (popped last)
+    let sp = crate::arch::switch::build_user_ctx(kstack_top, entry, ustack_top, crate::arch::switch::user_flags(rflags), &gp);
     RSP[i] = sp; KSTACK[i] = kstack_top; FSBASE[i] = 0; DEAD[i] = false; GONE[i] = false; EXITREG_OK[i] = false; CR3[i] = cr3; ctx_saved(i);
     PROC[i] = i as u8; PPID[i] = -1;
     i
@@ -2608,12 +2565,7 @@ pub unsafe fn spawn_process_ctx(entry: u64, ustack_top: u64, rflags: u64, kstack
     let i = match reuse_slot() { Some(i) => i, None => {
         if NREADY.load(Ordering::SeqCst) >= NTASKS { warn_no_tasks(); return usize::MAX; } // see spawn_process_regs
         NREADY.fetch_add(1, Ordering::SeqCst) } };
-    let mut sp = kstack_top & !0xF;
-    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(*sp as *mut u64, v); };
-    push(&mut sp, 0x23); push(&mut sp, ustack_top); push(&mut sp, rflags | 0x2); push(&mut sp, 0x2B); push(&mut sp, entry);
-    // 15 GP registers; the stub pops r15 first, rax last -> we push rax FIRST.
-    push(&mut sp, rax);                   // rax (popped last)
-    for _ in 0..14 { push(&mut sp, 0); }  // rbx..r15 = 0
+    let sp = crate::arch::switch::build_user_ctx(kstack_top, entry, ustack_top, crate::arch::switch::user_flags(rflags), &crate::arch::switch::gp_with_ret(rax));
     RSP[i] = sp; KSTACK[i] = kstack_top; FSBASE[i] = 0; DEAD[i] = false; GONE[i] = false; EXITREG_OK[i] = false; CR3[i] = cr3; ctx_saved(i);
     PROC[i] = i as u8; PPID[i] = -1; // a new process: the leader is itself; the parent is set by fork
     PENDING[i].store(false, Ordering::SeqCst); // here the task is assembled entirely
@@ -2741,10 +2693,10 @@ fn rust_schedule_inner(cur_rsp: u64) -> u64 {
         // SAFETY: C3 — the interrupt/syscall FRAME of the thread this core interrupted: it lies
         // on that thread's kernel stack, which is alive for as long as the thread is, and the
         // offsets are the ones the stub pushed.
-        let rip = unsafe { core::ptr::read_volatile((cur_rsp + 15 * 8) as *const u64) };
+        let rip = crate::arch::switch::ctx_pc(cur_rsp);
         // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
         // touches, and what crosses cores is atomic (see the module's note).
-        let cs = unsafe { core::ptr::read_volatile((cur_rsp + 16 * 8) as *const u64) };
+        let cs = crate::arch::switch::ctx_mode(cur_rsp);
         // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
         // touches, and what crosses cores is atomic (see the module's note).
         crate::println!("[sched] the tick {}: t{} rip={:#x} cs={:#x} live={}", tk + 1, cur0, rip, cs, { let mut c = 0;
@@ -2782,11 +2734,11 @@ fn rust_schedule_inner(cur_rsp: u64) -> u64 {
         // SAFETY: C3 — the interrupt/syscall FRAME of the thread this core interrupted: it lies
         // on that thread's kernel stack, which is alive for as long as the thread is, and the
         // offsets are the ones the stub pushed.
-        let rfl = unsafe { core::ptr::read_volatile((cur_rsp + 17 * 8) as *const u64) };
+        let rfl = crate::arch::switch::ctx_flags(cur_rsp);
         crate::println!("hb: the tick {} (of the timer {}), {} ms, tasks {} (live {}), the current one {}, IF={} IRR={}{}",
             tk, HW_TICKS.load(Ordering::Relaxed), crate::tsc::mono_ns() / 1_000_000,
             n, alive, CURRENT.load(Ordering::Relaxed),
-            (rfl >> 9) & 1, crate::smp::irr_pending(crate::idt::TIMER_VECTOR as u8),
+            crate::arch::switch::flags_irq_on(rfl) as u8, crate::smp::irr_pending(crate::idt::TIMER_VECTOR as u8),
             if crate::smp::isr_pending(crate::idt::TIMER_VECTOR as u8) {
                 " — THE TIMER'S ISR IS STUCK (the EOI was not sent: there will be no preemption any more)"
             } else { "" });
@@ -2847,7 +2799,7 @@ fn rust_schedule_inner(cur_rsp: u64) -> u64 {
         // that is also the window of a move with a rollback.
         if !idle && !limbo {
             RSP[cur] = cur_rsp; ctx_saved(cur);
-            FSBASE[cur] = rdmsr(IA32_FS_BASE); // save the current thread's TLS
+            FSBASE[cur] = tls_base(); // save the current thread's TLS
             park_dead_in_user(cur, cur_rsp);
         }
     }
@@ -2959,14 +2911,14 @@ fn rust_schedule_inner(cur_rsp: u64) -> u64 {
             SWITCH_TRACE.store(left - 1, Ordering::Relaxed);
             // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row
             // it touches, and what crosses cores is atomic (see the module's note).
-            let rfl = unsafe { core::ptr::read_volatile((RSP[next] + 17 * 8) as *const u64) };
+            let rfl = crate::arch::switch::ctx_flags(unsafe { RSP[next] });
             crate::println!("a12: the switch t{} -> t{} rsp={:#x} cr3={:#x} rip={:#x} rflags={:#x}",
                 // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose
                 // row it touches, and what crosses cores is atomic (see the module's note).
                 cur, next, unsafe { RSP[next] }, unsafe { CR3[next] },
                 // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose
                 // row it touches, and what crosses cores is atomic (see the module's note).
-                unsafe { core::ptr::read_volatile((RSP[next] + 15 * 8) as *const u64) }, rfl);
+                crate::arch::switch::ctx_pc(unsafe { RSP[next] }), rfl);
         }
     }
     crate::percpu::set_cur_task(next as u64);
@@ -2975,7 +2927,7 @@ fn rust_schedule_inner(cur_rsp: u64) -> u64 {
     // SAFETY: C4 — this core's machine state (the registers/MSRs the switch is made of).
     unsafe {
         if KSTACK[next] != 0 { crate::user::set_rsp0(KSTACK[next]); } // the thread's kernel stack
-        wrmsr(IA32_FS_BASE, FSBASE[next]);                            // restore the TLS
+        set_tls_base(FSBASE[next]);                            // restore the TLS
         // We do NOT switch CR3 here: rust_schedule may be executing on the user stack of
         // the interrupted task (e.g. the ring0 exit loop), which is not in the target AS.
         // We give CR3 to the stub — it will switch AFTER the transition to the target's kernel stack
@@ -3034,11 +2986,8 @@ pub fn tick_rip_note(cpu: usize, frame: u64) {
     if cpu >= MAXCPU || frame == 0 { return; }
     // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
     // touches, and what crosses cores is atomic (see the module's note).
-    let (rip, cs) = unsafe {
-        (core::ptr::read_volatile((frame + 15 * 8) as *const u64),
-         core::ptr::read_volatile((frame + 16 * 8) as *const u64))
-    };
-    TICK_RIP[cpu].store(if cs & 3 == 3 { 3 } else { rip }, Ordering::Relaxed);
+    let (rip, cs) = (crate::arch::switch::ctx_pc(frame), crate::arch::switch::ctx_mode(frame));
+    TICK_RIP[cpu].store(if crate::arch::switch::mode_is_user(cs) { 3 } else { rip }, Ordering::Relaxed);
 }
 pub const STRACE_N: usize = 128;
 pub static mut STRACE: [[SchedEv; STRACE_N]; MAXCPU] = [[SEV0; STRACE_N]; MAXCPU];
@@ -3377,7 +3326,7 @@ fn ap_schedule(cpu: usize, cur_rsp: u64) -> u64 {
     // SAFETY: C4 — this core's machine state (the registers/MSRs the switch is made of).
     unsafe {
         RSP[cur] = cur_rsp; ctx_saved(cur);
-        FSBASE[cur] = rdmsr(IA32_FS_BASE);
+        FSBASE[cur] = tls_base();
     }
     park_dead_in_user(cur, cur_rsp);
     // The waker's hint (a directed switch) applies only to ITS OWN core.
@@ -3457,7 +3406,7 @@ fn ap_schedule(cpu: usize, cur_rsp: u64) -> u64 {
     // SAFETY: C4 — this core's machine state (the registers/MSRs the switch is made of).
     unsafe {
         if KSTACK[next] != 0 { crate::user::set_rsp0(KSTACK[next]); }
-        wrmsr(IA32_FS_BASE, FSBASE[next]);
+        set_tls_base(FSBASE[next]);
         // see above: one address space — we do not touch CR3, we do not lose the TLB
         let cur_cr3 = crate::paging::current_cr3() & !0xFFF;
         let same = CR3[next] == cur_cr3 || CR3[next] == 0;
@@ -3518,6 +3467,12 @@ pub unsafe fn start_idle() -> ! {
 /// C2 + C3: the first entry into a task on this core — the scheduler's tables must be
 /// filled and the task claimed. It does not return: the boot stack is abandoned.
 pub unsafe fn start() -> ! {
+    // No tick between here and the entry: the caller may have interrupts on (the ipi self-test
+    // enables them to bring its cell up), and a tick that lands in the line below saves THE
+    // BOOT CONTEXT into RSP[0] and enters task 1 while the console lock is still the boot
+    // context's — on TCG arm64, where the line takes long enough, that was a stall of every
+    // task on the lock. The task's own flags come back from its frame at the entry.
+    crate::arch::cpu::irq_disable();
     if CR3[0] != 0 { crate::paging::switch(CR3[0]); } // the first process's address space
     // talaria.gdb=break: the breakpoints are set BEFORE the first instruction, already under the workload's AS
     // (the debugger reads its memory by its addresses).

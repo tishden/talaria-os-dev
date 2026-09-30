@@ -429,7 +429,7 @@ fn path_eq_prefix(ptr: u64, pat: &[u8]) -> bool {
 const HEAP_FRAMES: u64 = 32768; // a 128 MB heap for brk (for large C++ software)
 
 
-use crate::arch::cpu::{rdmsr, wrmsr};
+use crate::arch::cpu::{set_tls_base, tls_base};
 
 /// The frame of a syscall's arguments: what the entry stub saved, in the stub's push order.
 /// The struct is the architecture's (`arch::syscall_entry::Frame`); the shared code here reads
@@ -1054,7 +1054,7 @@ fn stop_if_dead(fr: &Frame) {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn rust_syscall(f: *mut Frame) -> u64 {
+pub extern "C" fn rust_syscall(f: *mut Frame) -> u64 {
     // SAFETY: S1 — the caller hands in an address of the process's memory that `uaccess::gate` has
     // already validated.
     let fr = unsafe { &mut *f };
@@ -1144,7 +1144,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         if left > 0 {
             IRR_TRACE.store(left - 1, Ordering::Relaxed);
             crate::println!("a12: the syscall {} rflags={:#x} (IF={}) IRR={} ISR={} the timer's ticks={}",
-                f.nr, f.flags, (f.flags >> 9) & 1,
+                f.nr, f.flags, crate::arch::switch::flags_irq_on(f.flags) as u8,
                 crate::smp::irr_pending(crate::idt::TIMER_VECTOR as u8),
                 crate::smp::isr_pending(crate::idt::TIMER_VECTOR as u8),
                 crate::sched::HW_TICKS.load(Ordering::Relaxed));
@@ -1988,12 +1988,12 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             if f.a1 == 0x1002 { // ARCH_SET_FS -> IA32_FS_BASE (TLS)
                 // SAFETY: S4 — `ARCH_SET_FS` writes the FS base of THIS core, which is the
                 // current task's TLS pointer; the scheduler saves and restores it per task.
-                unsafe { wrmsr(0xC000_0100, f.a2); }
+                unsafe { set_tls_base(f.a2); }
                 return 0;
             }
             // SAFETY: S1 + S4 — the FS base of this core is read and stored into the argument's
             // 8 bytes, which `uaccess::gate` validated for `arch_prctl`.
-            if f.a1 == 0x1003 { if f.a2 != 0 { unsafe { core::ptr::write_unaligned(f.a2 as *mut u64, rdmsr(0xC000_0100)); } } return 0; } // ARCH_GET_FS
+            if f.a1 == 0x1003 { if f.a2 != 0 { unsafe { core::ptr::write_unaligned(f.a2 as *mut u64, tls_base()); } } return 0; } // ARCH_GET_FS
             if f.a1 == 0x1001 { return (-22i64) as u64; } // ARCH_SET_GS: the kernel's per-CPU GS (percpu.rs) — it is forbidden to user code
             if f.a1 >= 0x3001 { return (-22i64) as u64; } // ARCH_CET_* (glibc 2.35's ld.so): there is no CET -> EINVAL
             0
@@ -2244,7 +2244,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             crate::proc::fork_into(crate::sched::proc_of(p), idx); crate::sched::set_ppid(idx, crate::sched::proc_of(p) as i32);
             // SAFETY: S4 — the FS base of this core IS the forking thread's TLS pointer; the
             // child inherits it.
-            crate::sched::set_fsbase(idx, unsafe { rdmsr(0xC000_0100) }); // the parent's TLS
+            crate::sched::set_fsbase(idx, unsafe { tls_base() }); // the parent's TLS
             crate::sched::set_fpu(idx, fpu_area(raw)); // the parent's FPU/SSE state
             crate::fr::record(crate::fr::USER, f.pc); // the child starts with rax=0 at the return point
             crate::sched::publish(idx); // the task is assembled entirely — now it may be scheduled
@@ -2273,7 +2273,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 }
                 crate::proc::fork_into(crate::sched::proc_of(p), idx); crate::sched::set_ppid(idx, crate::sched::proc_of(p) as i32);
                 // SAFETY: S4 — as above: the forking thread's TLS pointer is this core's FS base.
-                crate::sched::set_fsbase(idx, unsafe { rdmsr(0xC000_0100) }); // the parent's TLS
+                crate::sched::set_fsbase(idx, unsafe { tls_base() }); // the parent's TLS
                 crate::sched::set_fpu(idx, fpu_area(raw));
                 let tid = (idx + 1) as i32;
                 // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
@@ -2289,8 +2289,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             let kstack = match crate::sched::alloc_kstack() { Some(k) => k, None => return (-11i64) as u64 };
             // SAFETY: S4 — `clone` without CLONE_SETTLS gives the child the parent's TLS, which
             // is this core's FS base right now.
-            let fsbase = if flags & 0x0008_0000 != 0 { tls } else { unsafe { rdmsr(0xC000_0100) } };
-            let mut gp = [0u64; 15]; gp[8] = func; // rax=0 (the return in the child), r9=func
+            let fsbase = if flags & 0x0008_0000 != 0 { tls } else { unsafe { tls_base() } };
+            let gp = crate::arch::signal::clone_regs(f, func); // the child's file: the return value 0, the function where its libc looks
             // SAFETY: S3 — `sched::spawn_user_ctx`'s own contract; here it holds: the current task,
             // on its kernel stack, with its CR3 active.
             let idx = unsafe { crate::sched::spawn_user_ctx(f.pc, cstack, f.flags, fsbase, kstack, gp) };
@@ -2424,7 +2424,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
 // ── the signals: the delivery at the exit from a syscall and rt_sigreturn ─────────
 // The LAYOUT of the frame (siginfo, ucontext, gregs, the FPU area) and the register names are
 // the architecture's, in `arch::signal`; here is the policy — the same on x86-64 and arm64.
-use crate::arch::signal::{fork_regs, fpu_area, SIGFRAME, SIGFRAME_ALIGN, SIGINFO_SIZE, UC_SIGMASK, UC_STACK};
+use crate::arch::signal::{fork_regs, fpu_area, RET_SLOT, SIGFRAME, SIGFRAME_ALIGN, SIGINFO_SIZE, UC_SIGMASK, UC_STACK};
 /// The signals whose default action is "terminate AND WRITE A DUMP"
 /// (Linux: SIGQUIT/ILL/ABRT/FPE/SEGV/BUS/SYS/TRAP/XCPU/XFSZ). For the rest
 /// (for example SIGTERM, SIGKILL, SIGINT) no dump is written — the process was killed from the outside,
@@ -2478,8 +2478,8 @@ fn deliver_signals(f: &mut Frame, ret: u64) -> u64 {
         let cur = crate::sched::current_id();
         let usp = if flags & 0x0800_0000 != 0 && altstack_top(cur) != 0 { altstack_top(cur) } else { f.usp };
         let base = (usp - 128 - SIGFRAME) & !(SIGFRAME_ALIGN - 1);
-        let sp = base - 8;
-        if !crate::paging::user_writable(sp, SIGFRAME + 8) {
+        let sp = base - RET_SLOT;
+        if !crate::paging::user_writable(sp, SIGFRAME + RET_SLOT) {
             crate::println!("[signal] there is no room for the frame of the signal {} at t{} (rsp={:#x}) — it is skipped", sig, cur, usp);
             continue;
         }
@@ -2488,7 +2488,6 @@ fn deliver_signals(f: &mut Frame, ret: u64) -> u64 {
         // has already validated.
         unsafe {
             core::ptr::write_bytes(base as *mut u8, 0, SIGFRAME as usize);
-            core::ptr::write_unaligned(sp as *mut u64, restorer);
             core::ptr::write_unaligned(si as *mut i32, sig as i32);            // si_signo
             core::ptr::write_unaligned((si + 8) as *mut i32, 0);               // si_code SI_USER
             let t = crate::sched::current_id();
@@ -2503,7 +2502,8 @@ fn deliver_signals(f: &mut Frame, ret: u64) -> u64 {
             // The FPU/SSE/AVX state of the interrupted code -> into the frame (uc_mcontext.fpregs)
             crate::arch::signal::write_fpu(base, uc, fpu_area(f));
         }
-        crate::arch::signal::enter_handler_syscall(f, sig, si, uc, h, sp);
+        // SAFETY: S1 — `sp` lies in the frame `user_writable` admitted above.
+        unsafe { crate::arch::signal::enter_handler_syscall(f, sig, si, uc, h, sp, restorer); }
         return ret;
     }
 }
@@ -2634,9 +2634,9 @@ pub fn deliver_exception_signal(f: &mut crate::idt::ExcFrame, sig: u64, cr2: u64
     // a stack overflow: below rsp the guard page begins), we try
     // the alternative stack even if the handler did not ask for SA_ONSTACK: there is nowhere
     // to deliver the signal — the process will die anyway, but the kernel must not fall.
-    if !crate::paging::user_writable(base - 8, SIGFRAME + 8) {
+    if !crate::paging::user_writable(base - RET_SLOT, SIGFRAME + RET_SLOT) {
         let alt = altstack_top(t);
-        if alt == 0 || !crate::paging::user_writable((alt - 128 - SIGFRAME) & !0xF, SIGFRAME + 8) {
+        if alt == 0 || !crate::paging::user_writable((alt - 128 - SIGFRAME) & !0xF, SIGFRAME + RET_SLOT) {
             // What exactly is under the stack pointer: the workload's own guard page (which means
             // the thread ran into its own limit) or the end of the mapping — those are different illnesses.
             let nm = crate::sched::comm(t); let nl = crate::sched::comm_len(t);
@@ -2650,13 +2650,12 @@ pub fn deliver_exception_signal(f: &mut crate::idt::ExcFrame, sig: u64, cr2: u64
         usp = alt;
         base = (usp - 128 - SIGFRAME) & !(SIGFRAME_ALIGN - 1);
     }
-    let sp = base - 8;
+    let sp = base - RET_SLOT;
     let si = base; let uc = base + SIGINFO_SIZE;
     // SAFETY: S1 — the caller hands in an address of the process's memory that `uaccess::gate` has
     // already validated.
     unsafe {
         core::ptr::write_bytes(base as *mut u8, 0, SIGFRAME as usize);
-        core::ptr::write_unaligned(sp as *mut u64, restorer);
         core::ptr::write_unaligned(si as *mut i32, sig as i32);              // si_signo
         // si_code: for a #PF it is SEGV_MAPERR (there is no page) / SEGV_ACCERR (there are no rights)
         let (si_code, addr) = crate::arch::signal::exception_siginfo(f, sig, cr2);
@@ -2676,16 +2675,18 @@ pub fn deliver_exception_signal(f: &mut crate::idt::ExcFrame, sig: u64, cr2: u64
         crate::arch::signal::write_fpu(base, uc, fpu);
         if on_alt { ALT_ON[t] = true; }
     }
-    crate::arch::signal::enter_handler_exception(f, sig, si, uc, h, sp);
+    // SAFETY: S1 — `sp` lies in the frame `user_writable` admitted above.
+    unsafe { crate::arch::signal::enter_handler_exception(f, sig, si, uc, h, sp, restorer); }
     true
 }
 
-/// rt_sigreturn: the restorer calls syscall(15), rsp = the frame's base (after the ret).
-/// The mask and the alternate-stack flag are ours; the registers and the FPU state go back
-/// through `arch::signal::sigreturn`, which on x86-64 returns THROUGH AN IRETQ rather than a
-/// sysret (the reasons — rcx/r11 and the JVM's JIT — are told there).
+/// rt_sigreturn: the restorer calls syscall(15) with the user sp at the frame's base (x86:
+/// after its `ret` popped the return slot; arm64: unchanged). The mask and the
+/// alternate-stack flag are ours; the registers and the FPU state go back through
+/// `arch::signal::sigreturn` — on x86-64 THROUGH AN IRETQ rather than a sysret (the reasons —
+/// rcx/r11 and the JVM's JIT — are told there), on arm64 by rewriting this very frame.
 fn sigreturn(f: &mut Frame) -> u64 {
-    let base = f.usp; // the rsp after the restorer's ret = the frame's base
+    let base = f.usp;
     let uc = base + SIGINFO_SIZE;
     let t = crate::sched::current_id();
     // SAFETY: S2 — the alternate signal stack (`ALT_*`): indexed by the task, written only by that
@@ -2695,7 +2696,7 @@ fn sigreturn(f: &mut Frame) -> u64 {
     // already validated.
     unsafe {
         crate::proc::set_sigmask(t, core::ptr::read_unaligned((uc + UC_SIGMASK) as *const u64));
-        crate::arch::signal::sigreturn(uc, crate::sched::kstack_top(t))
+        crate::arch::signal::sigreturn(f, uc, crate::sched::kstack_top(t))
     }
 }
 /// A poll with the translation of the fds user->handle in place (and back).

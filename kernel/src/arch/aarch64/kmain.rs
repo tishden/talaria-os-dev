@@ -146,11 +146,10 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     // The tables just built are what the core runs on now: prove it with a page whose rights
     // change under us. A fresh frame is identity-mapped RW for the kernel; `protect_none`
     // must make it absent, `protect` present again — through `enc` on every write.
-    crate::vdso::init();
-    crate::vdso::map_into(crate::paging::kernel_cr3());
     unsafe { cpu::enable_el0_counter(); }
     dirty_probe();
     if let Some(f) = crate::mem::alloc_frame() {
+        crate::paging::split_to_4k(f);                      // a 4K page of the kernel's 2M GB1 (as the dirty probe)
         unsafe { core::ptr::write_volatile(f as *mut u64, 0x5EED_0000_0000_0001); }
         let (p0, w0, _, _) = crate::paging::query(f);
         crate::paging::protect_none(f, 4096);
@@ -178,6 +177,30 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     if s.timer_ppi[2] != 0 { trap::TIMER_PPI.store(s.timer_ppi[2], Ordering::Relaxed); }
     let ppi = trap::TIMER_PPI.load(Ordering::Relaxed);
     let me = cpu::cpu_index();
+    // Every core the tree named, by index: `smp::topology_init` reads this map, and
+    // `smp::start_cpu` brings a core up from it under the scheduler (`talaria.smp=`).
+    for (i, &mpidr) in s.cpus[..s.ncpu].iter().enumerate() {
+        if i < MAX_AP { probes::CPU_MPIDR[i].store(mpidr, Ordering::Relaxed); }
+    }
+    // The virtio-mmio windows, for the drivers' scan (`arch::virtio_mmio_slot`).
+    for (i, &(base, _intid)) in s.virtio[..s.nvirtio].iter().enumerate() { VIRTIO_WINDOWS[i].store(base, Ordering::Relaxed); }
+    // THE FORK IN THE ROAD. The bring-up's own sequence (the tick counted, the secondaries
+    // through PSCI, an SGI to each, EL0 and the vDSO probes) and the four probes TCG cannot
+    // judge run under `talaria.test=bringup|ring|icache|bbm|svccost`. Anything else is the
+    // kernel proper: the same `boot_shared` x86 enters after its early part, which ends in
+    // the self-check or the production mode the command line names (docs/ARM64-PLAN.md §10.1).
+    if !probes::is_arch_test(cmdline) {
+        percpu::init(me);
+        unsafe { gic::enable_local(ppi); for sgi in 0..16u32 { gic::enable_local(sgi); } }
+        crate::boot_shared(si, cmdline, cpu::counter_hz(), None);
+    }
+    // The bring-up's EL0 probes call the vDSO through the KERNEL's tables, so the image is
+    // mapped there — here, and only here. Mapping it before the fork put a PDPT into the
+    // kernel PML4's slot 0xFF, which `copy_kernel_pml4` then SHARED with every process: the
+    // processes' stacks (0x7fff_e...) live in that slot, and two processes from disk ended up
+    // on ONE stack (the first arm64 `procdisk` died on returns into 0 and into string bytes).
+    crate::vdso::init();
+    crate::vdso::map_into(crate::paging::kernel_cr3());
     unsafe { gic::enable_local(ppi); gic::enable_local(1); }
     let period = trap::TICK_NS.load(Ordering::Relaxed);
     timer::arm(period);
@@ -192,7 +215,6 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     for (i, &mpidr) in s.cpus[..s.ncpu].iter().enumerate() {
         if mpidr == cpu::mpidr() { continue; }
         if i >= MAX_AP { crate::println!("talaria: cpu{} (mpidr {:#x}): no stack slot — MAX_AP is {}", i, mpidr, MAX_AP); continue; }
-        probes::CPU_MPIDR[i].store(mpidr, Ordering::Relaxed);
         let rc = start_secondary(i, mpidr);
         if rc != psci::SUCCESS { crate::println!("talaria: cpu{} (mpidr {:#x}): PSCI CPU_ON refused: {}", i, mpidr, rc); continue; }
         let t0 = cpu::counter();
@@ -216,6 +238,9 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     percpu::init_tpidr(cpu::cpu_index());
     probes::run(cmdline)
 }
+
+/// The `virtio,mmio` windows of the tree, by index (0 = none): `arch::virtio_mmio_slot`.
+pub static VIRTIO_WINDOWS: [core::sync::atomic::AtomicU64; dtb::MAX_VIRTIO] = [const { core::sync::atomic::AtomicU64::new(0) }; dtb::MAX_VIRTIO];
 
 /// PSCI `CPU_ON` for the core with `mpidr`, with the stack of slot `i`; the PSCI result.
 pub fn start_secondary(i: usize, mpidr: u64) -> i64 {
@@ -242,22 +267,37 @@ extern "C" fn rust_ap_main(ctx: u64) -> ! {
     crate::println!("talaria: cpu{} up (mpidr {:#x}, stack top {:#x}, redistributor {})", me, cpu::mpidr(), ctx, if ok { "found" } else { "NOT FOUND" });
     let slot = me.min(MAX_AP - 1);
     AP_UP[slot].store(1, Ordering::Release);
-    percpu::init(me);
-    unsafe { cpu::irq_enable(); }
-    if super::smp::AP_MODE.load(Ordering::SeqCst) == 3 {
-        let h = super::smp::AP_HOOK.load(Ordering::SeqCst);
-        if h != 0 {
-            let f: fn(usize) -> ! = unsafe { core::mem::transmute::<usize, fn(usize) -> !>(h as usize) };
-            f(me);
+    // The role, as x86's `ap_entry` reads it: 1 = the sync self-test, 2 = a core of the
+    // scheduler's pool (the pickup loop), 3 = the function in AP_HOOK, else the bring-up's
+    // job loop (no scheduler: one job at a time from `probes::run_on`).
+    match super::smp::AP_MODE.load(Ordering::SeqCst) {
+        1 => {
+            percpu::init(me);
+            unsafe { for sgi in 0..16u32 { gic::enable_local(sgi); } cpu::irq_enable(); }
+            crate::sync::ap_selftest_loop()
+        }
+        2 => {
+            percpu::init(me);
+            unsafe { for sgi in 0..16u32 { gic::enable_local(sgi); } }
+            crate::syscall::init();
+            crate::sched::ap_loop(me)
+        }
+        3 => {
+            percpu::init(me);
+            unsafe { cpu::irq_enable(); }
+            let h = super::smp::AP_HOOK.load(Ordering::SeqCst);
+            if h != 0 {
+                let f: fn(usize) -> ! = unsafe { core::mem::transmute::<usize, fn(usize) -> !>(h as usize) };
+                f(me);
+            }
+            probes::ap_idle_loop(me)
+        }
+        _ => {
+            percpu::init(me);
+            unsafe { cpu::irq_enable(); }
+            probes::ap_idle_loop(me)
         }
     }
-    probes::ap_idle_loop(me)
-}
-
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    crate::println!("PANIC: {}", info);
-    cpu::halt_irq_off_forever()
 }
 
 /// The dirty bit on a 4K page: hardware DBM where the core has it (`TCR.HD`), else the
@@ -265,7 +305,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// ask `take_dirty` twice.
 fn dirty_probe() {
     let Some(f) = crate::mem::alloc_frame() else { return; };
-    crate::paging::protect(f, 4096, true, false);           // the 2M leaf -> a 4K page of its own
+    crate::paging::split_to_4k(f);                          // the kernel's GB1 is 2M leaves — split this one to a 4K page
+    crate::paging::protect(f, 4096, true, false);           // RW+DBM, armed
     let armed = !crate::paging::take_dirty(f) || !crate::paging::take_dirty(f); // drain whatever the split inherited
     unsafe { core::ptr::write_volatile(f as *mut u64, 1); }
     let d1 = crate::paging::take_dirty(f);

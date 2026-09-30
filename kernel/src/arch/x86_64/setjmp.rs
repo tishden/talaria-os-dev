@@ -4,6 +4,9 @@
 //! (`sched.rs`) land here; the declarations that Rust calls through are in
 //! `supervise.rs`.
 
+/// The words a jump buffer holds on this machine (rbx, rbp, r12..r15, rsp, rip).
+pub const JMPBUF_WORDS: usize = 8;
+
 core::arch::global_asm!(r#"
 .section .text
 .global tal_setjmp

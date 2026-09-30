@@ -146,3 +146,86 @@ timer_stub_sched:
     pop %rax
     iretq
 "#, options(att_syntax));
+
+// ── The saved context as `sched.rs` builds and reads it ──────────────────────────
+// A task off a core is a frame on its kernel stack: the fifteen general-purpose registers
+// `timer_stub_sched` pushed (r15 at the lowest address, rax at +14*8) and the hardware
+// iretq frame above them (rip, cs, rflags, rsp, ss). The scheduler never spells the
+// layout: it asks this API, and the arm64 twin answers the same questions about the
+// trap frame (docs/ARM64-PLAN.md §10.1, stage 3.2).
+
+/// The words a saved context occupies.
+pub const CTX_WORDS: usize = 20;
+/// The general-purpose registers a context is built from, in the `fork_regs` order:
+/// rax, rbx, rcx, rdx, rsi, rdi, rbp, r8..r15.
+pub type Gp = [u64; 15];
+pub const GP_ZERO: Gp = [0; 15];
+/// A register file with the first argument set (rdi): a fresh ring-3 thread's `arg`.
+pub fn gp_with_arg(arg: u64) -> Gp { let mut g = GP_ZERO; g[5] = arg; g }
+/// A register file with the syscall's return value set (rax): a fork child's 0.
+pub fn gp_with_ret(v: u64) -> Gp { let mut g = GP_ZERO; g[0] = v; g }
+/// The flags a fresh ring-3 context starts with: interrupts on (the tick preempts) / off.
+pub const USER_FLAGS_IRQ_ON: u64 = 0x202;
+pub const USER_FLAGS_IRQ_OFF: u64 = 0x2;
+/// The flags word of an interrupted user context, made fit for a new context of it.
+pub fn user_flags(f: u64) -> u64 { f | 0x2 }
+/// Does the flags word have interrupts enabled (IF)?
+pub fn flags_irq_on(f: u64) -> bool { f & 0x200 != 0 }
+
+/// Build a ring-3 context at the top of `kstack_top`; the sp to enter it with.
+/// # Safety
+/// C3: `kstack_top` is the top of a kernel stack nobody runs on.
+pub unsafe fn build_user_ctx(kstack_top: u64, pc: u64, usp: u64, flags: u64, gp: &Gp) -> u64 {
+    let mut sp = kstack_top & !0xF;
+    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(*sp as *mut u64, v); };
+    push(&mut sp, 0x23); push(&mut sp, usp); push(&mut sp, flags); push(&mut sp, 0x2B); push(&mut sp, pc);
+    for k in 0..15 { push(&mut sp, gp[k]); } // rax is pushed first (popped last)
+    sp
+}
+/// Build a ring-0 context: `entry` on `stack_top`, as after a call (rsp = 8 mod 16, or the
+/// compiler's aligned SSE spills fault), interrupts on.
+/// # Safety
+/// As `build_user_ctx`.
+pub unsafe fn build_kernel_ctx(stack_top: u64, entry: extern "C" fn() -> !) -> u64 {
+    let mut sp = stack_top & !0xF;
+    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(*sp as *mut u64, v); };
+    push(&mut sp, 0x10); push(&mut sp, (stack_top & !0xF) - 8); push(&mut sp, 0x202); push(&mut sp, 0x08);
+    push(&mut sp, entry as usize as u64);
+    for _ in 0..15 { push(&mut sp, 0); }
+    sp
+}
+#[inline(always)]
+fn slot(sp: u64, k: u64) -> u64 { unsafe { core::ptr::read_volatile((sp + k * 8) as *const u64) } }
+/// The program counter, the user stack pointer, the frame pointer and the flags of a context.
+pub fn ctx_pc(sp: u64) -> u64 { slot(sp, 15) }
+pub fn ctx_sp(sp: u64) -> u64 { slot(sp, 18) }
+pub fn ctx_fp(sp: u64) -> u64 { slot(sp, 8) }
+pub fn ctx_flags(sp: u64) -> u64 { slot(sp, 17) }
+/// The mode word (cs here, spsr on arm64) — for the log lines; `mode_is_user` decodes it.
+pub fn ctx_mode(sp: u64) -> u64 { slot(sp, 16) }
+pub fn mode_is_user(mode: u64) -> bool { mode & 3 == 3 }
+pub fn ctx_is_user(sp: u64) -> bool { mode_is_user(ctx_mode(sp)) }
+/// Does what lies at `sp` look like a frame at all (the sanity check `ctx_enter` makes)?
+pub fn ctx_plausible(sp: u64) -> bool {
+    let (cs, rfl) = (ctx_mode(sp), ctx_flags(sp));
+    (cs == 0x8 || cs == 0x2B) && rfl & 2 != 0 && rfl >> 22 == 0
+}
+/// The whole frame, word by word (the debugger's view).
+pub fn ctx_words(sp: u64) -> [u64; CTX_WORDS] {
+    let mut c = [0u64; CTX_WORDS];
+    for (k, w) in c.iter_mut().enumerate() { *w = slot(sp, k as u64); }
+    c
+}
+/// Where a thread stood in user space, from its frame — for a core dump
+/// (`sched::set_exit_uregs`: rip, rsp, rbp, rbx, r12..r15, rflags, no syscall number).
+pub fn ctx_exit_uregs(sp: u64) -> [u64; 10] {
+    [slot(sp, 15), slot(sp, 18), slot(sp, 8), slot(sp, 13), slot(sp, 3), slot(sp, 2), slot(sp, 1), slot(sp, 0), slot(sp, 17), u64::MAX]
+}
+/// Rewrite a user context so that its next entry lands in the kernel at `f` on the stack
+/// `ksp`, interrupts off (a dead thread parked out of its own code).
+/// # Safety
+/// C3: `sp` is a saved frame of a task this core owns.
+pub unsafe fn ctx_park(sp: u64, f: extern "C" fn() -> !, ksp: u64) {
+    let w = |k: u64, v: u64| core::ptr::write_volatile((sp + k * 8) as *mut u64, v);
+    w(15, f as usize as u64); w(16, 0x08); w(17, 0x2); w(18, ksp); w(19, 0x10);
+}

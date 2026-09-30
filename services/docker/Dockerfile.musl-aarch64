@@ -1,0 +1,17 @@
+# The talaria-musl-aarch64 toolchain: a `musl-gcc` that produces static AArch64 binaries for
+# the arm64 port's ring 3 (docs/ARM64-PLAN.md §10.1, stage 3.4). Fedora's musl packages are
+# x86-only, so musl 1.2.5 is cross-built here with Fedora's `gcc-aarch64-linux-gnu`; the
+# result is the same wrapper `kernel/user/Makefile` calls on x86, at the same name.
+#   docker build -t talaria-musl-aarch64 -f services/docker/Dockerfile.musl-aarch64 services/docker
+#   docker run --rm -v "$PWD:/w" -w /w talaria-musl-aarch64 musl-gcc -static -O2 -o hello hello.c
+FROM fedora:40
+RUN dnf install -y -q --setopt=retries=10 --setopt=timeout=60 gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu make curl tar patch && dnf clean all
+ARG MUSL=1.2.5
+RUN curl -sL --retry 5 --max-time 300 -o /tmp/musl.tgz https://musl.libc.org/releases/musl-$MUSL.tar.gz \
+ && tar xzf /tmp/musl.tgz -C /tmp \
+ && cd /tmp/musl-$MUSL \
+ && ./configure --target=aarch64-linux-musl --prefix=/opt/musl-aarch64 CC=aarch64-linux-gnu-gcc CROSS_COMPILE=aarch64-linux-gnu- >/dev/null \
+ && make -j"$(nproc)" >/dev/null 2>&1 && make install >/dev/null && rm -rf /tmp/musl*
+ENV PATH=/opt/musl-aarch64/bin:$PATH
+# An image without a working cross musl-gcc must not be reported as built.
+RUN printf 'int main(){return 0;}\n' > /tmp/t.c && musl-gcc -static -o /tmp/t /tmp/t.c && rm -f /tmp/t /tmp/t.c

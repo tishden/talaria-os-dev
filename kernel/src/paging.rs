@@ -503,6 +503,18 @@ pub fn user_range_ok(addr: u64, len: u64, write: bool) -> bool {
 /// it. That way we learn that the user wrote into a MAP_SHARED file mapping without
 /// intercepting every write with a fault. false — there is no page, the leaf is a large one or
 /// there was no write.
+/// Force the page of `vaddr` to a 4K leaf, splitting the 2M/1G leaf that covers it, and say
+/// whether it now has a 4K entry. `protect`/`protect_none` deliberately keep a huge leaf
+/// whole (a heap must not shatter), so a caller that needs a genuine per-page mapping in a
+/// region the kernel maps as 2M (its own GB1, `mmu::gb_kind`) asks for it here — the dirty
+/// probe of the bring-up, which otherwise reads the 2M leaf's crude "always dirty".
+#[cfg(target_arch = "aarch64")]
+pub fn split_to_4k(vaddr: u64) -> bool {
+    // SAFETY: P1 + P2 + P3 — `pte_ptr` walks the current root, splitting the large leaves it
+    // meets through the CAS; nothing else holds a pointer into those tables here.
+    unsafe { pte_ptr(vaddr).is_some() }
+}
+
 pub fn take_dirty(vaddr: u64) -> bool {
     // SAFETY: P1 + P2 — a walk of the current CR3 with a presence check at every level; the write
     // is the atomic clearing of the Dirty bit of a 4K leaf, which the hardware may set
@@ -540,26 +552,24 @@ pub fn leaf_entry(vaddr: u64) -> Option<u64> {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub use mmu::{pat_init, pat_read, PAT_VALUE};
-#[cfg(target_arch = "x86_64")]
-use mmu::PTE_PAT_4K;
+pub use mmu::pat_init;
+pub use mmu::{pat_read, PAT_VALUE};
 
-#[cfg(target_arch = "x86_64")]
 /// Switch the window [phys, phys+len) to write-combining (a 4K granularity, the leaf
 /// is split on the way). The window's neighbouring pages do NOT change their type — in the ENA's case, in the same
 /// gigabyte there lies BAR0 with the registers, for which WC is contraindicated.
-/// true — the whole range has been switched.
+/// true — the whole range has been switched. The descriptor bits are the MMU's
+/// (`arch::mmu::with_wc`: the PAT slot on x86, Normal non-cacheable on arm64).
 pub fn map_mmio_wc(phys: u64, len: u64) -> bool {
     if len == 0 || map_mmio_1g(phys) == 0 { return false; }
     let (first, last) = (phys & !0xFFF, (phys + len - 1) & !0xFFF);
     // SAFETY: P1 + P2 + P4 — the range belongs to a device (a BAR), not to the allocator; the
-    // entries are rewritten with the WC slot and the range is flushed.
+    // entries are rewritten with the WC attribute and the range is flushed.
     unsafe {
         let mut p = first;
         loop {
             let e = match pte_ptr(p) { Some(e) => e, None => return false };
-            let v = pte_r(e);
-            pte_w(e, (v & !((1 << 3) | (1 << 4))) | PTE_PAT_4K);
+            pte_w(e, mmu::with_wc(pte_r(e)));
             if p == last { break; }
             p += 0x1000;
         }
@@ -915,7 +925,6 @@ static TLB_DONE: [core::sync::atomic::AtomicU64; 64] =
 
 /// How many times a wait for an acknowledgement ran into the time limit (the diagnostics:
 /// normally it must be zero).
-#[cfg(target_arch = "x86_64")]
 pub static SHOOT_TIMEOUT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// THE PRICE OF WAITING FOR AN ACKNOWLEDGEMENT — by time rather than only by the number of refusals.
 ///
@@ -928,16 +937,11 @@ pub static SHOOT_TIMEOUT: core::sync::atomic::AtomicU64 = core::sync::atomic::At
 /// applied to the workload's percentiles: 10 us — "unnoticeable", 100 us — "already
 /// visible in a database's p99", 1 ms — "visible with the naked eye".
 /// How many calls were not made because a neighbour is in A FOREIGN address space.
-#[cfg(target_arch = "x86_64")]
 pub static SHOOT_SKIPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-#[cfg(target_arch = "x86_64")]
 pub static SHOOT_WAITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-#[cfg(target_arch = "x86_64")]
 pub static SHOOT_WAIT_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-#[cfg(target_arch = "x86_64")]
 pub static SHOOT_MAX_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// The waits longer than 10 us / 100 us / 1 ms.
-#[cfg(target_arch = "x86_64")]
 pub static SHOOT_OVER: [core::sync::atomic::AtomicU64; 3] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 3];
 
@@ -966,7 +970,6 @@ fn shoot_account(cyc: u64) {
     }
 }
 /// How many flushes were made at the neighbours' request (the diagnostics).
-#[cfg(target_arch = "x86_64")]
 pub static TLB_SERVED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// A CORE STANDS IN `hlt` — THERE IS NO NEED to wait for an acknowledgement from it.
@@ -989,7 +992,6 @@ pub static TLB_SERVED: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomi
 static HALTED: [core::sync::atomic::AtomicBool; 64] =
     [const { core::sync::atomic::AtomicBool::new(false) }; 64];
 /// How many times a wait for an acknowledgement was stopped by the sign "the neighbour is in hlt".
-#[cfg(target_arch = "x86_64")]
 pub static SHOOT_HALTED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// WE DO NOT CALL A STOPPED NEIGHBOUR AT ALL — it will flush the TLB itself when it wakes up.
@@ -1019,7 +1021,6 @@ pub static SHOOT_HALTED: core::sync::atomic::AtomicU64 = core::sync::atomic::Ato
 static TLB_LAZY: [core::sync::atomic::AtomicBool; 64] =
     [const { core::sync::atomic::AtomicBool::new(false) }; 64];
 /// How many calls were not made because the neighbour stood in `hlt` (it will flush by itself).
-#[cfg(target_arch = "x86_64")]
 pub static SHOOT_LAZY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// How many times a core, having woken up, extinguished the TLB by the mark.
 pub static LAZY_FLUSHES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -1112,6 +1113,7 @@ pub extern "C" fn tlb_service() {
 
 /// arm64: no mailbox to serve — a neighbour's `TLBI ...IS` already reached this core.
 #[cfg(target_arch = "aarch64")]
+#[unsafe(no_mangle)]
 pub extern "C" fn tlb_service() {}
 
 /// The flush's range is ITS OWN FOR EVERY INITIATOR (see `tlb_service`).
@@ -1193,7 +1195,6 @@ pub fn shootdown_range_auto(start: u64, pages: u64) {
 /// by the host, and the flush of its TLB is entrusted to the host (see `smp::ask_host_flush`).
 /// Telling this from `SHOOT_TIMEOUT` is obligatory: the first is the norm of a stand with
 /// the reshuffling of vCPUs, the second is a lost acknowledgement.
-#[cfg(target_arch = "x86_64")]
 pub static SHOOT_HOSTFLUSH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 #[cfg(target_arch = "x86_64")]

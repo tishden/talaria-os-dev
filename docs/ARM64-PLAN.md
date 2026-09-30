@@ -896,12 +896,114 @@ not in textual scope — one `#[macro_use]`), `crate::smp` 230, the clock functi
 |---|---|---|---|
 | 3.1 | **The names.** Every module name the shared code reaches on x86 exists on arm64 with the same surface: `arch::serial` (the PL011 under the 16550's names, the macro in scope), `arch::smp` (the GIC + timer + PSCI under the LAPIC's names: `MAXCPU`, `nr_cpus`, `start_cpu`, `apic_of` = the affinity id, `send_ipi` = an SGI, `lapic_timer_init` = the deadline, the slice knobs), `arch::idt` (the vectors as INTIDs, `TICKS`, `set_vector` as a handler table the IRQ vector dispatches on, `ExcFrame` = the trap frame), `arch::tsc` (the counter under the TSC's names; the servo and the wall clock, which are arithmetic over a counter, move out of `arch/x86_64/tsc.rs` into a shared `clocksrc.rs` with the calibration left behind), `arch::pmu`/`cat`/`gdb`/`vga`/`crypto` as honest stubs that say so (PMUv3, the gdb stub and the Crypto Extensions are phases 8 and later), `arch::ioapic::route` = a GIC SPI, the `percpu` fields (`cur_task`, the sched TTBR0, `off_stack`, `sig_newrsp`) | the census drops below 300 with no new gate in `main.rs`; x86 486/0 after the `clocksrc` split |
 | 3.2 | **The x86-isms inside the shared modules**, each moved behind `arch` or gated where it is a device that does not exist on arm64: the legacy PCI config space (`pci.rs` on `0xCF8` — arm64 has the ECAM from the tree), `acpi` (arm64 boots from the tree until phase 6: a `bootinfo` that both feed), the port I/O callers, `rdrand`, `map_mmio_wc`/PAT (the arm64 memory attributes), `cpuid` users, the `timer_stub_sched` frame layout that `sched.rs` builds by hand (→ `arch::switch::build_ctx`), `coredump`/`elfnote` register order (→ `arch::signal`), the TLS base (`fsbase` → `arch::cpu::set_tls`), `user.rs` (`EM_AARCH64`, 64K `p_align`, the auxv) | the census reaches zero on every module but `selftest/*` and `runmode`; x86 486/0 |
-| 3.3 | **The arm64 entry and switch** — the real code behind the names: `syscall_entry.rs` (the SVC stub storing the neutral `Frame` order of §4.5, the FP/SIMD save, `sig_newrsp` as a write into `sp_el0`), `switch.rs` (`fpu_save/restore` of the 528 bytes, `enter_saved_ctx` = restore the trap frame and `eret`, `stack_switch_call`, `soft_yield_kick`, the tick vector into the scheduler), `gdt::enter_user` = `eret` to EL0 with `SP_EL0`/`ELR`/`SPSR`, `setjmp`, `signal.rs` (the AAPCS64 `sigcontext`, `pc-4`/`x8` restart, the vDSO's `__kernel_rt_sigreturn`), the sync-exception dispatch on `ESR.EC` into the page-fault path with `FAR` as the address | `main.rs` has no gates left but the modes; the kernel boots on arm64 to the mode prompt with `talaria.mode=none` |
-| 3.4 | **The binaries.** `kernel/user/` cross-built with `aarch64-linux-musl` into `user/aarch64/`, `user_elf!` picking by target; the musl loader and its `%fs` → `TPIDR_EL0` | `hello` prints from EL0 under TCG |
+| 3.3 | **The arm64 entry and switch** — the real code behind the names: `syscall_entry.rs` (the SVC stub storing the neutral `Frame` order of §4.5, the FP/SIMD save, `sig_newrsp` as a write into `sp_el0`), `switch.rs` (`fpu_save/restore` of the 528 bytes, `enter_saved_ctx` = restore the trap frame and `eret`, `stack_switch_call`, `soft_yield_kick`, the tick vector into the scheduler), `gdt::enter_user` = `eret` to EL0 with `SP_EL0`/`ELR`/`SPSR`, `setjmp`, `signal.rs` (the AAPCS64 `sigcontext`, `pc-4`/`x8` restart, the vDSO's `__kernel_rt_sigreturn`), the sync-exception dispatch on `ESR.EC` into the page-fault path with `FAR` as the address | DONE 2026-09-30 (§10.2): 6 gates left, `boot_shared` runs to its end on arm64, the scheduler switches on the tick (`ipi`), `slice` green. Open inside it: the EL0 fault path into `deliver_exception_signal` (the sync-EL0 stub still treats a fault as fatal) |
+| 3.4 | **The binaries.** `kernel/user/` cross-built with `aarch64-linux-musl` into `user/aarch64/`, `user_elf!` picking by target; the musl loader and its `%fs` → `TPIDR_EL0` | DONE 2026-09-30 (§10.2): `hello`, `mhello`, `mprintf`, `pthreads` under TCG |
 | 3.5 | **The set.** `hello|mhello|mprintf|pthreads|sigtest|futexlat|mbench|forktls|efault|cpptest*|fputest|memrace|shmrace` under TCG, then under KVM on the stand; `test-aarch64.sh` grows the shared modes; `talaria.strace=1` lists zero `ENOSYS` | phase 3's gate of §5, and the `mbench` syscall cost next to §10's 55 ns |
 
 The order inside 3.1 and 3.2 is the census's order — the largest count first — and each
 step lands as its own commit with the count in the message.
+
+### 10.2. Where it stands (2026-09-30, evening)
+
+**Stages 3.1–3.3 are done in one day: the census is 0, `main.rs` has 6 gates left (the
+x86 boot entry, AVX, the `user_elf!` macro), and the whole kernel compiles, links and
+BOOTS on arm64.** `rust_main` was split: its x86 early part (multiboot/PVH, the IDT, the
+PIC silence, AVX, the TSC) and `boot_shared` — everything after, which arm64's `kmain`
+enters once the tree, the GIC and the timer are up. Under TCG on QEMU `virt`:
+
+* `talaria.mode=none` runs `boot_shared` to its end (the wait tiers, the wall clock, the
+  knobs, the virtio-mmio scan over the tree's windows, `runmode`) and powers off through
+  PSCI;
+* `talaria.test=slice` — the first shared self-test green on arm64: `slice-test: ALL OK`;
+* `talaria.test=ipi` — the SHARED SCHEDULER switches two kernel tasks on the tick through
+  the new vector stubs, a secondary comes up through PSCI under it, IPIs reach the
+  secondary. The arm64 gate asserts both (`kernel/test-aarch64.sh`: 7 boots, 43 checks).
+* `talaria.test=threads` reaches the first ring-3 task and dies at the first instruction
+  — the test embeds x86 machine code; that is stage 3.4's work (`user/aarch64/`), not a
+  defect of the switch.
+
+What was decided on the way, and why:
+
+* **One frame for every entry.** `trap::Frame` (36 words: x0..x30, sp, elr, spsr, esr,
+  far) plays `syscall::Frame` (the neutral names `nr`, `a1..a6`, `pc`, `flags`, `usp` are
+  its fields), `idt::ExcFrame` and the scheduler's saved context. The `svc` path calls
+  `rust_syscall` on the frame in place and the stub's restore returns x0. Every stub that
+  can switch tasks (an IRQ from either EL, a sync exception at EL1) calls a handler that
+  returns THE FRAME TO ENTER; the tail (`SCHED_TAIL`) frees the stack a switch left,
+  loads the address space the scheduler chose and restores by the FRAME's origin
+  (SPSR.M), not the stub's — a tick from EL1 may enter a frame an EL0 entry saved.
+* **The FP/SIMD state travels below the frame.** Every stub saves the 528 bytes under its
+  frame and records the area in the per-core block; `switch::fpu_save` copies from THERE,
+  so the kernel's own use of the V registers between the entry and the scheduler cannot
+  leak into a task's saved state (x86 lives with that hazard because rustc rarely emits
+  SSE early in `rust_schedule`; on arm64 LLVM uses q registers for any memcpy).
+* **The scheduler builds no frame by hand any more.** `arch::switch::{build_user_ctx,
+  build_kernel_ctx, ctx_pc, ctx_sp, ctx_fp, ctx_flags, ctx_is_user, ctx_plausible,
+  ctx_exit_uregs, ctx_park, Gp, gp_with_arg, gp_with_ret, user_flags, USER_FLAGS_*}` is
+  the whole of what `sched.rs` says about a saved context; the fourteen raw slot reads it
+  had are gone. The PSTATE literals differ (x86 `0x202`/`0x2`, arm64 `0`/`0x80`) and so
+  they had to.
+* **The soft yield is `svc #1` at EL1** (x86: `int 0x41`): the sync-EL1 stub is a
+  scheduling stub, so the frame it returns can be another task's.
+* **The signal frame is `arch::signal`'s in full**, including two x86 habits that had
+  leaked into the shared code: the return slot below the frame (`RET_SLOT`: 8 on x86,
+  where `ret` pops the restorer; 0 on arm64, where it travels in x30) and the shape of
+  `rt_sigreturn` (an `iretq` from a register array on x86; a rewrite of the `svc` frame
+  on arm64, which the stub then restores). `elfnote`'s `NT_PRSTATUS` takes its register
+  count from the machine (27 / 34).
+* **Policy left the arch modules where it was hiding**: the slice and its knobs
+  (`slice.rs`), the wall clock and the servo (`wallclock.rs`), the counters' arithmetic
+  (`perfsample.rs`), the TLS base, the wait tiers' detection and the deadline timer
+  (`arch::cpu::wait_caps`, `arch::smp::deadline_arm`), the reset (`arch::cpu::reset_machine`),
+  the virtio-mmio slot list (`arch::virtio_mmio_slot`: the microvm grid on x86, the tree's
+  windows on arm64 — the grid's addresses are not RAM on `virt`, and the first shared boot
+  faulted on them).
+* **What is honestly absent** and says so: the PMU, CAT, the gdb stub, the VGA window, the
+  AES on the Crypto Extensions, an external clock reference (`have_ref` is false; the
+  clock drifts by the quartz), the console capture of `talaria.stat=`, ACPI (the tree is
+  the description until phase 6; the FADT ports are x86's).
+
+**Stage 3.4, the same evening: ring 3 runs.** `hello.elf` (a `write` and an `exit` through
+`svc`), `mhello` and `mprintf` (static musl: `set_tid_address`, the TLS in `TPIDR_EL0`, the
+auxv, `brk`/`mmap`, stdio) and `pthreads` (four threads through `clone` and `futex`,
+preempted by the tick — `counter=200000 -> OK`, the process and its threads reaped) all pass
+under TCG, and the arm64 gate asserts them where the binaries are present. What it took:
+
+* a cross musl — Fedora's musl is x86-only, so musl 1.2.5 is built with an `aarch64-linux-gnu-gcc`
+  (`services/docker/Dockerfile.musl-aarch64`; the dev box's mirrors refused the image twice,
+  so the same build by hand on the host stands in — `make -C kernel/user aarch64 MUSLA64=`);
+* `user_elf!` on arm64 is GENERATED by `build.rs` from `user/aarch64/` — a name that is there
+  is embedded, the rest are empty slices — so the kernel builds whatever the set is;
+* **the link address is the load address.** The loader keeps a static binary's identity
+  (`vaddr == phys`) and reserves the range from the allocator; x86's `0x1000_0000` is a PCIe
+  window on `virt`, which reads as zeros, and the first arm64 `hello` died on `udf #0` at
+  its own entry. arm64 binaries are linked at `0x5000_0000` (`LDFA64`, `user-aarch64.ld`);
+* `e_machine`, `AT_HWCAP` and `AT_PLATFORM` are the arch's (`ELF_MACHINE`, `AT_HWCAP`,
+  `PLATFORM`);
+* the EL0 fault path mirrors x86's: COW copy, demand-zero, the signal to the process's handler,
+  the supervisor's recovery, else the process dies as under Linux; the EL1 path serves the
+  kernel's first touch of a reserved user page and the profiler's guarded load.
+
+Eight of the sixteen sources build for arm64; `efault`, `fputest`, `futexlat`, `memrace`,
+`shmrace`, `smp2`, `smp4`, `forktls` carry x86 inline asm (`pause`, `%fs:0`, `rcx`) or
+x86-only syscall names (`SYS_pipe`, `SYS_open`, `REG_RIP`) and are ported next.
+`sigtest`, `mbench`, `schedapi`, `mapshared` start FROM DISK — the virtio-blk over
+virtio-mmio of phase 4 comes before them.
+
+**The disk, the same evening.** virtio-blk over the tree's virtio-mmio windows mounts the
+TFS1 image of the arm64 set (`mkfs.py <img> user/aarch64`), `talaria.test=fs` reads a file
+from it, and `procdisk` runs two `mhello` processes from the disk in separate address
+spaces to a clean end — after one real bug: the bring-up had mapped the vDSO into the
+KERNEL's tables for its EL0 probe, which put a PDPT into the kernel PML4's slot 0xFF;
+`copy_kernel_pml4` shares every present kernel slot with every process, the processes'
+stacks (`0x7fff_e...`) live in that slot, and two processes from disk ended up on ONE stack
+— returns into 0 and into the bytes of the string they had just printed. x86 never maps the
+vDSO into the kernel tables, so the slot is empty there. The vDSO now goes into the kernel
+tables only on the probes' branch. The gate asserts the disk (`fs`, `procdisk`) when the
+binaries are present.
+
+Next: the eight sources with x86 inline asm, the rest of the set of 3.5 (`sigtest`,
+`mbench`, `schedapi`, `mapshared` from an ext2 disk), and the stand.
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),

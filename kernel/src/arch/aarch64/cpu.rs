@@ -138,6 +138,53 @@ pub unsafe fn enable_el0_counter() {
 
 /// Does this core manage the access flag and the dirty state in hardware (FEAT_HAFDBS:
 /// `ID_AA64MMFR1_EL1.HAFDBS` >= 2 — the dirty state, not only the access flag)?
+/// `sti; hlt` — wait for an interrupt with them enabled, and leave them enabled.
+/// # Safety
+/// The caller expects to be interrupted here.
+#[inline(always)]
+pub unsafe fn irq_enable_halt() { core::arch::asm!("msr daifclr, #2", "wfi", options(nomem, nostack)); }
+/// `sti; pause; cli` — a one-instruction interrupt window in a spin.
+/// # Safety
+/// As `irq_enable_halt`; interrupts are off again on return.
+#[inline(always)]
+pub unsafe fn irq_enable_pause_disable() { core::arch::asm!("msr daifclr, #2", "yield", "msr daifset, #2", options(nomem, nostack)); }
+/// Arm this core's exclusive monitor on the word at `addr`: a store to it by another core
+/// clears the monitor and raises the event `wfe` waits for — MONITOR's job on x86.
+/// # Safety
+/// `addr` must be mapped and readable (invariant W3 of sync.rs).
+#[inline(always)]
+pub unsafe fn monitor(addr: *const u32) {
+    core::arch::asm!("ldxr {t:w}, [{a}]", t = out(reg) _, a = in(reg) addr, options(nostack));
+}
+/// `sti; mwait; cli` — sleep until the monitored word is written or an interrupt arrives.
+/// # Safety
+/// After `monitor`, with the re-read between them, as sync.rs orders it.
+#[inline(always)]
+pub unsafe fn irq_enable_mwait_disable() { core::arch::asm!("msr daifclr, #2", "wfe", "msr daifset, #2", options(nomem, nostack)); }
+/// The full barrier the x86 code calls `mfence`.
+#[inline(always)]
+pub fn mfence() { dsb_sy(); }
+/// What the core offers a waiter: the exclusive monitor plays MONITOR/MWAIT, the generic timer
+/// is a deadline timer; there is no user-mode timed wait (WFET is FEAT_WFxT, not read yet).
+pub fn wait_caps() -> (bool, bool, bool, bool) { (true, false, false, true) }
+/// No `umwait` ceiling to lift on this machine.
+/// # Safety
+/// Nothing to do.
+pub unsafe fn umwait_unlimit() {}
+/// The thread-pointer of the workload's current thread (`TPIDR_EL0`; musl's `%fs` on x86).
+/// # Safety
+/// As on x86: this core's register, on a context switch.
+pub unsafe fn set_tls_base(v: u64) { core::arch::asm!("msr tpidr_el0, {}", in(reg) v, options(nomem, nostack)); }
+/// # Safety
+/// As `set_tls_base`.
+pub unsafe fn tls_base() -> u64 { let v: u64; core::arch::asm!("mrs {}, tpidr_el0", out(reg) v, options(nomem, nostack)); v }
+/// The faulting address of the last abort on this core.
+pub fn fault_addr() -> u64 { far_el1() }
+/// Power the machine off through the firmware (PSCI SYSTEM_OFF); returns only if it refused.
+pub fn power_off() { super::psci::system_off(); }
+/// Reset the machine through the firmware (PSCI SYSTEM_RESET) and never return.
+pub fn reset_machine() -> ! { super::psci::system_reset(); halt_forever() }
+
 pub fn has_hw_dirty() -> bool {
     let v: u64;
     unsafe { core::arch::asm!("mrs {}, id_aa64mmfr1_el1", out(reg) v, options(nomem, nostack)); }

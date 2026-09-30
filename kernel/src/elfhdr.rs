@@ -95,11 +95,18 @@ fn rd64(b: &[u8], o: usize) -> u64 {
 /// header does not add up.
 ///
 /// `b` is the beginning of the file: 64 bytes are enough.
+/// The ELF `e_machine` this build runs. `arch::ELF_MACHINE` is the same value, but this file
+/// is `#[path]`-included into `kernel-unit` (a host crate with no `arch`), so it keeps its own.
+#[cfg(target_arch = "aarch64")]
+const MACHINE: u16 = 0xB7;
+#[cfg(not(target_arch = "aarch64"))]
+const MACHINE: u16 = 0x3E;
+
 pub fn header(b: &[u8]) -> Option<Hdr> {
     if b.len() < EHDR { return None; }
     if b[0..4] != [0x7F, b'E', b'L', b'F'] { return None; }
     if b[4] != 2 || b[5] != 1 { return None; }          // ELF64, little-endian
-    if rd16(b, 18) != 0x3E { return None; }             // x86-64
+    if rd16(b, 18) != MACHINE { return None; }          // the machine's e_machine (0x3E x86-64, 0xB7 AArch64)
     let phentsize = rd16(b, 54) as usize;
     let phnum = rd16(b, 56) as usize;
     if phnum != 0 && (phentsize < PHENT || phnum > PHNUM_MAX) { return None; }
@@ -157,7 +164,7 @@ mod tests {
         b[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
         b[4] = 2; b[5] = 1;
         wr16(&mut b, 16, etype);
-        wr16(&mut b, 18, 0x3E);
+        wr16(&mut b, 18, MACHINE);
         wr64(&mut b, 24, entry);
         wr64(&mut b, 32, EHDR as u64);
         wr16(&mut b, 54, PHENT as u16);

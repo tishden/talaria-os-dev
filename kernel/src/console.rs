@@ -475,11 +475,10 @@ fn cmd_gdb(arg: &str) {
     crate::obs::perf::cmd("gdb");
 }
 
-/// A reboot through the PCI reset control (port 0xCF9): 0x06 = a full reset.
+/// A reboot by whatever the platform has (the PCI reset control on x86, PSCI on arm64).
 fn reset() -> ! {
-    crate::println!("reset: rebooting (0xCF9 <- 0x06)...");
-    unsafe { crate::arch::cpu::outb(0xCF9, 0x06); }
-    crate::arch::cpu::halt_forever() // if it did not work
+    crate::println!("reset: rebooting...");
+    crate::arch::cpu::reset_machine()
 }
 
 /// The "at a glance" summary: what an operator looks at first.

@@ -166,7 +166,7 @@ unsafe fn build_stack_full(top: u64, entry: u64, phdr: u64, phent: u64, phnum: u
     for i in 0..16 { let r = crate::tsc::rdrand64().unwrap_or(crate::tsc::rdtsc()); *(wr(p) as *mut u8).add(i) = (r >> ((i % 8) * 8)) as u8; }
     let random = p;
     // the strings for auxv: AT_PLATFORM, AT_EXECFN
-    p -= 8; core::ptr::copy_nonoverlapping(b"x86_64\0\0".as_ptr(), wr(p) as *mut u8, 8); let platform = p;
+    p -= 8; core::ptr::copy_nonoverlapping(crate::arch::PLATFORM.as_ptr(), wr(p) as *mut u8, 8); let platform = p;
     let execfn_n = execfn.iter().position(|&c| c == 0).unwrap_or(execfn.len());
     p -= (execfn_n + 1) as u64; core::ptr::copy_nonoverlapping(execfn.as_ptr(), wr(p) as *mut u8, execfn_n); *(wr(p) as *mut u8).add(execfn_n) = 0;
         let execfn_p = p;
@@ -213,7 +213,7 @@ unsafe fn build_stack_full(top: u64, entry: u64, phdr: u64, phent: u64, phnum: u
     items[m] = 17; m += 1; items[m] = 100; m += 1;     // AT_CLKTCK
     items[m] = 15; m += 1; items[m] = platform; m += 1; // AT_PLATFORM
     items[m] = 31; m += 1; items[m] = execfn_p; m += 1; // AT_EXECFN
-    items[m] = 16; m += 1; items[m] = 0x0f8b_fbff; m += 1; // AT_HWCAP (cpuid.1:edx: fpu..sse2)
+    items[m] = 16; m += 1; items[m] = crate::arch::AT_HWCAP; m += 1; // AT_HWCAP: the machine's word (cpuid.1:edx fpu..sse2 / the arm64 HWCAP bits)
     // AT_SYSINFO_EHDR: by it libc finds the vDSO and takes clock_gettime from it.
     // Without the auxv entry libc will not even look — it will simply go by syscall.
     //
@@ -469,7 +469,7 @@ pub unsafe fn run_disk(path: *const u8, args: &[&[u8]]) -> ! {
     harden_stack(ub, ustack_top); // a guard page at the bottom + NX on the stack
     crate::fr::record(crate::fr::USER, entry);
     crate::println!("talaria: launching a binary from the disk in ring 3, entry={:#x}", entry);
-    enter_user(entry, ustack, 0x2);
+    enter_user(entry, ustack, crate::arch::switch::USER_FLAGS_IRQ_OFF);
 }
 
 static mut DT_STACK: u64 = 0;  // the stack of the disk workload's main thread (reused between restarts)
@@ -748,7 +748,7 @@ pub fn run(elf: &[u8]) -> ! {
         crate::fr::record(crate::fr::USER, entry);
         crate::println!("talaria: launching a static ELF in ring 3, entry={:#x}", entry);
         // into ring 3 with IF=0 (no interrupts in ring 3)
-        enter_user(entry, ustack, 0x2);
+        enter_user(entry, ustack, crate::arch::switch::USER_FLAGS_IRQ_OFF);
     }
 }
 
@@ -767,7 +767,7 @@ unsafe fn ring3_expect_fault(rip: u64, rsp: u64) -> u64 {
     CRASH_VEC.store(0, Ordering::SeqCst);
     if tal_setjmp(core::ptr::addr_of_mut!(RECOVERY)) == 0 {
         RECOVERY_ARMED.store(true, Ordering::SeqCst);
-        enter_user(rip, rsp, 0x2);
+        enter_user(rip, rsp, crate::arch::switch::USER_FLAGS_IRQ_OFF);
     }
     RECOVERY_ARMED.store(false, Ordering::SeqCst);
     CRASH_VEC.load(Ordering::SeqCst)
@@ -930,7 +930,7 @@ pub unsafe fn exec(elf: &[u8]) -> ! {
     crate::paging::switch(pml4); // activate the process's address space
     let ustack = build_stack(ustack_top, entry); // argv/auxv by vaddr (the pages are mapped)
     crate::println!("talaria: exec in the process's private AS, entry={:#x}", entry);
-    enter_user(entry, ustack, 0x2);
+    enter_user(entry, ustack, crate::arch::switch::USER_FLAGS_IRQ_OFF);
 }
 
 /// Run SEVERAL PROCESSES, each in ITS OWN address space, under the
@@ -1068,7 +1068,7 @@ pub unsafe fn execve_dyn(path: &[u8], argv: &[&[u8]], envp: &[&[u8]]) -> ! {
     crate::fr::record(crate::fr::USER, entry);
     crate::println!("talaria: execve: {} threads 1, entry={:#x} (argc={}, envc={})",
         core::str::from_utf8(&path[..path.iter().position(|&c| c == 0).unwrap_or(path.len())]).unwrap_or("?"), entry, argv.len(), envp.len());
-    switch_and_enter_user(pml4, entry, ustack, 0x202);
+    switch_and_enter_user(pml4, entry, ustack, crate::arch::switch::USER_FLAGS_IRQ_ON);
 }
 
 /// execve: replace the image of THE CURRENT process task — load an ELF from the disk into a new
@@ -1099,7 +1099,7 @@ pub unsafe fn execve(path: &[u8], argv: &[&[u8]]) -> ! {
     // switch + iretq as A SINGLE asm: entry/ustack/pml4 in registers (taken before the switch from
     // the old stack). The push of the iret frame goes into the current rsp — it is mapped in the new AS
     // (the same stack region). No accesses to locals after mov cr3.
-    switch_and_enter_user(pml4, entry, ustack, 0x2);
+    switch_and_enter_user(pml4, entry, ustack, crate::arch::switch::USER_FLAGS_IRQ_OFF);
 }
 
 /// Run an ELF EXPECTING a #PF (for the protection tests: UAF/munmap). It catches a ring-3 fault
@@ -1118,7 +1118,7 @@ pub fn run_expect_fault(elf: &[u8]) -> ! {
         }
         RECOVERY_ARMED.store(false, Ordering::SeqCst);
         let vec = CRASH_VEC.load(Ordering::SeqCst);
-        let cr2 = crate::arch::cpu::read_cr2();
+        let cr2 = crate::arch::cpu::fault_addr();
         crate::println!("uaf: caught #{} after munmap CR2={:#x}", vec, cr2);
         if vec == 14 { crate::println!("uaf: ALL CHECKS PASSED (munmap removed the mapping, the UAF was prevented)"); }
         else { crate::println!("uaf: FAILURE (a #14 was expected, a #{} was received)", vec); }

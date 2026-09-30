@@ -163,8 +163,8 @@ pub fn vf_init_net(dns: [u8; 4]) {
 }
 
 fn scan_blk() -> Option<(usize, usize)> {
-    for i in 0..32usize {
-        let addr = 0xFEB0_0000 + i * 512;
+    for i in 0..crate::arch::VIRTIO_MMIO_SLOTS {
+        let Some((addr, size)) = crate::arch::virtio_mmio_slot(i) else { continue };
         // SAFETY: D3 — the buffer handed to the device is a frame the kernel owns (a block-cache slot
         // or a staging page), untouched for the length of the command.
         let magic = unsafe { core::ptr::read_volatile(addr as *const u32) };
@@ -172,7 +172,7 @@ fn scan_blk() -> Option<(usize, usize)> {
         let header = NonNull::new(addr as *mut VirtIOHeader)?;
         // SAFETY: D3 — the buffer handed to the device is a frame the kernel owns (a block-cache slot
         // or a staging page), untouched for the length of the command.
-        if let Ok(t) = unsafe { MmioTransport::new(header, 512) } {
+        if let Ok(t) = unsafe { MmioTransport::new(header, size) } {
             let blk = t.device_type() == DeviceType::Block;
             // MmioTransport's `Drop` resets the device. Scanning the windows is
             // AN INSPECTION, and extinguishing live devices with it (the network cards stand in

@@ -1,5 +1,6 @@
 //! Cache allocation: Intel CAT has no arm64 twin in this kernel (Arm's MPAM is a later
 //! question). The x86 module's surface, with `present() == false` and every rule refused.
+pub fn init() {}
 pub fn present() -> bool { false }
 pub fn mask_valid(_m: u32, _cbm_len: u32) -> bool { false }
 pub fn apply(_rules: &[(u64, u32)]) -> u32 { 0 }
