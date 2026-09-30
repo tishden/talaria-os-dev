@@ -870,6 +870,39 @@ x86 regression on the metal (`test.sh` is x86 QEMU; the arm64 set is
   every pitfall met on the way (the x86 sections there began the same way);
 * this plan: §4.13 updated with what B/C/D found, and the status line at the top.
 
+## 10. Phase 3 as it is being executed: the census and the stages
+
+The stand is done; what is left of the port is the kernel above `arch/` compiling and
+running on arm64. Phase 3's exit gate (§5) needs `syscall.rs`, and `syscall.rs` names
+almost every module there is — so the phase is not "port syscall.rs", it is "make the
+whole crate compile for aarch64", judged by two numbers that only go down:
+
+* **the gates**: the `cfg(target_arch = "x86_64")` lines in `main.rs` (84 on 2026-09-30);
+* **the census**: `kernel/census-aarch64.sh` copies the tree, drops every gate in front of
+  a `mod X;` and counts what `cargo check` for aarch64 says, per file and per missing
+  name (1 096 errors on 2026-09-30, the first pass — the deeper type errors come once the
+  names resolve). The real tree keeps its gates until a module's whole dependency closure
+  compiles, so the CI arm64 build stays green while the count falls.
+
+The first census, by missing name: `println!` 444 (the arm64 UART's macro is exported but
+not in textual scope — one `#[macro_use]`), `crate::smp` 230, the clock functions of
+`crate::tsc` about 90 (`mono_ns`, `cycles_to_ns`, `wall_ns`, the servo), `crate::idt` 48,
+`crate::pmu` 42, `crate::serial` 27, `arch::signal` 20, `crate::cat` 11, `crate::gdb` 10,
+`crate::ioapic` 8, `percpu` fields 20, `arch::cpu` port I/O and MSRs 15, `user_elf!` 44.
+
+### 10.1. The stages, each with its gate
+
+| # | Stage | What is built | Gate |
+|---|---|---|---|
+| 3.1 | **The names.** Every module name the shared code reaches on x86 exists on arm64 with the same surface: `arch::serial` (the PL011 under the 16550's names, the macro in scope), `arch::smp` (the GIC + timer + PSCI under the LAPIC's names: `MAXCPU`, `nr_cpus`, `start_cpu`, `apic_of` = the affinity id, `send_ipi` = an SGI, `lapic_timer_init` = the deadline, the slice knobs), `arch::idt` (the vectors as INTIDs, `TICKS`, `set_vector` as a handler table the IRQ vector dispatches on, `ExcFrame` = the trap frame), `arch::tsc` (the counter under the TSC's names; the servo and the wall clock, which are arithmetic over a counter, move out of `arch/x86_64/tsc.rs` into a shared `clocksrc.rs` with the calibration left behind), `arch::pmu`/`cat`/`gdb`/`vga`/`crypto` as honest stubs that say so (PMUv3, the gdb stub and the Crypto Extensions are phases 8 and later), `arch::ioapic::route` = a GIC SPI, the `percpu` fields (`cur_task`, the sched TTBR0, `off_stack`, `sig_newrsp`) | the census drops below 300 with no new gate in `main.rs`; x86 486/0 after the `clocksrc` split |
+| 3.2 | **The x86-isms inside the shared modules**, each moved behind `arch` or gated where it is a device that does not exist on arm64: the legacy PCI config space (`pci.rs` on `0xCF8` — arm64 has the ECAM from the tree), `acpi` (arm64 boots from the tree until phase 6: a `bootinfo` that both feed), the port I/O callers, `rdrand`, `map_mmio_wc`/PAT (the arm64 memory attributes), `cpuid` users, the `timer_stub_sched` frame layout that `sched.rs` builds by hand (→ `arch::switch::build_ctx`), `coredump`/`elfnote` register order (→ `arch::signal`), the TLS base (`fsbase` → `arch::cpu::set_tls`), `user.rs` (`EM_AARCH64`, 64K `p_align`, the auxv) | the census reaches zero on every module but `selftest/*` and `runmode`; x86 486/0 |
+| 3.3 | **The arm64 entry and switch** — the real code behind the names: `syscall_entry.rs` (the SVC stub storing the neutral `Frame` order of §4.5, the FP/SIMD save, `sig_newrsp` as a write into `sp_el0`), `switch.rs` (`fpu_save/restore` of the 528 bytes, `enter_saved_ctx` = restore the trap frame and `eret`, `stack_switch_call`, `soft_yield_kick`, the tick vector into the scheduler), `gdt::enter_user` = `eret` to EL0 with `SP_EL0`/`ELR`/`SPSR`, `setjmp`, `signal.rs` (the AAPCS64 `sigcontext`, `pc-4`/`x8` restart, the vDSO's `__kernel_rt_sigreturn`), the sync-exception dispatch on `ESR.EC` into the page-fault path with `FAR` as the address | `main.rs` has no gates left but the modes; the kernel boots on arm64 to the mode prompt with `talaria.mode=none` |
+| 3.4 | **The binaries.** `kernel/user/` cross-built with `aarch64-linux-musl` into `user/aarch64/`, `user_elf!` picking by target; the musl loader and its `%fs` → `TPIDR_EL0` | `hello` prints from EL0 under TCG |
+| 3.5 | **The set.** `hello|mhello|mprintf|pthreads|sigtest|futexlat|mbench|forktls|efault|cpptest*|fputest|memrace|shmrace` under TCG, then under KVM on the stand; `test-aarch64.sh` grows the shared modes; `talaria.strace=1` lists zero `ENOSYS` | phase 3's gate of §5, and the `mbench` syscall cost next to §10's 55 ns |
+
+The order inside 3.1 and 3.2 is the census's order — the largest count first — and each
+step lands as its own commit with the count in the message.
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its
