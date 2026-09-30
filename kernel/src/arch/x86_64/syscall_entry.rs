@@ -1,7 +1,7 @@
 //! The SYSCALL entry of x86-64 (docs/ARM64-PLAN.md §4.5): the MSRs that arm it, the
 //! stub that saves the user's registers on the task's kernel stack and calls
 //! `rust_syscall(&Frame)`, and the `iretq` that a signal's return needs where `sysretq`
-//! cannot restore rcx/r11. The frame's layout is `syscall::Frame`; the per-CPU
+//! cannot restore rcx/r11. The frame's layout is `Frame` below; the per-CPU
 //! offsets are `percpu.rs`'s.
 //!
 //! # Safety
@@ -31,6 +31,28 @@ pub unsafe fn init_msrs() {
     wrmsr(MSR_EFER, rdmsr(MSR_EFER) | 1); // SCE
 }
 
+/// The frame of a syscall's arguments (the push order in `syscall_entry` below).
+///
+/// The frame lies on the task's KERNEL stack (the stub switches rsp away from the user
+/// stack). The names the shared code reads are the neutral ones — `nr`, `a1..a6`, `pc`
+/// (the return rip, from rcx), `flags` (the return rflags, from r11), `usp` (the user's rsp
+/// at the entry); the callee-saved rbx/rbp/r12..r15 are read only by `arch::signal`
+/// (a fork child and a signal frame inherit them). On arm64 the same names cover x8,
+/// x0..x5, elr, spsr, sp_el0 and x19..x29.
+#[repr(C)]
+pub struct Frame { pub nr: u64, pub a1: u64, pub a2: u64, pub a3: u64, pub a4: u64, pub a5: u64, pub a6: u64, pub pc: u64, pub flags: u64, pub rbx: u64,
+    pub rbp: u64, pub r12: u64, pub r13: u64, pub r14: u64, pub r15: u64, pub usp: u64 }
+
+impl Frame {
+    /// A copy of this frame with the number and the arguments replaced (the dispatcher
+    /// translates the user's fds into handles on a copy, and the entry frame stays as
+    /// the stub left it).
+    pub fn with_args(&self, nr: u64, a: [u64; 6]) -> Frame {
+        Frame { nr, a1: a[0], a2: a[1], a3: a[2], a4: a[3], a5: a[4], a6: a[5], pc: self.pc, flags: self.flags, rbx: self.rbx,
+            rbp: self.rbp, r12: self.r12, r13: self.r13, r14: self.r14, r15: self.r15, usp: self.usp }
+    }
+}
+
 /// Leave the kernel with a FULL register set and a hardware iret frame taken from `regs`
 /// (rax..r15 in the order below, then the iretq frame) — exactly as Linux does on
 /// `rt_sigreturn`, where `sysretq` cannot restore rcx/r11.
@@ -56,7 +78,7 @@ syscall_entry:
        (= this core's TSS.rsp0), gs:16=sig_newrsp. We switch to the task's kernel stack. */
     mov %rsp, %gs:0
     mov %gs:8, %rsp
-    pushq %gs:0                 /* Frame.ursp */
+    pushq %gs:0                 /* Frame.usp */
     push %r15           /* callee-saved: it is inherited by a fork child / a signal's frame */
     push %r14
     push %r13
@@ -101,6 +123,6 @@ syscall_entry:
     mov %gs:16, %rsp
     movq $0, %gs:16
     jmp 2f
-1:  pop %rsp            /* back onto the user stack (Frame.ursp) */
+1:  pop %rsp            /* back onto the user stack (Frame.usp) */
 2:  sysretq
 "#, options(att_syntax));

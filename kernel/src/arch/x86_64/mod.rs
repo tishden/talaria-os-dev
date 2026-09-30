@@ -20,6 +20,7 @@ pub mod mmu;     // the page-table descriptor as the MMU reads it, CR3, the TLB,
 pub mod percpu;  // the per-CPU block through GS.base
 pub mod pmu;     // the performance counters through MSRs + rdpmc
 pub mod setjmp;  // tal_setjmp/tal_longjmp: the recovery of a crashed workload
+pub mod signal;  // the ucontext/gregs layout, the fork and dump registers, the sigreturn restore
 pub mod switch;  // the FPU state, the saved-context entry, the tick's stub, the soft-yield kick
 pub mod syscall_entry; // the SYSCALL MSRs, the entry stub, the sigreturn iretq
 pub mod vga;     // the legacy text window at 0xB8000
