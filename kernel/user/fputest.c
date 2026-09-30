@@ -31,7 +31,14 @@ static void chk(int ok, const char *what) {
     fflush(stdout);
 }
 
-/* Fill ymm0..ymm7 with the pattern from buf (8 registers of 32 bytes). */
+/* Fill the vector registers with the pattern from buf and read them back: 256 bytes on
+ * either machine — ymm0..ymm7 (8 x 32) on x86-64, v16..v31 (16 x 16) on arm64. The arm64
+ * set is the upper half on purpose: AAPCS64 lets a callee destroy v16..v31 entirely, so
+ * nothing but the kernel's save area brings them back. The helpers keep the x86 names. */
+#if defined(__x86_64__)
+#define VNAME "ymm"
+#define VBYTES 32
+#define VFIRST 0
 static inline void ymm_load(const unsigned char *b) {
     __asm__ volatile(
         "vmovups   0(%0), %%ymm0\n vmovups  32(%0), %%ymm1\n"
@@ -48,6 +55,27 @@ static inline void ymm_store(unsigned char *b) {
         "vmovups %%ymm6, 192(%0)\n vmovups %%ymm7, 224(%0)\n"
         :: "r"(b) : "memory");
 }
+#elif defined(__aarch64__)
+#define VNAME "v"
+#define VBYTES 16
+#define VFIRST 16
+static inline void ymm_load(const unsigned char *b) {
+    __asm__ volatile(
+        "ldp q16, q17, [%0]\n      ldp q18, q19, [%0, #32]\n"
+        "ldp q20, q21, [%0, #64]\n ldp q22, q23, [%0, #96]\n"
+        "ldp q24, q25, [%0, #128]\n ldp q26, q27, [%0, #160]\n"
+        "ldp q28, q29, [%0, #192]\n ldp q30, q31, [%0, #224]\n"
+        :: "r"(b) : "memory");
+}
+static inline void ymm_store(unsigned char *b) {
+    __asm__ volatile(
+        "stp q16, q17, [%0]\n      stp q18, q19, [%0, #32]\n"
+        "stp q20, q21, [%0, #64]\n stp q22, q23, [%0, #96]\n"
+        "stp q24, q25, [%0, #128]\n stp q26, q27, [%0, #160]\n"
+        "stp q28, q29, [%0, #192]\n stp q30, q31, [%0, #224]\n"
+        :: "r"(b) : "memory");
+}
+#endif
 
 static unsigned char *guard;                   /* a PROT_NONE page — the source of the SIGSEGV */
 static volatile int handled;
@@ -74,9 +102,9 @@ static void *spinner(void *arg) {
         for (volatile int j = 0; j < 50; j++) { }
         ymm_store(out);
         if (memcmp(pat, out, 256) != 0) {
-            int r = 0; while (r < 8 && pat[r * 32] == out[r * 32]) r++;
-            printf("fputest: the thread %lu: ymm%d is spoilt at the iteration %ld (we expected %02x, we got %02x)\n",
-                   id, r, k, pat[r * 32], out[r * 32]);
+            int r = 0; while (r < 256 / VBYTES && memcmp(pat + r * VBYTES, out + r * VBYTES, VBYTES) == 0) r++;
+            printf("fputest: the thread %lu: " VNAME "%d is spoilt at the iteration %ld (we expected %02x, we got %02x)\n",
+                   id, VFIRST + r, k, pat[r * VBYTES], out[r * VBYTES]);
             fails++; return (void *)1;
         }
         if ((k & 1023) == 0) {
@@ -95,7 +123,7 @@ int main(void) {
     ymm_load(pat);
     (void)getpid();
     ymm_store(out);
-    chk(memcmp(pat, out, 256) == 0, "the ymm survived a syscall");
+    chk(memcmp(pat, out, 256) == 0, "the " VNAME " survived a syscall");
 
     /* 2) the signal: the handler clobbers the ymm, after the return the state must come back */
     guard = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -109,7 +137,7 @@ int main(void) {
     handled = 0;
     *(volatile unsigned char *)guard = 1;      /* SIGSEGV -> the handler -> a repeat of the write */
     ymm_store(out);
-    chk(handled && memcmp(pat, out, 256) == 0, "the ymm survived a signal handler");
+    chk(handled && memcmp(pat, out, 256) == 0, "the " VNAME " survived a signal handler");
 
     /* 3) THE GENERAL-PURPOSE REGISTERS survive the handler — including rcx and r11.
      *
@@ -120,6 +148,7 @@ int main(void) {
      * interrupted. The JVM catches a SIGSEGV at every safepoint poll, that is, in the
      * middle of JIT code where all the registers are taken, and the spoiling of two of
      * them looks like a "random" crash minutes later. So we check it directly. */
+#if defined(__x86_64__)
     {
         unsigned long got_rcx = 0, got_r11 = 0;
         volatile unsigned char *g2 = guard;
@@ -137,6 +166,39 @@ int main(void) {
         chk(handled && got_rcx == 0x1122334455667788UL && got_r11 == 0x99aabbccddeeff00UL,
             "rcx and r11 survived a signal handler");
     }
+#elif defined(__aarch64__)
+    /* The arm64 twin of the same trap. There is no `sysret` here, but the return from a
+     * handler is a SYSCALL (`rt_sigreturn`), and a syscall's exit path writes its result
+     * into x0 and is entitled to forget the registers the procedure call standard lets a
+     * callee destroy: x0/x1 (the result), x8 (the syscall number), x16/x17 (the veneers'
+     * scratch), x30 (the link register — the handler was ENTERED with the restorer in
+     * it). The interrupted code was not making a call; all of them must come back. */
+    {
+        static const unsigned long want[6] = { 0x1122334455667788UL, 0x99aabbccddeeff00UL, 0x0123456789abcdefUL,
+                                               0xfedcba9876543210UL, 0x5555aaaa5555aaaaUL, 0x0f0f0f0ff0f0f0f0UL };
+        unsigned long got[6] = { 0 };
+        if (mprotect(guard, 4096, PROT_NONE) != 0) { printf("fputest: FAIL mprotect\n"); fails++; }
+        handled = 0;
+        register const unsigned long *in __asm__("x19") = want;
+        register unsigned long *outp __asm__("x20") = got;
+        register volatile unsigned char *g2 __asm__("x21") = guard;
+        __asm__ volatile(
+            "ldp  x0, x1, [x19]\n"
+            "ldp  x8, x16, [x19, #16]\n"
+            "ldp  x17, x30, [x19, #32]\n"
+            "mov  w9, #1\n"
+            "strb w9, [x21]\n"
+            "stp  x0, x1, [x20]\n"
+            "stp  x8, x16, [x20, #16]\n"
+            "stp  x17, x30, [x20, #32]\n"
+            :: "r"(in), "r"(outp), "r"(g2)
+            : "x0", "x1", "x8", "x9", "x16", "x17", "x30", "memory");
+        chk(handled && memcmp(want, got, sizeof want) == 0,
+            "x0, x1, x8, x16, x17 and x30 survived a signal handler");
+        if (memcmp(want, got, sizeof want) != 0)
+            printf("fputest:   x0=%lx x1=%lx x8=%lx x16=%lx x17=%lx x30=%lx\n", got[0], got[1], got[2], got[3], got[4], got[5]);
+    }
+#endif
 
     /* 4) the preemption: every thread has its own pattern, the kernel must not mix them up.
      *
@@ -156,7 +218,7 @@ int main(void) {
     for (unsigned long i = 0; i < (unsigned long)nthr; i++) pthread_create(&t[i], 0, spinner, (void *)(i + 1));
     for (int i = 0; i < nthr; i++) pthread_join(t[i], 0);
     printf("fputest: %d threads on %d cores, %d ms\n", nthr, ncpu, spin_ms);
-    chk(fails == 0, "the threads' ymm are not mixed up at preemption");
+    chk(fails == 0, "the threads' " VNAME " are not mixed up at preemption");
 
     printf("fputest: %s\n", fails ? "FAILED" : "ALL OK");
     fflush(stdout);

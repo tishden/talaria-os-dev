@@ -16,11 +16,8 @@
 #define FUTEX_WAKE 1
 #define N 2000
 
-static inline uint64_t rdtsc(void) {
-    unsigned lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return (uint64_t)hi << 32 | lo;
-}
+#include "tal_arch.h"
+#define rdtsc tal_ticks   /* the TSC on x86, CNTVCT_EL0 on arm64 */
 static long fwait(volatile int *a, int v) { return syscall(SYS_futex, a, FUTEX_WAIT, v, 0, 0, 0); }
 static long fwake(volatile int *a, int n) { return syscall(SYS_futex, a, FUTEX_WAKE, n, 0, 0, 0); }
 

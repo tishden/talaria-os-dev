@@ -28,7 +28,7 @@ TSYNC   := tsync/tsynctest tsync/syncbench tsync/fiberbench tsync/tsynctest.dyn
 
 all: $(CBINS) mhello mprintf launcher profdeep crashme $(CPPBINS) $(ASMELF) $(ASMBIN) $(TSYNC) dyn/hello
 
-$(CBINS): %: %.c
+$(CBINS): %: %.c tal_arch.h
 	$(MUSL) sh -c 'musl-gcc -O2 $(LDF) -o $@ $< && strip $@'
 
 # AS A SEPARATE RULE: the gate of the stack unwinding requires frame pointers
@@ -86,10 +86,20 @@ MUSLA64 ?= docker run --rm -v $(CURDIR):/w -w /w talaria-musl-aarch64
 # 0x4000_0000, and 0x1000_0000 — x86's choice — is a PCIe window there, which reads as zeros
 # (the first arm64 `hello` faulted on `udf #0` at its own entry). 0x5000_0000 is 256 MiB in.
 LDFA64 := -static -no-pie -Wl,-Ttext-segment=0x50000000
-A64CBINS := efault fputest futexlat pthreads sigtest memrace shmrace mbench forktls smp2 smp4 mapshared schedapi epsrv memhog
-A64 := $(addprefix aarch64/,$(A64CBINS) mhello mprintf hello.elf)
+# Every C source builds for arm64 except the three that are x86 machine code by design
+# (fastapp/fastflood poll the cell's rings with `pause`/`rdtsc` and a hand-laid layout,
+# sysbench times with `rdtsc`); `launcher`, the `.s` files (but hello), libtsync's fibers
+# and the C++ set (it needs a libstdc++ built against the cross musl) are not ported yet.
+A64CBINS := $(filter-out fastapp fastflood sysbench,$(CBINS))
+A64 := $(addprefix aarch64/,$(A64CBINS) mhello mprintf hello.elf crashme profdeep)
 aarch64: $(A64)
-aarch64/%: %.c
+aarch64/crashme: crashme.c
+	@mkdir -p aarch64
+	$(MUSLA64) musl-gcc -O2 -g -fno-omit-frame-pointer $(LDFA64) -o $@ $<
+aarch64/profdeep: profdeep.c
+	@mkdir -p aarch64
+	$(MUSLA64) musl-gcc -O2 -fno-omit-frame-pointer $(LDFA64) -o $@ $<
+aarch64/%: %.c tal_arch.h
 	@mkdir -p aarch64
 	$(MUSLA64) sh -c 'musl-gcc -O2 $(LDFA64) -o $@ $< && aarch64-linux-gnu-strip $@'
 aarch64/mhello: mh.c

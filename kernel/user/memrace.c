@@ -26,6 +26,7 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <ucontext.h>
+#include "tal_arch.h"
 
 #define THREADS 4
 #define ROUNDS  40
@@ -68,7 +69,7 @@ static void segv(int s, siginfo_t *si, void *uc) {
     ssize_t _ = write(1, "memrace: AN UNEXPECTED SIGSEGV\n", 31); (void)_;
     char b[] = "memrace:   addr=0x0000000000000000 rip=0x0000000000000000 tls=0x0000000000000000 exp=0\n";
     puthex(b + 18, (unsigned long)(si ? si->si_addr : 0));
-    puthex(b + 41, (unsigned long)(uc ? ((ucontext_t *)uc)->uc_mcontext.gregs[REG_RIP] : 0));
+    puthex(b + 41, (unsigned long)(uc ? TAL_UC_PC(uc) : 0));
     puthex(b + 64, (unsigned long)&tls_probe);
     b[85] = (char)('0' + (expect_fault & 1));
     _ = write(1, b, sizeof b - 1); (void)_;

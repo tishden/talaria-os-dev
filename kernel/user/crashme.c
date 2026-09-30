@@ -34,7 +34,14 @@ int main(int argc, char **argv) {
      * workload read whatever it wanted: the page tables, the kernel stacks, other
      * processes. The correct outcome is a SIGSEGV on the very first read. */
     if (argc > 1 && argv[1][0] == 'p') {
+        /* 128 MB into the RAM: GB0 on x86; on arm64's `virt` the RAM starts at 1 GB (the
+         * same address there is the interrupt controller's window — closed too, but not
+         * the memory this gate is about). */
+#if defined(__aarch64__)
+        volatile unsigned long *p = (volatile unsigned long *)0x48000000;
+#else
         volatile unsigned long *p = (volatile unsigned long *)0x8000000;
+#endif
         printf("crashme: reading the identity window at %p\n", (void *)p);
         fflush(stdout);
         unsigned long v = *p;
