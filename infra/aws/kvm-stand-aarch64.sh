@@ -12,6 +12,12 @@
 #                                                       # it changes by the minute — 2026-09-30: 1c
 #                                                       # refused, then 1a refused naming 1c and 1d)
 #   RINGN=5000000 ...                                   # slots for the ring probe (default 2M)
+#   SOAKN=200 ...                                       # boots per mode of the soak (default 50)
+#   LOOPN=10 ...                                        # runs of the whole gate in a loop (default 10)
+#
+# The ring-3 set travels as BINARIES: kernel/user/aarch64/ (`make -C kernel/user aarch64` on the
+# dev box — the cross musl is there, the stand's Amazon Linux has none) is uploaded next to the
+# tree, the kernel embeds it, and the gate builds its ext2 images from it on the stand.
 #
 # Everything the run prints lands in infra/aws/logs/aarch64-<stamp>/ — the gate's and the
 # probes' output is what goes to docs/MEASUREMENTS.md and the plan's §4.13. A metal
@@ -73,7 +79,7 @@ ssh $SSH_OPTS ec2-user@"$IP" 'test "$(uname -m)" = aarch64 && test -c /dev/kvm' 
 
 echo "== provisioning (docker, git, binutils, python3, the pinned nightly + aarch64-unknown-none) =="
 PIN=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$REPO/kernel/rust-toolchain.toml")
-ssh $SSH_OPTS ec2-user@"$IP" "sudo dnf install -y -q docker git gcc binutils python3 tar && \
+ssh $SSH_OPTS ec2-user@"$IP" "sudo dnf install -y -q docker git gcc binutils python3 tar e2fsprogs gdb && \
   sudo systemctl enable --now docker && sudo usermod -aG docker ec2-user && sudo chmod 666 /dev/kvm && \
   curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none -q && . \$HOME/.cargo/env && \
   rustup toolchain install $PIN --profile minimal -c rust-src -c clippy >/dev/null && \
@@ -82,6 +88,12 @@ T2=$(date +%s); echo "provisioned after $((T2-T1)) s" | tee -a "$LOGD/timing.log
 
 echo "== uploading the tree (git archive HEAD of the checked-out branch) =="
 git -C "$REPO" archive HEAD | ssh $SSH_OPTS ec2-user@"$IP" 'mkdir -p talaria && tar -x -C talaria'
+if [ -f "$REPO/kernel/user/aarch64/mhello" ]; then
+  echo "== uploading the ring-3 set ($(ls "$REPO/kernel/user/aarch64" | wc -l) binaries from kernel/user/aarch64) =="
+  tar -C "$REPO/kernel/user" -c aarch64 | ssh $SSH_OPTS ec2-user@"$IP" 'tar -x -C talaria/kernel/user'
+else
+  echo "== NO kernel/user/aarch64 here (make -C kernel/user aarch64): the gate will skip ring 3, the soak will not run =="
+fi
 
 echo "== the arm64 stand image, built natively (fedora:40 pulls its arm64 variant) =="
 ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && docker build -t talaria-qemu-aarch64 -f services/docker/Dockerfile.qemu-aarch64 services/docker' >"$LOGD/image.log" 2>&1 || { echo "the image did not build — $LOGD/image.log"; tail -5 "$LOGD/image.log"; exit 1; }
@@ -91,7 +103,21 @@ ssh $SSH_OPTS ec2-user@"$IP" '. $HOME/.cargo/env && cd talaria && AARCH64_OBJCOP
 T3=$(date +%s); echo "built after $((T3-T2)) s" | tee -a "$LOGD/timing.log"
 
 echo "== the bring-up gate under KVM (TAL_KVM=1: the timing lines are judged too) =="
-ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && TAL_KVM=1 kernel/test-aarch64.sh' 2>&1 | tee "$LOGD/gate.log" | grep -E 'FAIL|TOTAL'
+ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && TAL_KVM=1 kernel/test-aarch64.sh' 2>&1 | tee "$LOGD/gate.log" | grep -E 'FAIL|TOTAL|SKIP'
+
+# The numbers of the set (docs/MEASUREMENTS.md): the whole console of each, three boots —
+# `mbench` is the twin of the x86 scoreboard's primitives, `futexlat` the wakeup latency,
+# `smp2`/`smp4` the parallel speedup. The ext2 image is the one the gate has just built.
+echo "== the numbers: mbench, futexlat, smp2, smp4 (three boots each, the consoles kept) =="
+DISKARG='-drive id=d0,file=/w/kernel/target/a64-disks/ext2.img,format=raw,if=none -device virtio-blk-device,drive=d0'
+for n in 1 2 3; do
+  for p in mbench futexlat smp2 smp4; do
+    extra=""; [ "$p" = mbench ] && extra="$DISKARG"
+    ssh $SSH_OPTS ec2-user@"$IP" "cd talaria && TAL_APPEND='console=ttyAMA0 talaria.test=$p talaria.smp=4 talaria.poweroff=1' kernel/runq-aarch64.sh 120 -smp 4 $extra" \
+      > "$LOGD/num-$p-$n.log" 2>&1
+    grep -aE "RESULT mbench|FUTEXLAT|SMP[24]: (t1|the parallel)|\[trap\]|PANIC" "$LOGD/num-$p-$n.log" | cut -c1-160 | sed "s/^/   [$n] /"
+  done
+done
 
 echo "== the probes TCG cannot judge (docs/ARM64-PLAN.md §9.2 B-E) =="
 for p in "ring talaria.ringn=${RINGN:-2000000}" icache bbm svccost; do
@@ -101,7 +127,14 @@ for p in "ring talaria.ringn=${RINGN:-2000000}" icache bbm svccost; do
     2>&1 | tee "$LOGD/probe-$name.log" | grep -E "probe|as expected|NOT|corrupt|stale|conflict|ns per|\[trap\]|PANIC" | cut -c1-200
 done
 
-echo "== fifty runs of the gate in a loop (250 boots: the SMP paths under a real weak machine; ~5 s a run under KVM) =="
-ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && fails=0; for i in $(seq 1 50); do TAL_KVM=1 kernel/test-aarch64.sh > /tmp/g.log 2>&1 || { fails=$((fails+1)); cp /tmp/g.log /tmp/g-fail-$i.log; }; done; echo "loop: $fails of 50 gate runs failed"; ls /tmp/g-fail-*.log 2>/dev/null | head' 2>&1 | tee "$LOGD/loop.log"
+# The soak BEFORE anything can destroy the instance: the modes whose verdict depends on what
+# two cores see of each other's writes, SOAKN boots each; the failing consoles come home.
+echo "== the soak (kernel/soak-aarch64.sh: ${SOAKN:-50} boots of each mode under KVM) =="
+ssh $SSH_OPTS ec2-user@"$IP" "cd talaria && kernel/soak-aarch64.sh ${SOAKN:-50} /tmp/soak" 2>&1 | tee "$LOGD/soak.log"
+ssh $SSH_OPTS ec2-user@"$IP" 'tar -C /tmp -c soak 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || echo "the soak's consoles did not come home (the verdict lines above are what is left)"
+
+LOOPN=${LOOPN:-10}
+echo "== $LOOPN runs of the whole gate in a loop (the SMP paths under a real weak machine) =="
+ssh $SSH_OPTS ec2-user@"$IP" "cd talaria && fails=0; for i in \$(seq 1 $LOOPN); do TAL_KVM=1 kernel/test-aarch64.sh > /tmp/g.log 2>&1 || { fails=\$((fails+1)); cp /tmp/g.log /tmp/g-fail-\$i.log; }; done; echo \"loop: \$fails of $LOOPN gate runs failed\"; grep -h FAIL /tmp/g-fail-*.log 2>/dev/null | sort | uniq -c | head -20" 2>&1 | tee "$LOGD/loop.log"
 T4=$(date +%s); echo "all done after $((T4-T0)) s; the stand ran $((T4-T1)) s" | tee -a "$LOGD/timing.log"
 echo "logs: $LOGD"
