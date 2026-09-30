@@ -22,6 +22,14 @@ variable "arch" {
 variable "ssh_cidr" {
   default = "0.0.0.0/0"
 }
+variable "az" {
+  # The availability zone (a default subnet of it), "" = the first default subnet. A metal
+  # type is often OUT OF CAPACITY in one zone while another has it (2026-09-30: `c7g.metal`
+  # in ap-northeast-1c — RunInstances answered InsufficientInstanceCapacity and the
+  # provider retried it for half an hour, "Still creating..." with no instance behind it;
+  # the error names the zones that have it, CloudTrail shows the error, terraform does not).
+  default = ""
+}
 
 provider "aws" {
   region = var.region
@@ -50,6 +58,13 @@ data "aws_subnets" "default" {
   filter {
     name   = "vpc-id"
     values = [data.aws_vpc.default.id]
+  }
+  dynamic "filter" {
+    for_each = var.az == "" ? [] : [var.az]
+    content {
+      name   = "availability-zone"
+      values = [filter.value]
+    }
   }
 }
 

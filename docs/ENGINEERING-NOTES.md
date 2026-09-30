@@ -320,6 +320,19 @@ A green gate that cannot fail is not a gate. This has cost real defects.
   UC 113.8 against WC 91.2, and it turned out to be placement noise, not an
   effect. A single measurement cannot be trusted; take a series.
 
+### 5.1. The arm64 KVM stand (`infra/aws/kvm-stand-aarch64.sh`, `c7g.metal`)
+
+* **A metal type that is out of capacity in a zone looks like a SLOW launch.**
+  `terraform apply` printed "aws_instance.stand: Still creating..." for thirty
+  minutes with NO instance behind it: RunInstances answered
+  `InsufficientInstanceCapacity` for `c7g.metal` in ap-northeast-1c every 1-4
+  minutes and the AWS provider retried it silently. Terraform never says so;
+  `aws ec2 describe-instances` (nothing there) and CloudTrail
+  (`lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=RunInstances`,
+  the `errorMessage` names the zones that DO have capacity) do. `main.tf` now takes
+  `az`, the script defaults to ap-northeast-1a and gives apply six minutes, after
+  which it prints CloudTrail's last error and stops.
+
 ---
 
 ## 6. Defect classes worth knowing by name
