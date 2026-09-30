@@ -270,15 +270,20 @@ reasoning does not have to be repeated.
    that the hot price of TLS is the AES-GCM alone.
 7. **The arm64 port** (EC2 Graviton, QEMU `virt`). Planned in full in
    `docs/ARM64-PLAN.md`: the inventory of every x86 mechanism the kernel leans
-   on and its replacement, nine phases with named gates, the risks ranked. Not
-   started. The three genuinely new pieces are the GICv3 ITS (MSI-X), the Linux
-   arm64 ABI (other syscall numbers AND other struct layouts) and the weak
-   memory model (an audit of 1 444 `Relaxed` and 367 `volatile` sites that TSO
-   made correct); the estimate to a regression-green kernel with the six
-   workloads is 18–22 weeks, and the scoreboard against Linux arm64 is a separate
-   programme after that. It needs an arm64 stand with KVM (a Graviton `*.metal`):
-   QEMU under TCG on the x86 box boots the kernel but can show neither the timing
-   gates nor a single ordering bug.
+   on and its replacement, nine phases with named gates, the risks ranked.
+   Phases 0-3 are done on the `arm64-port` branch (§10 of the plan): the kernel
+   boots on QEMU `virt` and on a `c7g.metal` under KVM, and the ring-3 regression
+   that has an arm64 binary (42 of the 45 C sources, one source per test for both
+   machines) passes — the process model, the signals, the core dumps, the
+   supervisor; `kernel/test-aarch64.sh` is 119 checks. What is left is the other
+   two of the three genuinely new pieces: the GICv3 ITS (MSI-X — phase 4, with
+   virtio-net, PCIe and NVMe) and the weak memory model (an audit of 1 444
+   `Relaxed` and 367 `volatile` sites that TSO made correct — phase 5; the soak
+   that will judge it runs already, `kernel/soak-aarch64.sh`); the arm64 ABI's
+   other layouts are behind `arch::abi`. Then EC2's own boot path (phase 6) and
+   the six workloads (phase 7). The stand is `infra/aws/kvm-stand-aarch64.sh`:
+   QEMU under TCG on the x86 box runs the whole gate but can show neither the
+   timing gates nor a single ordering bug.
 
 ---
 

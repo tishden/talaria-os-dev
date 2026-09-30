@@ -410,6 +410,14 @@ extern "C" fn svccost_step() -> ! {
     let per = ns / SVC_N as u64;
     match SVC_STEP.fetch_add(1, Ordering::Relaxed) {
         1 => {
+            // The first pass is a WARM-UP and is not judged: the first `svc` through the
+            // dispatcher prints (an unknown number, once), the caches and the predictors
+            // are cold — under KVM that made "with the save" 313 ns against 132 warm.
+            crate::println!("talaria: svccost probe: the warm-up pass: {} ns per svc round trip (not judged)", per);
+            SVC_T0.store(cpu::counter(), Ordering::Relaxed);
+            enter_el0(SVC_CODE.load(Ordering::Relaxed), SVC_SP.load(Ordering::Relaxed), svccost_step)
+        }
+        2 => {
             SVC_NS_WITH.store(per, Ordering::Relaxed);
             crate::println!("talaria: svccost probe: WITH the FP/SIMD save: {} ns per svc round trip", per);
             trap::FPSAVE_ON.store(0, Ordering::Relaxed);
