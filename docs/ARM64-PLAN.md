@@ -8,13 +8,16 @@ the kernel leans on, what replaces it, in which order it is built, and by which
 gate each step is judged. The numbers here are estimates and are marked as such;
 the measurements come later and go to `docs/MEASUREMENTS.md`.
 
-Status (2026-09-30 evening, branch `arm64-port`): **phase 3 boots and runs ring 3 on
-aarch64 — the whole kernel compiles, links and boots under TCG, and runs static musl
-binaries in EL0 (`hello`, `mhello`, `mprintf`, `pthreads`, two processes from a virtio-blk
-disk); `test-aarch64.sh` 58/0, `test.sh` 486/0, the census 0 (§10.2).** The KVM stand ran
-earlier the same day (§9): the facts and the `svc` cost (55 ns with the FP/SIMD save, 41
-without) are in `docs/MEASUREMENTS.md` §10, the four ordering probes passed on Graviton3
-(§4.13). **The next session is §10.3.**
+Status (2026-09-30 night, branch `arm64-port`): **phase 3's set runs on aarch64 — the
+whole ring-3 regression that has an arm64 binary (42 of the 45 C sources, one source per
+test for both machines), the disk-borne modes from ext2, fork/execve/wait, the core dump a
+host gdb opens, the supervisor's crash and restart paths; `test-aarch64.sh` 119/0 under
+TCG, `test.sh` 486/0 + 22/0, `validate.sh` 14/0, the census 0 (§10.4).** Thirteen defects
+stood between "ring 3 runs" and the set, four of them in shared code that x86 had been
+lucky with — the list is §10.4, the classes are `docs/ENGINEERING-NOTES.md` §6.1. The KVM
+stand ran twice the same day (§9, §10.4): the `svc` cost (55 ns with the FP/SIMD save),
+the four ordering probes and now the set's numbers are in `docs/MEASUREMENTS.md` §10.
+**The next session is §10.3.**
 On the x86 side the signal frame's layout is behind `arch::signal` and the syscall
 `Frame` is read by neutral names (§4.5) — phase 3's design item. The paragraph below
 is the status of the day before, kept for what it lists.
@@ -902,7 +905,7 @@ not in textual scope — one `#[macro_use]`), `crate::smp` 230, the clock functi
 | 3.2 | **The x86-isms inside the shared modules**, each moved behind `arch` or gated where it is a device that does not exist on arm64: the legacy PCI config space (`pci.rs` on `0xCF8` — arm64 has the ECAM from the tree), `acpi` (arm64 boots from the tree until phase 6: a `bootinfo` that both feed), the port I/O callers, `rdrand`, `map_mmio_wc`/PAT (the arm64 memory attributes), `cpuid` users, the `timer_stub_sched` frame layout that `sched.rs` builds by hand (→ `arch::switch::build_ctx`), `coredump`/`elfnote` register order (→ `arch::signal`), the TLS base (`fsbase` → `arch::cpu::set_tls`), `user.rs` (`EM_AARCH64`, 64K `p_align`, the auxv) | the census reaches zero on every module but `selftest/*` and `runmode`; x86 486/0 |
 | 3.3 | **The arm64 entry and switch** — the real code behind the names: `syscall_entry.rs` (the SVC stub storing the neutral `Frame` order of §4.5, the FP/SIMD save, `sig_newrsp` as a write into `sp_el0`), `switch.rs` (`fpu_save/restore` of the 528 bytes, `enter_saved_ctx` = restore the trap frame and `eret`, `stack_switch_call`, `soft_yield_kick`, the tick vector into the scheduler), `gdt::enter_user` = `eret` to EL0 with `SP_EL0`/`ELR`/`SPSR`, `setjmp`, `signal.rs` (the AAPCS64 `sigcontext`, `pc-4`/`x8` restart, the vDSO's `__kernel_rt_sigreturn`), the sync-exception dispatch on `ESR.EC` into the page-fault path with `FAR` as the address | DONE 2026-09-30 (§10.2): 6 gates left, `boot_shared` runs to its end on arm64, the scheduler switches on the tick (`ipi`), `slice` green. Open inside it: the EL0 fault path into `deliver_exception_signal` (the sync-EL0 stub still treats a fault as fatal) |
 | 3.4 | **The binaries.** `kernel/user/` cross-built with `aarch64-linux-musl` into `user/aarch64/`, `user_elf!` picking by target; the musl loader and its `%fs` → `TPIDR_EL0` | DONE 2026-09-30 (§10.2): `hello`, `mhello`, `mprintf`, `pthreads` under TCG |
-| 3.5 | **The set.** `hello|mhello|mprintf|pthreads|sigtest|futexlat|mbench|forktls|efault|cpptest*|fputest|memrace|shmrace` under TCG, then under KVM on the stand; `test-aarch64.sh` grows the shared modes; `talaria.strace=1` lists zero `ENOSYS` | phase 3's gate of §5, and the `mbench` syscall cost next to §10's 55 ns |
+| 3.5 | **The set.** `hello|mhello|mprintf|pthreads|sigtest|futexlat|mbench|forktls|efault|cpptest*|fputest|memrace|shmrace` under TCG, then under KVM on the stand; `test-aarch64.sh` grows the shared modes; `talaria.strace=1` lists zero `ENOSYS` | DONE 2026-09-30 (§10.4) but `cpptest*` (no libstdc++ against the cross musl yet): 119 checks under TCG, the set under KVM on the stand, zero unknown syscall numbers over it; `mbench`'s numbers in MEASUREMENTS §10 |
 
 The order inside 3.1 and 3.2 is the census's order — the largest count first — and each
 step lands as its own commit with the count in the message.
@@ -1008,41 +1011,162 @@ binaries are present.
 
 ### 10.3. The next session
 
-Phase 3 boots and runs ring 3 under TCG; what remains of it is the rest of the §5 set and
-then the KVM stand for the numbers. In order, each step its own commit with the count:
+Phase 3 is closed but for the C++ set; what comes next is phase 4 (§5) — the devices the
+regression's other half needs — with two loose ends of phase 3 taken on the way. In
+order, each its own commit with the count:
 
-1. **Finish the ring-3 set — the eight sources that do not cross-build yet.** They carry x86
-   inline asm or x86-only syscall names, not kernel gaps: `efault` (`SYS_pipe`/`SYS_open` →
-   the `*at` numbers), `fputest` (`asm("rcx")`, x87/SSE → the arm64 FP check or `#[cfg]`),
-   `futexlat` (`asm` timing → `cntvct`), `memrace`/`shmrace` (`mcontext_t.gregs`/`REG_RIP` →
-   the arm64 `mcontext` `regs[]`/`pc`), `smp2`/`smp4` (`pause` → `yield`), `forktls`
-   (`%fs:0` → `TPIDR_EL0`). Prefer a shared source with a small `#if defined(__aarch64__)`
-   block over a fork. Gate: each builds for both arches and its `talaria.test=` mode passes
-   under TCG; `talaria.strace=1` over the set lists zero `ENOSYS`.
-2. **The disk-borne modes of the set.** `sigtest`, `mbench`, `schedapi`, `mapshared` start
-   FROM an ext2 disk (`run_process_disk`/`run_disk_threaded`), so the ext2 path — not just
-   TFS1 — must work on arm64: `mkext2.sh` for the arm64 set, `talaria.mode=cell`/`proc` from
-   `/cell.manifest`. Gate: `sigtest` (signal delivery and `rt_sigreturn` — the arm64
-   `sigcontext` of `arch::signal` under a real handler), `mbench` (the FIRST arm64 microbench
-   number next to §10's 55 ns svc), `mapshared`, `schedapi` pass under TCG.
-3. **`fork`/`clone`/`execve` and the supervisor on arm64.** `pthreads` already forks threads;
-   prove the process paths: `forksrv`/`execmt`/`crashme forkap` (children on APs, reaped by
-   `wait4`), a crash into a core dump that opens in `gdb-multiarch`. Gate: the process modes
-   of `test.sh` that have arm64 binaries, green under TCG; `talaria.mode=cell` runs a
-   multithreaded workload from disk.
-4. **The KVM stand, the full set.** `infra/aws/kvm-stand-aarch64.sh` (c7g.metal) with the
-   whole set built on the stand; the numbers to `docs/MEASUREMENTS.md` (the arm64 twin of the
-   x86 scoreboard's primitives — `mbench`, the syscall cost, wakeup latency), then §4.13's
-   ordering soak (`ring`/`shmrace`/`memrace` for hours under a real weak machine). This needs
-   the ordering audit's downgrades to have started (§4.13), so it may split across sessions.
+1. **virtio-net over the tree's virtio-mmio windows**, the arm64 twin of the microvm's
+   NIC: `open_nic` on arm64 finds the window whose device id is 1, the SPI of that window
+   (§4.8: `virt` wires them at INTIDs 48..79) goes on `NIC_VECTOR`, and the network block
+   of `test.sh` that needs no PCIe comes over: `epsrv`, `mtsrv`, `connect`, `netshoot`,
+   `mode=proc` WITH a NIC, `forksrv` (a fork per connection — the PostgreSQL path).
+   Gate: those modes under TCG with a tap; `tcp_bench`/`udp_ping` numbers on the stand.
+2. **PCIe ECAM + the ITS** (§4.8): the config space through the ECAM window the tree
+   names, MSI-X through the ITS (`its=on` is already on the gate's command line), NVMe
+   (`-device nvme`) and virtio-pci. Gate: `talaria.test=its`; the ext2/jbd2/fs block on
+   NVMe; `nvme` in the UEFI block's place until phase 6.
+3. **The two loose ends of phase 3.** `cpptest*` need a libstdc++ built against the cross
+   musl (an arm64 `talaria-alpine-build`: Alpine's aarch64 g++ is exactly that toolchain);
+   `launcher`/`fastapp`/`fastflood` are x86 machine code by design and wait for the
+   zero-syscall datapath's arm64 form. And the kernel's OWN crash on arm64 prints the
+   registers and halts (`trap`): the x86 `CRASH DUMP` block — the last syscall, the stack
+   hex, the x29 chain, `fr::dump`, `coredump::dump_kernel` — belongs there too (phase 8's
+   list, but the diagnosis is wanted earlier than that).
+4. **The ordering audit starts** (§4.13): the soak of §10.4 is the meter — `shmrace`,
+   `memrace`, `fputest`, `futexlat`, `ring` for hours under KVM with the downgrades in.
 
-Not yet, on purpose: devices beyond virtio-mmio (PCIe ECAM + the ITS, NVMe, ENA — phase 4),
-the UEFI boot path (phase 6, the `aarch64-unknown-uefi` stub is not written), the real
-workloads (phase 7). The gate stays `test-aarch64.sh` until the shared modes are all over.
+Not yet, on purpose: the UEFI boot path (phase 6), the real workloads (phase 7). The gate
+stays `test-aarch64.sh` until the shared modes are all over.
 
-**Where to start reading:** this section (§10.1–10.3) is the execution log; `kernel/census-aarch64.sh`
+### 10.4. Where it stands (2026-09-30, night): the set runs
+
+**Stages 3.4-3.5 are done but for the C++ binaries: the whole ring-3 regression that has
+an arm64 binary passes under TCG, `test-aarch64.sh` is 119/0** (61 checks new — the
+ported sources, the ext2 modes, the process model, the crashes) **and the KVM stand ran
+the set** (`docs/MEASUREMENTS.md` §10.1). x86 stayed at `test.sh` 486/0 + 22/0,
+`validate.sh` 14/0, `kernel-unit` 285/0 (five layout tests new), clippy clean on both
+targets.
+
+**The set.** `kernel/user/tal_arch.h` holds the four machine-dependent things a test
+ever needed — the cycle counter, the spin hint, the thread pointer, the pc in a signal's
+`ucontext` — and eight sources that carried x86 asm or x86-only numbers became one
+source each for both machines; what is the machine's own stayed under
+`#if defined(__aarch64__)` (`fputest` fills v16..v31 and checks x0/x1/x8/x16/x17/x30
+across a signal — arm64's rcx/r11; `efault` names the arm64 kernel's addresses and goes
+through `openat`/`pipe2`; `crashme peek` reads 128 MB into the RAM of either machine).
+The Makefile's arm64 set is every C source but the three that are x86 machine code by
+design: 42 binaries. Every mode of §10.3's steps 1-3 is green: `efault` (with its
+`uacheck=0` A/B), `shmrace` (with its `shmlock=0` A/B), `smp2`, `smp4`, `futexlat`,
+`sigtest` (also as `mode=proc` from `/cell.manifest`), `mbench`, `schedapi`, `mapshared`,
+`fputest`, `memrace`, `execmt`, `forktls` (100 forks of 1.5 GB in a 4 GB guest),
+`forkap`, `crashme`'s core dump (opened by the host's gdb: `main () at crashme.c`, the
+registers read), the crash and the restart of a multithreaded cell, the isolation of
+the identity window in `cell` and `proc`. Not one unknown syscall number over the set
+(a number the arm64 table lacks is now REPORTED once, as one the dispatcher lacks is).
+
+**Thirteen defects stood between "ring 3 runs" and the set.** Four were in the shared
+code, and x86 had been lucky with each:
+
+* `install(); irq_enable(); start()` in the `ipi` and `threads` modes: a tick between
+  the unmask and `start` saved the BOOT context into task 0's slot and "entered task 0"
+  on the boot stack — TCG lost 1 boot in 10 (the timer's period had long passed, so the
+  tick was pending at the unmask); under KVM the window is microseconds. The unmask is
+  gone; the task's own frame turns interrupts on at the entry.
+* an ignored `SIGCHLD` interrupted the `wait4` that was waiting for it: the child's
+  signal is sent from `exit_cleanup`, a moment before the child has LEFT its core;
+  `sched::reap` still says "dying", the parent sees a pending signal and returns
+  `EINTR` — for a signal nobody handles. `crashme forkap` lost 30 children of 40 under
+  TCG. Linux discards an ignored, unblocked signal when it is SENT (`sig_ignored`);
+  `proc::send`/`send_proc` do the same for `SIG_IGN` and for `SIG_DFL` of the three
+  default-ignore signals.
+* `fork_cow_space` kept a `MAP_SHARED` page for the child only below 1 GB — GB0, x86's
+  identity gigabyte; the RAM of `virt` starts AT 1 GB. The child's first write to the
+  shared page was a rights fault on the kernel's own 2M leaf (`sigtest` died after
+  `fork`). The test is `user_gb()` now.
+* the `SA_RESTART` list was matched against the process's RAW number: arm64's 61 is
+  `getdents64`, its `wait4` is 260 — a `waitpid` interrupted by a handled `SIGCHLD` came
+  back `EINTR` under `SA_RESTART` (`sigtest` under SMP timing).
+
+The other nine were the port's:
+
+* the pickup loop's stack was never set on arm64 (`sched::set_ap_stack`): the first
+  thread to EXIT on a secondary moved the core onto `sp = 0`; the fault's own entry
+  faulted, forever and in silence, and every task queued on that core waited for it
+  (`futexlat` stopped after its first phase — the `IT HAS HUNG` snapshot named a dead
+  task as "executing" on core 1);
+* `struct stat` written in x86's 144-byte layout into a 128-byte arm64 structure
+  overwrote the caller's saved x29/x30 — `sigtest` returned from `main` INTO ADDRESS 0
+  after printing its verdict. `arch::abi::{enter, leave}` bounce `fstat`/`newfstatat`
+  through a kernel buffer and write the arm64 layout, translate `epoll_event` (16 bytes,
+  `data` at 8) both ways, swap the `O_DIRECTORY`/`O_NOFOLLOW`/`O_DIRECT`/`O_LARGEFILE`
+  pairs on `openat`/`pipe2`/`fcntl`, and `uname` says `aarch64`; `uaccess` judges the
+  PROCESS's sizes; five host tests pin the layouts (§4.4's table, now code);
+* `CNTKCTL_EL1.EL0VCTEN` was set on the boot core only: the vDSO's clock read TRAPPED
+  on the first thread that ran on a secondary (`schedapi`, `fputest`'s threads —
+  `MSR/MRS trapped` at the vDSO's pc). Every core now grants what Linux grants EL0
+  (`cpu::enable_el0_access`: the counter, `CTR_EL0` and the cache maintenance for a JIT's
+  `__clear_cache`, `DC ZVA` for a libc's `memset`);
+* the x86 sanity check of a saved FPU image (`mxcsr`'s reserved bits at offset 24) ran on
+  arm64 over the middle of q1 and SKIPPED the restore of a thread whose double had
+  those bits ("a broken fxsave image" in an arm64 log) — `arch::switch::fpu_image_check`;
+* the FP/SIMD restore loaded the live registers while the scheduler still had Rust code
+  to run before the `eret` — the same hazard the save side avoids (§10.2): on this
+  machine LLVM copies structures through q0/q1. `fpu_restore` now records the image
+  (`percpu::fp_pending`) and the entering tail loads it as its last act
+  (`FP_TAKE_PENDING` in `SCHED_TAIL` and `enter_frame_tail`). The gate's positive control:
+  with the restore disabled `fputest` fails at once ("v16 is spoilt at the iteration
+  810") — the test catches what it claims;
+* an IPI on the timer's vector — what the shared code sends to make another core enter
+  its scheduler — was masked to SGI 11, which nobody handled: `execve` waited a second
+  for sisters that never left their cores ("2 threads of the process did not stop"), and
+  a dedicated core could not be kicked at all. `RESCHED_SGI` (4) is that request; the
+  IRQ vector takes it as a tick that re-arms nothing;
+* the EL0 crash path killed the process and nothing more: it now has what x86's has —
+  the thread pointer in the crash line (mapped or not, read through the tables; there is
+  no self-pointer at `[tpidr]` on arm64, the TLS lies above it), the x29 chain in the
+  log (`obs::unwind::print_backtrace`, shared: an x29 frame record is the same
+  `{caller's fp, return address}` pair as RBP's), the supervisor's notification, the
+  sisters stopped before the dump, then the ELF core — with THIS machine's `e_machine`
+  (it said x86-64, and a host gdb refused it);
+* `forktls`/`idleshoot` fell through to the manifest on a machine without a NIC (the
+  branch they lived in was the "NIC found" one);
+* a syscall number outside the arm64 table returned `ENOSYS` in silence.
+
+**The stand, the same night (`c7g.metal` under KVM, `docs/MEASUREMENTS.md` §10.1).** The
+first boot of the set died at the first `alloc_frame`, silently — four things only a real
+machine under KVM could show, each fixed and the gate then **120/0** (the speedups
+judged too): `TPIDR_EL1` and the other UNKNOWN-at-reset registers start as the poison
+`0x1de7ec7edbadc0de` under KVM (the stubs stored into it; `boot.rs` zeroes them);
+the PSCI `hvc` declared no clobbers and KVM poisons x1..x17 as SMCCC allows; the
+instruction cache was never told about loaded code (`icache::sync` after the four
+loaders, the vDSO, a COW copy of an executable page, `mprotect(PROT_EXEC)`); and a
+process's first fetch used a stale translation of the kernel's regime one boot in three
+(every space shares ASID 0 — the root switch invalidates on both sides now). The
+numbers: `mbench syscall` 152 ns (x86 95), `svccost` 130/112 ns (the FP/SIMD save 18 ns;
+the morning's 55/41 was the bring-up stub without the dispatcher), the cross-core futex
+RTT p50 ~520 ns, the speedups 2.00 and 4.00, the soak 0 failed boots of 450 in the
+clean run.
+
+**What TCG says about the numbers** (all for the stand to judge): `mbench syscall`
+10.8 µs under TCG against 55 ns for the bare `svc` under KVM — the emulator's exception
+cost, not the kernel's; `futexlat` p50 9.6 µs; `smp2` 1.90, `smp4` 3.52 (real cores under
+MTTCG). The gate: 119 checks in about five minutes under TCG.
+
+**Gates and meters.** `kernel/test-aarch64.sh` builds its ext2 images from
+`kernel/user/aarch64` on the spot, reads the core dump back on the host with `debugfs`
+and an aarch64-aware gdb, and judges the speedups only under `TAL_KVM=1`;
+`kernel/soak-aarch64.sh` is the ordering soak (N boots of every mode whose verdict
+depends on what two cores see of each other's writes, the failing consoles kept);
+`infra/aws/kvm-stand-aarch64.sh` uploads the binaries with the tree (the cross musl is
+the dev box's; `services/docker/Dockerfile.musl-aarch64` is the reproducible route, the
+dev box's mirrors refused it three times — the hand build of musl 1.2.5 with
+`aarch64-linux-gnu-gcc` stands in), runs the gate, keeps the consoles of `mbench`,
+`futexlat`, `smp2`, `smp4`, then the soak and the gate in a loop.
+
+**Where to start reading:** this section (§10.1–10.4) is the execution log; `kernel/census-aarch64.sh`
 is the progress meter (0 now — it turns useful again only if a new x86-gated module appears);
-`kernel/test-aarch64.sh` is the gate (58 checks). The pitfalls that cost time are in
+`kernel/test-aarch64.sh` is the gate (119 checks; the ring-3 part needs
+`kernel/user/aarch64`, the ext2 part `mkfs.ext2` on the host). The pitfalls that cost time are in
 `docs/ENGINEERING-NOTES.md` and the session memory: do NOT rebuild x86 while `test.sh` runs
 (two runs collide over the shared disk images — a whole invalid regression), the arm64 link
 address is `0x5000_0000` (RAM on `virt`), and the cross musl is `talaria-musl-aarch64` (or

@@ -533,7 +533,9 @@ fn unknown(nr: u64) -> u64 {
     let mut seen = false;
     // SAFETY: S2 — `UNKNOWN_SEEN`: a 'printed once' flag per syscall number; a lost race prints one
     // line twice.
-    unsafe { for i in 0..n.min(32) { if core::ptr::read_volatile(core::ptr::addr_of!(UNKNOWN_SEEN[i])) as u64 == nr { seen = true; break; } } }
+    // The table holds the low 16 bits (a wild x8 of 1075454524 filled all 32 rows with
+    // one line each, and the lines were what a probe then measured).
+    unsafe { for i in 0..n.min(32) { if core::ptr::read_volatile(core::ptr::addr_of!(UNKNOWN_SEEN[i])) == nr as u16 { seen = true; break; } } }
     if !seen && n < 32 {
         unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(UNKNOWN_SEEN[n]), nr as u16); }
         UNKNOWN_N.store(n + 1, Ordering::Relaxed);

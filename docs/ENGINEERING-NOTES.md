@@ -368,6 +368,36 @@ A green gate that cannot fail is not a gate. This has cost real defects.
   `infra/aws/logs/` as it goes; a hand-run series must do the same (`| tee` on the
   runner's side), and a destroy never follows a copy whose result was not checked.
 
+* **Under KVM "UNKNOWN at reset" is a poison, and TCG hides it.** The architecture
+  leaves `TPIDR_EL1`, `TPIDR_EL0`, `CNTKCTL_EL1`, `AMAIR_EL1`, `MDSCR_EL1`, … UNKNOWN at
+  reset; KVM's `reset_unknown` fills them with `0x1de7ec7edbadc0de`, QEMU under TCG with
+  zero. The exception stubs took the poisoned `TPIDR_EL1` for the per-core block and
+  stored into it — so the first fault's handler faulted, and so did its handler, in
+  silence, until the stack had walked through the image (the QEMU monitor's `info
+  registers` showed the PC at the vector entry and the poison in x8/x9; that was the
+  whole diagnosis). `boot.rs` zeroes them on both entry paths, and a register the
+  kernel cares about is written whole, never read-modify-written. The same poison in
+  x1..x17 after an `hvc` is KVM enforcing SMCCC (only x18..x30 are preserved): an
+  `asm!` for a firmware call declares those clobbers or it corrupts a live pointer.
+* **Code the kernel wrote is not code the core will fetch** until `dc cvau` + `ic ivau`
+  (`arch::icache::sync`); and a translation the old root left is one the new root's
+  first fetch may use. A process's first instruction was UNDEF one boot in three while
+  the data side held the right word: every space shares ASID 0, and
+  `msr ttbr0; tlbi; dsb nsh; isb` lets a speculative walk under the old root allocate
+  an entry after the invalidate. Invalidate on both sides of the switch, `dsb ish`.
+  x86 needs neither, which is exactly why the shared loaders had no such call.
+* **A probe's first pass measures the boot, not the primitive.** `svccost` reported the
+  FP/SIMD save at 191 ns under KVM against 14 ns in the morning: the first `svc` of the
+  run printed 32 "unknown number" lines (a u16 table compared against a u64 — the
+  same wild number never matched itself) and the print was inside the timed pass. A
+  warm-up pass that is not judged, and the table compares what it stores.
+* **Two soaks on one instance are no soak.** A driver killed on the runner's side goes
+  on running on the stand (`ssh` does not kill what it started), and a second driver
+  then shares `/tmp/soak` and the run disk with it: `cp` over an image QEMU has open,
+  consoles that never booted, a fail count nobody can read. `pgrep` on the stand before
+  a series, one series at a time, and a done-file for the runner to poll — the
+  ssh itself breaks ("Broken pipe") long before a soak ends.
+
 ---
 
 ## 6. Defect classes worth knowing by name
@@ -450,6 +480,53 @@ each recurs.
     the mailbox, or a TLB shootdown initiator gives up on timeout and leaves a
     live TLB entry pointing at a frame already handed to somebody else (that was
     ClickHouse's "Checksum doesn't match").
+
+### 6.1. What a second architecture found in the shared code
+
+The arm64 port (`docs/ARM64-PLAN.md` §10.4) ran the same ring-3 set on a second
+machine and found four defects in code x86 had been running for a year. They are
+one class: **a race or an assumption that the first machine's timing or layout
+never exposed.** Each surfaced under TCG, where every window is a hundred times
+wider, and each is real under KVM.
+
+16. **"The unmask before the entry."** `install(); irq_enable(); start()` — the
+    tick that lands between the unmask and the entry saves the boot context
+    into the first task's slot. x86's LAPIC timer had not expired yet; arm64's
+    generic timer, armed long before, fired at the unmask (1 boot in 10). The
+    task's own frame turns interrupts on; nothing before the entry should.
+17. **"An ignored signal that interrupts."** A child's `SIGCHLD` is sent a moment
+    before the child has left its core; the parent's `wait4` saw a pending signal
+    and returned `EINTR` for a signal nobody handles. Linux discards an ignored,
+    unblocked signal when it is SENT, and so does `proc::send` now. x86 under KVM
+    never lost the race; TCG lost it 30 times in 40.
+18. **"A constant that was a coordinate."** `vaddr < 1 GB` meant "the identity
+    gigabyte" — GB0 on x86, the RAM's first gigabyte on arm64, which starts AT 1 GB.
+    `SA_RESTART`'s syscall list, matched against the process's raw number, was
+    the same thing with numbers (arm64's 61 is `getdents64`). An `mxcsr` read at
+    offset 24 of an FPU image was the same thing with a layout. The tell is a
+    literal where a function of the machine belongs (`user_gb()`,
+    `abi::to_internal`, `arch::switch::fpu_image_check`).
+19. **"A structure written in the other machine's layout overflows the caller."**
+    `struct stat` is 144 bytes on x86-64 and 128 on arm64: the kernel's write did
+    not only show a wrong mode, it overwrote the 16 bytes past the caller's
+    structure — its saved frame pointer and return address — and `main` returned
+    into address 0 AFTER printing its verdict. A layout difference is a memory
+    safety bug at the process's side; the translation belongs at the dispatcher's
+    door (`arch::abi::{enter, leave}`), with the process's sizes in the pointer
+    gate, not in the dozen places that fill the structure.
+20. **"A per-core register set on the boot core only."** `CNTKCTL_EL1.EL0VCTEN`
+    let EL0 read the counter — on the core that booted; the first thread the
+    scheduler put on a secondary trapped inside the vDSO. The AP pickup loop's
+    stack was the same defect from the other side: never set for arm64's
+    secondaries, so the first thread to exit on one put the core on `sp = 0` — a
+    recursive fault with no console, which looks exactly like a hang. Whatever
+    the boot core does to itself before ring 3, the secondaries' entry does too.
+21. **"A request masked into another request."** The shared code sends an IPI on
+    the TIMER's vector to make a core enter its scheduler; the arm64 side masked
+    the vector to four bits and delivered SGI 11, which nobody handled — `execve`
+    waited a second for sisters that never left their cores, and a dedicated core
+    (no tick) could not be kicked at all. An interface with a magic value needs
+    the value named on both sides (`RESCHED_SGI`).
 
 ---
 

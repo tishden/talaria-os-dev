@@ -472,6 +472,61 @@ The plan's §4.5 asked whether the eager FP/SIMD save is visible: it is a quarte
 the entry, 14 ns — enough to keep the lazy-save candidate on the list for phase 9,
 not enough to do it before the workloads run.
 
+### 10.1. The set under KVM: the syscall, the wakeup, the speedups, the soak (2026-09-30, night)
+
+The same stand, brought up again the same night (`c7g.metal`, ap-northeast-1d, QEMU 8.2.2,
+`-enable-kvm -cpu host -smp 4 -m 1024`), the kernel at `c1ea6e6` on `arm64-port` — the
+whole ring-3 set of `docs/ARM64-PLAN.md` §10.4 with the four KVM-only fixes that the first
+boot of the night forced (a poisoned `TPIDR_EL1`, the SMCCC clobbers, the instruction cache
+after loaded code, the TLB on both sides of a root switch — ENGINEERING-NOTES §5.1).
+`TAL_KVM=1 kernel/test-aarch64.sh`: **120/0** (the speedups judged too).
+
+**The primitives (`mbench`, the binary that goes to Linux; three boots, the spread in
+parentheses):**
+
+| primitive | Talaria arm64, Graviton3 under KVM | the x86 reference (§5, EC2 stands) |
+|---|---|---|
+| ALU | 0.771 ns/step (1.30 G steps/s), the same to the last digit each boot | — |
+| L1 32k / L2 256k / L3 8M / RAM 64M | 17.4–17.8 / 16.7 / 15.8–15.9 / 16.6 GB/s | — |
+| pointer chase, 64 MB | 96–107 ns/step | — |
+| `syscall` (the full path: the `svc`, the dispatcher, the fd table, the gate) | **151–152 ns** | 95 ns |
+| `syscall-ptr16` (one 16-byte pointer argument through `uaccess`) | 196 ns | — |
+| `read64` (64 bytes from /dev/zero) | 172–173 ns | — |
+
+**The bare entry (`svccost`, an `svc` from EL0 through the dispatcher to ENOSYS and back,
+50 000 round trips; the first pass is a warm-up and is not judged — it carried the
+first-call print and was 313 ns):** **130 ns with the 528-byte FP/SIMD save, 112 ns
+without — the save costs 18 ns** (three boots: 129/111, 130/112, 130/112). The morning's
+55/41 (§10) was the bring-up's stub answering `x0 = x8 + 1` in the vector; the 75 ns
+between are the dispatcher — `abi::to_internal`, the two counter reads, the per-task
+records, the pointer gate. The save's price did not move (14 → 18 ns).
+
+**The wakeup (`futexlat`, musl's own futex and condvar ping-pong, N = 2000; three boots):**
+
+| pair | p50 | p99 | min |
+|---|---|---|---|
+| futex, the two threads on one core | 518–565 ns | 528 ns – 3.7 µs | 483–553 ns |
+| futex, across two cores | **509–559 ns** | 519–1262 ns | 502–553 ns |
+| condvar, one core | 2.4–4.1 µs | 6.4–6.9 µs | 1.1–1.9 µs |
+| condvar, across cores | 2.4–3.8 µs | 6.4–6.9 µs | 1.3–2.1 µs |
+
+The x86 reference for the cross-core futex RTT is §4's 4-8 µs on the microvm stands and
+the `wakelat` numbers of §7 on the EC2 metal; the arm64 number is with the wait tier at
+its default (`wfe` on the line, §4.9 of the plan), unpinned, no knobs.
+
+**The parallel speedups (`smp2`, `smp4`, the same binaries as x86's gate):** **2.00** on two
+cores and **4.00** on four, three boots each (x86 under KVM on the EC2 stands: 1.9-2.0 and
+3.5-4.0).
+
+**The soak (`kernel/soak-aarch64.sh 50`: 50 boots of each mode, 4 cores):** `ring`
+(2 M slots a boot), `shmrace`, `memrace`, `fputest`, `futexlat`, `pthreads`, `sigtest`,
+`forkap`, `schedapi` — **0 failed boots of 450** in the clean runs (a first attempt had
+two soaks running at once on one instance over the same disk image and reported
+consoles that never booted; those are not counted and the lesson is in §5.1 of the
+notes). The whole gate in a loop, 120 checks a run: **0 of 10 runs failed**. The logs:
+`infra/aws/logs/aarch64-20260930-213404/` (the gate, the twelve number consoles, the
+probe, the soak's first consoles and the verdicts).
+
 ## 11. Reproducing any of this
 
 ```sh
