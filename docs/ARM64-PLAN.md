@@ -8,9 +8,13 @@ the kernel leans on, what replaces it, in which order it is built, and by which
 gate each step is judged. The numbers here are estimates and are marked as such;
 the measurements come later and go to `docs/MEASUREMENTS.md`.
 
-Status (2026-09-30, branch `arm64-port`): **the KVM stand has run (§9): every fact the
-plan asked for is in `docs/MEASUREMENTS.md` §10, the four probes TCG could not judge
-passed on Graviton3 (§4.13), and `svc` costs 55 ns with the FP/SIMD save, 41 without.**
+Status (2026-09-30 evening, branch `arm64-port`): **phase 3 boots and runs ring 3 on
+aarch64 — the whole kernel compiles, links and boots under TCG, and runs static musl
+binaries in EL0 (`hello`, `mhello`, `mprintf`, `pthreads`, two processes from a virtio-blk
+disk); `test-aarch64.sh` 58/0, `test.sh` 486/0, the census 0 (§10.2).** The KVM stand ran
+earlier the same day (§9): the facts and the `svc` cost (55 ns with the FP/SIMD save, 41
+without) are in `docs/MEASUREMENTS.md` §10, the four ordering probes passed on Graviton3
+(§4.13). **The next session is §10.3.**
 On the x86 side the signal frame's layout is behind `arch::signal` and the syscall
 `Frame` is read by neutral names (§4.5) — phase 3's design item. The paragraph below
 is the status of the day before, kept for what it lists.
@@ -1002,8 +1006,47 @@ vDSO into the kernel tables, so the slot is empty there. The vDSO now goes into 
 tables only on the probes' branch. The gate asserts the disk (`fs`, `procdisk`) when the
 binaries are present.
 
-Next: the eight sources with x86 inline asm, the rest of the set of 3.5 (`sigtest`,
-`mbench`, `schedapi`, `mapshared` from an ext2 disk), and the stand.
+### 10.3. The next session
+
+Phase 3 boots and runs ring 3 under TCG; what remains of it is the rest of the §5 set and
+then the KVM stand for the numbers. In order, each step its own commit with the count:
+
+1. **Finish the ring-3 set — the eight sources that do not cross-build yet.** They carry x86
+   inline asm or x86-only syscall names, not kernel gaps: `efault` (`SYS_pipe`/`SYS_open` →
+   the `*at` numbers), `fputest` (`asm("rcx")`, x87/SSE → the arm64 FP check or `#[cfg]`),
+   `futexlat` (`asm` timing → `cntvct`), `memrace`/`shmrace` (`mcontext_t.gregs`/`REG_RIP` →
+   the arm64 `mcontext` `regs[]`/`pc`), `smp2`/`smp4` (`pause` → `yield`), `forktls`
+   (`%fs:0` → `TPIDR_EL0`). Prefer a shared source with a small `#if defined(__aarch64__)`
+   block over a fork. Gate: each builds for both arches and its `talaria.test=` mode passes
+   under TCG; `talaria.strace=1` over the set lists zero `ENOSYS`.
+2. **The disk-borne modes of the set.** `sigtest`, `mbench`, `schedapi`, `mapshared` start
+   FROM an ext2 disk (`run_process_disk`/`run_disk_threaded`), so the ext2 path — not just
+   TFS1 — must work on arm64: `mkext2.sh` for the arm64 set, `talaria.mode=cell`/`proc` from
+   `/cell.manifest`. Gate: `sigtest` (signal delivery and `rt_sigreturn` — the arm64
+   `sigcontext` of `arch::signal` under a real handler), `mbench` (the FIRST arm64 microbench
+   number next to §10's 55 ns svc), `mapshared`, `schedapi` pass under TCG.
+3. **`fork`/`clone`/`execve` and the supervisor on arm64.** `pthreads` already forks threads;
+   prove the process paths: `forksrv`/`execmt`/`crashme forkap` (children on APs, reaped by
+   `wait4`), a crash into a core dump that opens in `gdb-multiarch`. Gate: the process modes
+   of `test.sh` that have arm64 binaries, green under TCG; `talaria.mode=cell` runs a
+   multithreaded workload from disk.
+4. **The KVM stand, the full set.** `infra/aws/kvm-stand-aarch64.sh` (c7g.metal) with the
+   whole set built on the stand; the numbers to `docs/MEASUREMENTS.md` (the arm64 twin of the
+   x86 scoreboard's primitives — `mbench`, the syscall cost, wakeup latency), then §4.13's
+   ordering soak (`ring`/`shmrace`/`memrace` for hours under a real weak machine). This needs
+   the ordering audit's downgrades to have started (§4.13), so it may split across sessions.
+
+Not yet, on purpose: devices beyond virtio-mmio (PCIe ECAM + the ITS, NVMe, ENA — phase 4),
+the UEFI boot path (phase 6, the `aarch64-unknown-uefi` stub is not written), the real
+workloads (phase 7). The gate stays `test-aarch64.sh` until the shared modes are all over.
+
+**Where to start reading:** this section (§10.1–10.3) is the execution log; `kernel/census-aarch64.sh`
+is the progress meter (0 now — it turns useful again only if a new x86-gated module appears);
+`kernel/test-aarch64.sh` is the gate (58 checks). The pitfalls that cost time are in
+`docs/ENGINEERING-NOTES.md` and the session memory: do NOT rebuild x86 while `test.sh` runs
+(two runs collide over the shared disk images — a whole invalid regression), the arm64 link
+address is `0x5000_0000` (RAM on `virt`), and the cross musl is `talaria-musl-aarch64` (or
+built by hand on the dev box, `make -C kernel/user aarch64 MUSLA64=`).
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
