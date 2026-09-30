@@ -14,6 +14,7 @@ const VERSION: u64 = 0x8400_0000;
 
 pub const SUCCESS: i64 = 0;
 pub const ALREADY_ON: i64 = -4;
+pub const INVALID_PARAMS: i64 = -2;
 
 static CONDUIT: AtomicU8 = AtomicU8::new(0); // 0 = none, 1 = hvc, 2 = smc
 

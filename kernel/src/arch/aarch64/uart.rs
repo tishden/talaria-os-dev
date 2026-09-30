@@ -106,3 +106,35 @@ macro_rules! println {
         let _ = writeln!(_l, $($arg)*);
     }};
 }
+
+// ── the x86 `serial` surface the shared modules call (`arch::serial` is this module) ──
+use core::sync::atomic::AtomicU64 as _CapWord;
+pub fn tx_dead() -> bool { false }
+pub fn putb(b: u8) { if b == b'\n' { write_byte(b'\r'); } write_byte(b); }
+/// A whole buffer under the line lock (two cores' `write()` do not mix).
+pub fn puts_locked(s: &[u8]) { let _g = lock(); for &b in s { putb(b); } }
+const FR_RXFE: u32 = 1 << 4;
+/// A byte from the receive FIFO, if there is one.
+pub fn getc() -> Option<u8> {
+    unsafe { if r(FR) & FR_RXFE != 0 { None } else { Some((r(DR) & 0xFF) as u8) } }
+}
+pub fn port_has_data(_port: u16) -> bool { unsafe { r(FR) & FR_RXFE == 0 } }
+/// # Safety
+/// There is no port I/O on arm64; the x86 self-test that pokes COM ports reads zero here.
+pub unsafe fn inb(_port: u16) -> u8 { 0 }
+/// # Safety
+/// As `inb`.
+pub unsafe fn outb(_port: u16, _v: u8) {}
+/// The console capture (`talaria.stat=` blocks flushed by a time budget) is not ported yet:
+/// a capture never begins, so `obs` prints directly, as it does when the buffer is busy.
+pub static CAP_LOST: _CapWord = _CapWord::new(0);
+pub static CAP_BYTES: _CapWord = _CapWord::new(0);
+pub static CAP_TSC: _CapWord = _CapWord::new(0);
+pub static CAP_WORST_TSC: _CapWord = _CapWord::new(0);
+pub static CAP_WORST_N: _CapWord = _CapWord::new(0);
+pub fn capture_begin() -> bool { false }
+pub fn capture_end() {}
+pub fn capture_pending() -> bool { false }
+pub fn capture_drain_blocking() {}
+pub fn capture_left() -> usize { 0 }
+pub fn capture_flush(_budget_ns: u64, _max_bytes: usize) -> usize { 0 }

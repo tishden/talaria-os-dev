@@ -27,32 +27,24 @@ pub mod acpi {
     pub fn poweroff() { super::super::psci::system_off(); }
 }
 
-/// `tsc.rs`: the counter plays the TSC. `rdtsc` keeps its x86 name because 29 files call
-/// it by that name; the wall-clock servo and the calibration are not needed yet.
-pub mod tsc {
-    #[inline(always)] pub fn rdtsc() -> u64 { super::super::cpu::counter() }
-    pub fn hz() -> u64 { super::super::cpu::counter_hz() }
-    pub fn calibrate_cached() -> u64 { super::super::cpu::counter_hz() }
-    /// The clock's parameters for the vDSO: the counter as it is, no wall-clock offset
-    /// (the servo of `tsc.rs` is what will discipline them).
-    pub fn publish_vdso_now() {
-        let c = super::super::cpu::counter();
-        crate::vdso::publish(c, 0, super::super::cpu::counter_hz(), 0);
-        VDSO_BASE.store(c, core::sync::atomic::Ordering::Relaxed);
-    }
-    /// The counter value the vDSO's zero corresponds to (for the probe's arithmetic).
-    pub static VDSO_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-}
-
 /// `trace.rs`: the early trace on disk — there is no disk yet.
 pub mod trace {
     pub fn flush() {}
 }
 
-/// `sched.rs`: the halt accounting of `paging::halt_enter/exit` — there is no scheduler yet.
+/// `sched.rs`: the halt accounting of `paging::halt_enter/exit`, and the tick-profile flag
+/// `slice::want_period_ns` consults — there is no scheduler yet.
 pub mod sched {
     pub fn halt_acct_enter(_cpu: usize) {}
     pub fn halt_acct_exit(_cpu: usize) {}
+    pub static PROF_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+}
+
+/// `netsys.rs` (3 904 lines): no network stack yet — nobody waits for the network on any
+/// core, and the card's line has no handler.
+pub mod netsys {
+    pub fn poller_active(_cpu: usize) -> bool { false }
+    pub fn nic_irq() {}
 }
 
 /// `affinity.rs`: one NUMA node until the PPTT/SRAT are read.

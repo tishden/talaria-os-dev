@@ -143,6 +143,25 @@ pub unsafe fn enable_spi(intid: u32, mpidr: u64) {
     w32(d + GICD_ISENABLER + 4 * (intid / 32) as u64, 1 << (intid & 31));
 }
 
+const GICR_ISPENDR0: u64 = 0x200;
+const GICR_ISACTIVER0: u64 = 0x300;
+const GICD_ISPENDR: u64 = 0x200;
+const GICD_ISACTIVER: u64 = 0x300;
+/// Is `intid` pending (an SGI/PPI on this core's redistributor, an SPI at the distributor)?
+pub fn is_pending(intid: u32) -> bool {
+    unsafe {
+        if intid < 32 { my_redistributor().map(|f| r32(f + SGI_BASE + GICR_ISPENDR0) & (1 << intid) != 0).unwrap_or(false) }
+        else { r32(GICD.load(Ordering::Relaxed) + GICD_ISPENDR + 4 * (intid / 32) as u64) & (1 << (intid & 31)) != 0 }
+    }
+}
+/// Is `intid` active (acknowledged, not yet ended)?
+pub fn is_active(intid: u32) -> bool {
+    unsafe {
+        if intid < 32 { my_redistributor().map(|f| r32(f + SGI_BASE + GICR_ISACTIVER0) & (1 << intid) != 0).unwrap_or(false) }
+        else { r32(GICD.load(Ordering::Relaxed) + GICD_ISACTIVER + 4 * (intid / 32) as u64) & (1 << (intid & 31)) != 0 }
+    }
+}
+
 /// Acknowledge the highest-priority pending interrupt: its INTID, or `SPURIOUS`.
 #[inline]
 pub fn ack() -> u32 {

@@ -38,7 +38,7 @@
 // neighbours that have not: its public functions are then "never used" on that target. The
 // allow is crate-wide and per-architecture so that the x86 build keeps judging dead code as
 // it always did; it goes when the last `cfg(target_arch = "x86_64")` gate below does.
-#![cfg_attr(target_arch = "aarch64", allow(dead_code))]
+#![cfg_attr(target_arch = "aarch64", allow(dead_code, unused_imports))]
 
 /// A ring-3 test binary from `kernel/user/`, embedded into the kernel image.
 /// With the `selftest` feature off it is an empty slice, and the ELF loaders
@@ -54,25 +54,28 @@ macro_rules! user_elf {
 macro_rules! user_elf {
     ($p:literal) => { &[] };
 }
+/// On arm64 the ring-3 binaries are not cross-built yet (docs/ARM64-PLAN.md §10.1, stage
+/// 3.4 puts them under `user/aarch64/`): every embedded ELF is empty, and the loaders say so.
+#[cfg(target_arch = "aarch64")]
+#[allow(unused_macros)]
+macro_rules! user_elf {
+    ($p:literal) => { &[] };
+}
 
 #[macro_use]
 mod arch;     // the machine: everything with `asm!`, a register layout or an ABI constant (docs/ARM64-PLAN.md §4.1)
 // arm64: the modules that have come over name neighbours that have not — the stand-ins are
 // listed in ONE file, `arch/aarch64/pending.rs`, and that file must shrink (docs/ARM64-PLAN.md §5).
 #[cfg(target_arch = "aarch64")]
-use arch::pending::{acpi, affinity, metrics, sched, trace, tsc};
+use arch::pending::{acpi, affinity, metrics, netsys, sched, trace};
 #[cfg(target_arch = "x86_64")]
 use arch::boot;
-#[cfg(target_arch = "x86_64")]
 use arch::serial;
-#[cfg(target_arch = "x86_64")]
 use arch::vga;
 #[cfg(target_arch = "x86_64")]
 mod hal;
 mod cmdline;
-#[cfg(target_arch = "x86_64")]
 use arch::crypto;
-#[cfg(target_arch = "x86_64")]
 use arch::idt;
 #[cfg(target_arch = "x86_64")]
 mod l1;
@@ -92,7 +95,6 @@ mod user;
 mod mem;
 #[cfg(target_arch = "x86_64")]
 mod acpi;
-#[cfg(target_arch = "x86_64")]
 use arch::smp;
 #[cfg(target_arch = "x86_64")]
 mod sync;
@@ -126,7 +128,6 @@ mod elfnote;  // the notes of a core dump: the registers and the name, byte for 
 mod jbd2;     // the JBD2 log's format: the header of a block and the tags of a descriptor
 #[cfg(target_arch = "x86_64")]
 mod proc;
-#[cfg(target_arch = "x86_64")]
 use arch::gdb;
 #[cfg(target_arch = "x86_64")]
 mod supervise;
@@ -142,7 +143,6 @@ mod edit;     // a full-screen console editor (a subset of vi)
 mod filed;    // uploading/downloading files over TCP (an rsync-alike)
 #[cfg(target_arch = "x86_64")]
 mod imds;
-#[cfg(target_arch = "x86_64")]
 use arch::ioapic;
 #[cfg(target_arch = "x86_64")]
 mod netprof;
@@ -152,10 +152,10 @@ mod netsys;
 mod netcfg;   // addresses, routes, DHCP: the network configuration as a model rather than three variables
 #[cfg(target_arch = "x86_64")]
 mod routes;
-#[cfg(target_arch = "x86_64")]
 use arch::tsc;
-#[cfg(target_arch = "x86_64")]
-mod clock;
+mod clock;    // the servo's arithmetic (host-tested)
+mod wallclock; // the wall and monotonic clocks over the counter, the discipline by a reference
+mod slice;     // the tick's policy: the slice, the short and the long tick
 mod vdso;
 #[cfg(target_arch = "x86_64")]
 mod uaccess;
@@ -171,11 +171,9 @@ mod watchdog;
 mod ctlplane;
 #[cfg(target_arch = "x86_64")]
 mod obs;
-#[cfg(target_arch = "x86_64")]
 use arch::pmu;
 #[cfg(target_arch = "x86_64")]
 mod cellman;
-#[cfg(target_arch = "x86_64")]
 use arch::cat;
 #[cfg(target_arch = "x86_64")]
 mod netdev;   // the network device model: the NetDev trait + the driver table

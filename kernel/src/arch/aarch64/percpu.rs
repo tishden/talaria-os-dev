@@ -78,6 +78,19 @@ pub fn cur_task_of(cpu: usize) -> u64 {
     unsafe { core::ptr::read_volatile(core::ptr::addr_of!(CPUS[cpu].cur_task)) }
 }
 
+/// The x86 name of `init_tpidr`: only the register, not the `ONLINE` mask.
+pub fn init_gs(cpu: usize) { init_tpidr(cpu); }
+/// No PV EOI word on arm64.
+pub fn pv_eoi_addr(_cpu: usize) -> u64 { 0 }
+/// The user-sp substitution on the way out to EL0 (+16), the current task (+32), the root
+/// table the core is switching to (+40, the x86 name kept), the stack being left (+56).
+#[inline] pub fn sig_newrsp() -> u64 { unsafe { (*block()).sig_newrsp } }
+#[inline] pub fn set_sig_newrsp(v: u64) { unsafe { (*block()).sig_newrsp = v; } }
+#[inline] pub fn set_cur_task(t: u64) { unsafe { (*block()).cur_task = t; } }
+#[inline] pub fn cur_task() -> u64 { unsafe { (*block()).cur_task } }
+#[inline] pub fn set_sched_cr3(v: u64) { unsafe { (*block()).sched_root = v; } }
+#[inline] pub fn set_off_stack(t: u64) { unsafe { (*block()).off_stack = t; } }
+
 /// The kernel stack for an EL0 -> EL1 entry on the current core (+8).
 #[inline]
 pub fn set_kstack_top(v: u64) { unsafe { (*block()).kstack_top = v; } }

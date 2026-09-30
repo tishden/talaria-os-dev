@@ -192,10 +192,8 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     for (i, &mpidr) in s.cpus[..s.ncpu].iter().enumerate() {
         if mpidr == cpu::mpidr() { continue; }
         if i >= MAX_AP { crate::println!("talaria: cpu{} (mpidr {:#x}): no stack slot — MAX_AP is {}", i, mpidr, MAX_AP); continue; }
-        unsafe extern "C" { fn ap_start(); }
-        let top = unsafe { core::ptr::addr_of!(AP_STACKS[i]) as u64 + AP_STACK as u64 };
         probes::CPU_MPIDR[i].store(mpidr, Ordering::Relaxed);
-        let rc = psci::cpu_on(mpidr, ap_start as *const () as usize as u64, top);
+        let rc = start_secondary(i, mpidr);
         if rc != psci::SUCCESS { crate::println!("talaria: cpu{} (mpidr {:#x}): PSCI CPU_ON refused: {}", i, mpidr, rc); continue; }
         let t0 = cpu::counter();
         while AP_UP[i].load(Ordering::Acquire) == 0 && cpu::counter().wrapping_sub(t0) < timer::ticks_for_ns(2_000_000_000) { core::hint::spin_loop(); }
@@ -219,8 +217,18 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     probes::run(cmdline)
 }
 
+/// PSCI `CPU_ON` for the core with `mpidr`, with the stack of slot `i`; the PSCI result.
+pub fn start_secondary(i: usize, mpidr: u64) -> i64 {
+    if i >= MAX_AP { return psci::INVALID_PARAMS; }
+    unsafe extern "C" { fn ap_start(); }
+    let top = unsafe { core::ptr::addr_of!(AP_STACKS[i]) as u64 + AP_STACK as u64 };
+    psci::cpu_on(mpidr, ap_start as *const () as usize as u64, top)
+}
+
 /// A secondary core, from `ap_start` (boot.rs): the same map, vectors and GIC state
 /// as the boot core, its own timer, then it waits for interrupts. `ctx` is its stack top.
+/// Its role is `smp::AP_MODE` (3 = the function in `AP_HOOK`; the rest = the job loop
+/// until the scheduler comes across).
 #[unsafe(no_mangle)]
 extern "C" fn rust_ap_main(ctx: u64) -> ! {
     unsafe { mmu::enable_here(); }
@@ -234,7 +242,15 @@ extern "C" fn rust_ap_main(ctx: u64) -> ! {
     crate::println!("talaria: cpu{} up (mpidr {:#x}, stack top {:#x}, redistributor {})", me, cpu::mpidr(), ctx, if ok { "found" } else { "NOT FOUND" });
     let slot = me.min(MAX_AP - 1);
     AP_UP[slot].store(1, Ordering::Release);
+    percpu::init(me);
     unsafe { cpu::irq_enable(); }
+    if super::smp::AP_MODE.load(Ordering::SeqCst) == 3 {
+        let h = super::smp::AP_HOOK.load(Ordering::SeqCst);
+        if h != 0 {
+            let f: fn(usize) -> ! = unsafe { core::mem::transmute::<usize, fn(usize) -> !>(h as usize) };
+            f(me);
+        }
+    }
     probes::ap_idle_loop(me)
 }
 
