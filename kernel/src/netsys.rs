@@ -413,12 +413,12 @@ pub fn netirq_setup() {
             // THE HIGHEST occupied slot corresponds to THE HIGHEST line, and the rest are
             // counted from it. If the layout turns out to be different, the number
             // is set by hand (`talaria.netirq=<gsi>`), while `=all` lays everything.
-            Some(i) => {
-                let top = crate::ioapic::top_gsi();
-                let smax = crate::virtnet::mmio_slot_max();
-                if top == 0 || smax < i { crate::println!("netsys: talaria.netirq: the lines' layout was not derived — set the number by hand"); return; }
-                top - (smax - i) as u32
-            }
+            // That is x86's `arch::virtio_mmio_gsi`; on arm64 the device tree NAMES the SPI of
+            // every window and nothing is derived.
+            Some(i) => match crate::arch::virtio_mmio_gsi(i) {
+                Some(g) => g,
+                None => { crate::println!("netsys: talaria.netirq: the lines' layout was not derived — set the number by hand"); return; }
+            },
             None => { crate::println!("netsys: talaria.netirq: the card is not on the microvm grid — the line is not laid"); return; }
         }
     };

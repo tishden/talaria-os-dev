@@ -32,6 +32,14 @@ pub const VIRTIO_MMIO_SLOTS: usize = 32;
 pub fn virtio_mmio_slot(i: usize) -> Option<(usize, usize)> {
     if i < VIRTIO_MMIO_SLOTS { Some((0xFEB0_0000 + i * 512, 512)) } else { None }
 }
+/// The GSI of the virtio-mmio window in slot `i`. The microvm puts the virtio lines at the
+/// TOP of the GSI space: the highest occupied slot sits on the highest line and the rest are
+/// counted down from it (measured — see `netsys::netirq_setup`). `None`: not derivable.
+pub fn virtio_mmio_gsi(i: usize) -> Option<u32> {
+    let top = ioapic::top_gsi();
+    let smax = crate::virtnet::mmio_slot_max();
+    if top == 0 || smax < i { None } else { Some(top - (smax - i) as u32) }
+}
 
 /// The ELF `e_machine` this kernel runs, the `AT_HWCAP` word it hands a process (cpuid.1:edx:
 /// fpu..sse2) and the `AT_PLATFORM` string.

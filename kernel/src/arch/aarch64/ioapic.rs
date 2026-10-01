@@ -6,8 +6,15 @@ pub fn available() -> bool { super::gic::present() }
 pub fn count() -> usize { if super::gic::present() { 1 } else { 0 } }
 /// Route SPI `gsi` (an INTID = 32 + gsi) to the core `apic`; the vector is the INTID
 /// itself on this machine, so a caller's vector is recorded only as the handler's key.
-pub fn route(gsi: u32, _vector: u8, apic: u32) -> bool {
+/// The handler the caller keeps under `vector` is therefore installed under the INTID too
+/// (the card's line: `NIC_VECTOR` -> `netsys::nic_irq`) BEFORE the line is enabled: an SPI
+/// nobody handles is only counted and ended, and a level line would then fire forever.
+pub fn route(gsi: u32, vector: u8, apic: u32) -> bool {
     if !super::gic::present() { return false; }
+    let h = if vector as usize == super::idt::NIC_VECTOR { super::idt::nic_handler() }
+        else { super::idt::handler_of(vector as u32).map(|f| f as usize as u64).unwrap_or(0) };
+    if h == 0 { return false; }
+    super::idt::set_vector(32 + gsi as usize, h);
     let mpidr = (apic as u64 & 0xFF_FFFF) | ((apic as u64 >> 24) << 32);
     unsafe { super::gic::enable_spi(32 + gsi, mpidr); }
     true

@@ -263,6 +263,9 @@ pub fn nicq(dev: &'static mut dyn NetDev) -> NicQ {
 
 pub struct SmolDev {
     sh: DevCell<Shared>,
+    /// The card's interrupt status/acknowledge registers (`NetDev::intr_regs`), taken once:
+    /// the line's handler clears the status through them without asking for the card.
+    intr: Option<(usize, usize)>,
 }
 
 impl SmolDev {
@@ -275,7 +278,9 @@ impl SmolDev {
             if inst == 1 { (&mut *addr_of_mut!(RXB), &mut *addr_of_mut!(TXB)) }
             else { let k = if inst == 0 { 0 } else { (inst - 1).min(MAXEXTRA - 1) }; (&mut *addr_of_mut!(RXB2[k]), &mut *addr_of_mut!(TXB2[k])) }
         };
+        let intr = dev.intr_regs();
         SmolDev {
+            intr,
             sh: DevCell::new(Shared {
                 q: NicQ::new(dev, rb, tb),
                 last_rx: 0,
@@ -322,7 +327,25 @@ impl SmolDev {
     }
     /// §7.5: allow an interrupt from the card (before going to sleep).
     pub fn arm_intr(&self) { if let Some(mut s) = self.sh.try_take() { s.q.arm_intr(); } }
-    pub fn ack_intr(&self) { if let Some(mut s) = self.sh.try_take() { s.q.ack_intr(); } }
+    /// THE CLEARING DOES NOT DEPEND ON WHO HOLDS THE CARD. It used to be `try_take` and
+    /// nothing else: when the handler interrupted a pass that held the card, the status was
+    /// NOT cleared. On an edge-routed line that costs nothing; on the GIC the window's SPI is
+    /// a level, it stayed raised, and the handler was entered again at once — 600 thousand
+    /// times a second, the interrupted pass not getting one instruction (arm64 `diskserver`
+    /// with `talaria.netirq=1`: one boot in three never answered). The two registers are
+    /// independent of the queues, so they are written directly.
+    pub fn ack_intr(&self) {
+        if let Some((status, ack)) = self.intr {
+            // SAFETY: the registers of the card's own window, mapped as device memory for the
+            // whole life of the kernel; a read of the status and a write of the same bits back.
+            unsafe {
+                let v = core::ptr::read_volatile(status as *const u32);
+                if v != 0 { core::ptr::write_volatile(ack as *mut u32, v); }
+            }
+            return;
+        }
+        if let Some(mut s) = self.sh.try_take() { s.q.ack_intr(); }
+    }
     pub fn irq_vector(&self) -> Option<u8> { self.sh.try_take().and_then(|mut s| s.q.irq_vector()) }
     /// §7.5: the address and the value of the receive ring's word for sleeping on a monitor.
     pub fn idle_watch(&self) -> Option<(*const u32, u32)> { self.sh.try_take().and_then(|s| s.q.idle_watch()) }

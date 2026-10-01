@@ -80,6 +80,7 @@ impl Line { pub fn new() -> Self { Line } }
 impl Default for Line { fn default() -> Self { Self::new() } }
 impl fmt::Write for Line {
     fn write_str(&mut self, s: &str) -> fmt::Result {
+        if capture_here() { capture_put(s.as_bytes()); return Ok(()); }
         for &b in s.as_bytes() {
             if b == b'\n' { write_byte(b'\r'); }
             write_byte(b);
@@ -125,16 +126,95 @@ pub unsafe fn inb(_port: u16) -> u8 { 0 }
 /// # Safety
 /// As `inb`.
 pub unsafe fn outb(_port: u16, _v: u8) {}
-/// The console capture (`talaria.stat=` blocks flushed by a time budget) is not ported yet:
-/// a capture never begins, so `obs` prints directly, as it does when the buffer is busy.
+// ── THE CAPTURE OF THE OUTPUT INTO A BUFFER (for large diagnostics blocks) ──
+//
+// The same contract as x86's `serial::capture_*` (the reasons are written there): a block of
+// `talaria.stat=` or a `netprof` summary is ASSEMBLED in memory by the core that takes it and
+// goes into the UART in portions bounded by time. While this was a stub that answered "no",
+// every such block was SKIPPED on arm64 — `talaria.stat=` printed nothing at all, and the
+// gates that judge by its counters had nothing to read.
+const CAP_N: usize = 48 * 1024;
+static mut CAP_BUF: [u8; CAP_N] = [0; CAP_N];
+static CAP_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static CAP_OUT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// The core whose output currently goes into the buffer (-1 — there is no capture).
+static CAP_CPU: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
 pub static CAP_LOST: _CapWord = _CapWord::new(0);
 pub static CAP_BYTES: _CapWord = _CapWord::new(0);
 pub static CAP_TSC: _CapWord = _CapWord::new(0);
 pub static CAP_WORST_TSC: _CapWord = _CapWord::new(0);
 pub static CAP_WORST_N: _CapWord = _CapWord::new(0);
-pub fn capture_begin() -> bool { false }
-pub fn capture_end() {}
-pub fn capture_pending() -> bool { false }
-pub fn capture_drain_blocking() {}
-pub fn capture_left() -> usize { 0 }
-pub fn capture_flush(_budget_ns: u64, _max_bytes: usize) -> usize { 0 }
+
+/// Does THIS core's output go into the buffer now? The core is named by MPIDR
+/// (`cpu::cpu_index`), not through the per-CPU block: a line printed from a trap with a
+/// broken `TPIDR_EL1` must still find its way out.
+#[inline]
+fn capture_here() -> bool {
+    let c = CAP_CPU.load(Ordering::Relaxed);
+    c >= 0 && c == super::cpu::cpu_index() as i32
+}
+fn capture_put(s: &[u8]) {
+    let mut n = CAP_LEN.load(Ordering::Relaxed);
+    for &b in s {
+        if n + 2 > CAP_N { CAP_LOST.fetch_add(1, Ordering::Relaxed); continue; }
+        // SAFETY: only the capturing core writes the buffer, below CAP_N; the pourers read below CAP_LEN.
+        unsafe {
+            if b == b'\n' { CAP_BUF[n] = b'\r'; n += 1; }
+            CAP_BUF[n] = b;
+        }
+        n += 1;
+    }
+    CAP_LEN.store(n, Ordering::Relaxed);
+}
+/// Begin capturing THIS core's output. False: the previous block has not been poured out
+/// yet, or a capture is already going on — the new block is skipped by the caller.
+pub fn capture_begin() -> bool {
+    if CAP_OUT.load(Ordering::Relaxed) < CAP_LEN.load(Ordering::Relaxed) { return false; }
+    let me = super::cpu::cpu_index() as i32;
+    if CAP_CPU.compare_exchange(-1, me, Ordering::SeqCst, Ordering::SeqCst).is_err() { return false; }
+    CAP_LEN.store(0, Ordering::SeqCst);
+    CAP_OUT.store(0, Ordering::SeqCst);
+    true
+}
+pub fn capture_end() { CAP_CPU.store(-1, Ordering::SeqCst); }
+pub fn capture_pending() -> bool { CAP_OUT.load(Ordering::Relaxed) < CAP_LEN.load(Ordering::Relaxed) }
+pub fn capture_left() -> usize { CAP_LEN.load(Ordering::Relaxed).saturating_sub(CAP_OUT.load(Ordering::Relaxed)) }
+/// Pour out the rest of the block as a whole, waiting for the transmitter: only where there
+/// is nobody to shepherd the portions (a workload without a tick).
+pub fn capture_drain_blocking() {
+    let _g = lock();
+    let len = CAP_LEN.load(Ordering::Relaxed);
+    let mut i = CAP_OUT.load(Ordering::Relaxed);
+    while i < len { write_byte(unsafe { CAP_BUF[i] }); i += 1; }
+    CAP_OUT.store(i, Ordering::Relaxed);
+}
+/// Pour out as much as the FIFO takes RIGHT NOW, within the budget; not a single wait.
+pub fn capture_flush(budget_ns: u64, max_bytes: usize) -> usize {
+    let len = CAP_LEN.load(Ordering::Relaxed);
+    if CAP_OUT.load(Ordering::Relaxed) >= len { return 0; }
+    let hz = crate::tsc::hz();
+    let limit = if hz == 0 { u64::MAX } else { ((hz as u128 * budget_ns as u128) / 1_000_000_000u128) as u64 };
+    let t0 = crate::tsc::rdtsc();
+    if LOCK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() { return 0; }
+    // The position is read UNDER the lock: two cores pour, and a position taken before it
+    // sent every tenth character twice on x86 (session 32).
+    let mut i = CAP_OUT.load(Ordering::Relaxed);
+    if i >= len { LOCK.store(false, Ordering::Release); return 0; }
+    let start = i;
+    while i < len && i - start < max_bytes {
+        if unsafe { r(FR) } & FR_TXFF != 0 { break; }       // the FIFO is full — until the next time
+        unsafe { w(DR, CAP_BUF[i] as u32); }
+        i += 1;
+        if hz != 0 && crate::tsc::rdtsc().wrapping_sub(t0) >= limit { break; }
+    }
+    CAP_OUT.store(i, Ordering::Relaxed);
+    LOCK.store(false, Ordering::Release);
+    let d = crate::tsc::rdtsc().wrapping_sub(t0);
+    CAP_BYTES.fetch_add((i - start) as u64, Ordering::Relaxed);
+    CAP_TSC.fetch_add(d, Ordering::Relaxed);
+    if d > CAP_WORST_TSC.load(Ordering::Relaxed) {
+        CAP_WORST_TSC.store(d, Ordering::Relaxed);
+        CAP_WORST_N.store((i - start) as u64, Ordering::Relaxed);
+    }
+    i - start
+}

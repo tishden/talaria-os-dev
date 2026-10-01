@@ -31,6 +31,8 @@ pub struct VirtioNic {
     tx_addr: [u64; QS],
     tx_free: [bool; MAXTX],
     notify: bool,
+    /// The window's address (`intr_regs`).
+    mmio: usize,
 }
 
 #[inline]
@@ -100,6 +102,11 @@ impl NetDev for VirtioNic {
 
     fn ack_intr(&mut self) { self.dev.ack_interrupt(); }
 
+    /// InterruptStatus (0x60) and InterruptACK (0x64) of the window: the two registers have
+    /// nothing to do with the queues, so the line's handler may clear the status while the
+    /// interrupted code is in the middle of a queue operation.
+    fn intr_regs(&self) -> Option<(usize, usize)> { Some((self.mmio + 0x60, self.mmio + 0x64)) }
+
     /// The word (flags,idx) of the receive used ring: the device writes there when completing
     /// a buffer, and that DMA write wakes an MWAIT without an interrupt and without a vmexit.
     fn idle_watch(&self) -> Option<(*const u32, u32)> { Some(self.dev.rx_used_watch()) }
@@ -163,7 +170,7 @@ fn probe(_: Option<&PciDev>, inst: usize) -> Option<&'static mut dyn NetDev> {
         dev,
         rx_slot: [0; QS], rx_addr: [0; QS],
         tx_slot: [0; QS], tx_len: [0; QS], tx_addr: [0; QS],
-        tx_free: [true; MAXTX], notify: false,
+        tx_free: [true; MAXTX], notify: false, mmio: a,
     };
     unsafe {
         let p = core::ptr::addr_of_mut!(SLOT[inst]);

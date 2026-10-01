@@ -80,6 +80,14 @@ pub trait NetDev {
     /// Clear the interrupt status at the device (the line's handler). Until it is cleared,
     /// virtio-mmio keeps the line raised, and the handler would be called endlessly.
     fn ack_intr(&mut self) {}
+    /// The same clearing WITHOUT a borrow of the driver: the addresses of the device's
+    /// interrupt-status register (read it) and of its acknowledge register (write what was
+    /// read). The line's handler interrupts whoever is inside the driver on this core, so it
+    /// cannot wait for the driver and must not skip the clearing either: a LEVEL line (the
+    /// GIC's SPI of a virtio-mmio window) stays raised and the handler is entered again
+    /// before the interrupted code runs one instruction. None — the driver's interrupt needs
+    /// no clearing (MSI-X) or cannot be cleared this way.
+    fn intr_regs(&self) -> Option<(usize, usize)> { None }
     /// The card's line by an MSI/MSI-X message (the ENA): ALLOW the device's interrupts
     /// and return the IDT vector they arrive on — the line's handler is put on it
     /// by `netsys::netirq_setup`. None — this card's line goes only through the

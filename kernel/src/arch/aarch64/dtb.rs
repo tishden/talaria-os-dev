@@ -65,6 +65,8 @@ pub struct Summary {
     pub bootargs: Option<Span>,
     /// The PL011 named by `/chosen/stdout-path`, else the first PL011 in the tree.
     pub uart: Option<Range>,
+    /// The PL031 real-time clock (`arm,pl031`): the wall clock's base at boot.
+    pub rtc: Option<Range>,
     /// The GIC v3 distributor and the redistributor region (`reg` of `arm,gic-v3`).
     pub gicd: Option<Range>,
     pub gicr: Option<Range>,
@@ -90,7 +92,7 @@ pub struct Summary {
 impl Default for Summary {
     fn default() -> Self {
         Summary {
-            mem: [Range::default(); MAX_MEM], nmem: 0, mem_seen: 0, bootargs: None, uart: None,
+            mem: [Range::default(); MAX_MEM], nmem: 0, mem_seen: 0, bootargs: None, uart: None, rtc: None,
             gicd: None, gicr: None, its: None, timer_ppi: [0; 4], psci: None,
             cpus: [0; MAX_CPU], ncpu: 0, cpu_seen: 0, virtio: [(0, 0); MAX_VIRTIO], nvirtio: 0, virtio_seen: 0,
             ecam: None,
@@ -294,6 +296,9 @@ fn classify(d: &[u8], node: &Node, parent: &Node, out: &mut Summary,
             }
         }
     }
+    if compat_has(d, node.compatible, b"arm,pl031") && out.rtc.is_none() {
+        out.rtc = reg0(0);
+    }
     if compat_has(d, node.compatible, b"arm,gic-v3") {
         out.gicd = reg0(0);
         out.gicr = reg0(1);
@@ -353,6 +358,7 @@ mod tests {
         assert_eq!(s.nmem, 1);
         assert_eq!(s.mem[0], Range { base: 0x4000_0000, size: 0x4000_0000 });
         assert_eq!(s.uart, Some(Range { base: 0x0900_0000, size: 0x1000 }));
+        assert_eq!(s.rtc, Some(Range { base: 0x0901_0000, size: 0x1000 }));
         assert_eq!(s.gicd, Some(Range { base: 0x0800_0000, size: 0x1_0000 }));
         assert_eq!(s.gicr, Some(Range { base: 0x080a_0000, size: 0xf6_0000 }));
         assert_eq!(s.its, Some(Range { base: 0x0808_0000, size: 0x2_0000 }));
