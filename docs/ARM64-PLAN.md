@@ -8,6 +8,19 @@ the kernel leans on, what replaces it, in which order it is built, and by which
 gate each step is judged. The numbers here are estimates and are marked as such;
 the measurements come later and go to `docs/MEASUREMENTS.md`.
 
+Status (2026-10-01, branch `arm64-port`): **phase 4 is done on QEMU `virt` and the product
+boot path of phase 6 runs under `edk2`.** The network over virtio-mmio (the card's line
+through the GIC, the whole network block of the regression), PCIe through the tree's ECAM,
+NVMe, MSI-X through the ITS (`talaria.test=its`: an LPI on the core the route names), the
+ext2/jbd2 block on virtio-blk AND on NVMe with the power cut at the commit, the C++ set,
+the kernel's own crash dump — and `edk2` → the arm64 UEFI stub → the kernel with the machine
+described by ACPI alone (the MADT's GIC entries, the GTDT, the SPCR, PSCI from the FADT, the
+ECAM from the MCFG, the BARs the firmware assigned). `test-aarch64.sh` is **229/0** under
+TCG (it was 119); x86 stayed at `test.sh` 486/0 + 22/0, `kernel-unit` 289/0. Four defects of
+the SHARED code came out when the gate ran on a loaded host (§10.5) — the classes are
+`docs/ENGINEERING-NOTES.md` §6.1, items 22-25. **The next session is §10.6.** The
+paragraphs below are the statuses of the days before, kept for what they list.
+
 Status (2026-09-30 night, branch `arm64-port`): **phase 3's set runs on aarch64 — the
 whole ring-3 regression that has an arm64 binary (42 of the 45 C sources, one source per
 test for both machines), the disk-borne modes from ext2, fork/execve/wait, the core dump a
@@ -1009,7 +1022,7 @@ vDSO into the kernel tables, so the slot is empty there. The vDSO now goes into 
 tables only on the probes' branch. The gate asserts the disk (`fs`, `procdisk`) when the
 binaries are present.
 
-### 10.3. The next session
+### 10.3. The next session (as it was planned on 2026-09-30; executed on 2026-10-01 — §10.5)
 
 Phase 3 is closed but for the C++ set; what comes next is phase 4 (§5) — the devices the
 regression's other half needs — with two loose ends of phase 3 taken on the way. In
@@ -1163,14 +1176,160 @@ dev box's mirrors refused it three times — the hand build of musl 1.2.5 with
 `aarch64-linux-gnu-gcc` stands in), runs the gate, keeps the consoles of `mbench`,
 `futexlat`, `smp2`, `smp4`, then the soak and the gate in a loop.
 
-**Where to start reading:** this section (§10.1–10.4) is the execution log; `kernel/census-aarch64.sh`
+**Where to start reading:** this section (§10.1–10.6) is the execution log; `kernel/census-aarch64.sh`
 is the progress meter (0 now — it turns useful again only if a new x86-gated module appears);
-`kernel/test-aarch64.sh` is the gate (119 checks; the ring-3 part needs
-`kernel/user/aarch64`, the ext2 part `mkfs.ext2` on the host). The pitfalls that cost time are in
+`kernel/test-aarch64.sh` is the gate (229 checks; the ring-3 part needs
+`kernel/user/aarch64`, the ext2 part `mkfs.ext2` on the host, the network part the stand image
+with `/dev/net/tun`, the UEFI part a fresh `kernel/uefi-stub/build.sh aarch64`). The pitfalls that cost time are in
 `docs/ENGINEERING-NOTES.md` and the session memory: do NOT rebuild x86 while `test.sh` runs
 (two runs collide over the shared disk images — a whole invalid regression), the arm64 link
 address is `0x5000_0000` (RAM on `virt`), and the cross musl is `talaria-musl-aarch64` (or
 built by hand on the dev box, `make -C kernel/user aarch64 MUSLA64=`).
+
+### 10.5. Where it stands (2026-10-01): the devices, the firmware path, what a loaded host found
+
+**§10.3's four steps are done, and the first half of phase 6 with them.** The gate went
+119 → 154 → 203 → 217 → 229, each step its own commit; x86 stayed at `test.sh` 486/0 +
+22/0 at every one of them, clippy clean on both targets in both configurations.
+
+**Step 1, the network (119 → 154).** The NIC came up through the shared driver table on
+the first boot — `virtnet` already asked `arch::virtio_mmio_slot` — and the datapath in
+polling mode worked as it was. What the regression's network block needed on top:
+
+* the card's line: the tree NAMES the SPI of every virtio-mmio window (`virt`: 16..47), so
+  `arch::virtio_mmio_gsi` answers from the tree on arm64 (x86 keeps its "anchored at the
+  top of the GSI space" derivation) and `ioapic::route` installs the handler under the
+  INTID before it enables the line;
+* **the acknowledge must not ask for a lock** (ENGINEERING-NOTES §6.1 item 22): a level
+  SPI whose status the handler could not clear — the interrupted pass held the queue — was
+  re-entered 600 thousand times a second; `diskserver` with `talaria.netirq=1` never
+  answered one boot in four. The counters read through the QEMU monitor (`xp` on the
+  kernel's statics and on the device's status register) named it in one run;
+* the console capture on the PL011: `serial::capture_*` was a stub that answered "no", so
+  every `talaria.stat=` block and every `netprof` summary was SKIPPED on arm64 — the gates
+  that judge by those counters had nothing to read;
+* the wall clock's base: the PL031 the tree names (`arch::tsc::rtc_read`); there is no
+  kvmclock here and `CLOCK_REALTIME` said 2023.
+
+The block itself is `kernel/test-aarch64-net.sh`, run INSIDE the stand image with a tap
+(the guest and its clients share it): `userver` in polling mode and with the line and the
+parking, `diskserver` over TCP, `mtsrv` with `netsolo` (`ppoll` on arm64), `forksrv` from
+ext2 (the PostgreSQL path: `mode=proc` with a NIC), `netshoot` on four cores, the outgoing
+set (DNS, connect, ECONNREFUSED, close with a dead and a slow peer, the wall clock). Under
+TCG the counts of the parking gates are judged for their outcome, under KVM for the count.
+
+**Step 2, PCIe, NVMe, the ITS (154 → 203).** The config space is the ECAM window of the
+tree's `pci-host-ecam-generic` (above 4 GB on `virt`, mapped on demand exactly as the
+MCFG's is on x86); no firmware ran before the kernel under `-kernel`, so the BARs nobody
+assigned come from the host bridge's 32-bit range of the same node (`pci::set_mmio_window`
+— x86's `0xC000_0000` is RAM here). NVMe then came up on the first boot. The ITS is
+`arch/aarch64/its.rs` — the LPI configuration and pending tables, the device and
+collection tables, the command queue; a collection per core mapped on its first vector, a
+device on its first vector (`MAPD` + a translation table sized for its count),
+`MAPTI`/`INV` per vector, `MOVI` for a re-route — and `arch::msi` on BOTH machines says
+what a device's MSI/MSI-X entry holds: the LAPIC's address and the IDT vector on x86 (bit
+for bit what `pci.rs` wrote before), the translation register and the event number on
+arm64. `talaria.test=its`: an NVMe admin completion arrives as an LPI on core 0 and
+reaches the vector's handler; after a re-route it arrives on core 1 and not once on core 0
+(an LPI is one pending bit: 8 completions were 6 interrupts). One defect of the port's
+own on the way: a `GITS_BASER`'s bits 9:8 are the PAGE SIZE, and the first version put the
+redistributor-style cacheability bits there. The gate got the ext2/jbd2 block on
+virtio-blk AND on NVMe — `ext2`, `sigtest` from the volume, `ext2v` across reboots,
+`fsbench` with a queue depth, `journal1/2` in both modes with the machine KILLED at the
+commit and `e2fsck` on the host — plus symlinks, `nojournal`, a transaction larger than
+the journal, `htree` with 3000 names, `its`, `msix`.
+
+**Step 3, the two loose ends of phase 3 (203 → 217).** The C++ set builds with the
+`aarch64-linux-musl-cross` toolchain (its libstdc++ is built against musl; `make -C
+kernel/user aarch64` builds the four when that g++ is on the PATH) and passes. A fatal
+exception of the kernel prints, after the registers, what x86's `CRASH DUMP` block does —
+the task and its last syscall, the abort decoded, the stack's words (only where the sp is
+a mapped, aligned address), the x29 chain, the flight recorder — and writes the kernel's
+core dump: the host's gdb opens it at `core_fault_l1` and unwinds to `_start`. Since this
+session it also prints whose kernel stack the core is on, which task every core believes
+it runs, and the last decisions of every core's scheduler — the three lines that named
+each of the four defects below from ONE failing console. Not ported, on purpose:
+`launcher`/`fastapp`/`fastflood` (x86 machine code by design) and libtsync's fibers.
+
+**Step 4, the audit's device half.** `arch::barrier::dma_wmb` before the NVMe and ENA
+doorbells (`dmb oshst`; the same `mfence` as before on x86) and `dma_rmb` behind an NVMe
+completion (`dmb oshld`; a compiler fence on x86) — §4.11's item, which waited for the
+drivers to come over. `NW_IN`, `IO_YIELD` and `READY_CTX` were read again: a task's own
+hints, read by a neighbour as one word — a stale read is a worse decision, not a crash;
+they stay `Relaxed` and the soak judges them.
+
+**The firmware path (217 → 229) — phase 6's first half, under `edk2`.** `kernel/uefi-stub`
+is one crate for two machines now (`efi.rs` the firmware's interface, `x86_64.rs`,
+`aarch64.rs`). The arm64 half: the command line from `LoadOptions`, the RSDP (and the
+device tree, when a firmware publishes one) from the configuration tables, the firmware's
+clock (`GetTime` — a machine described by ACPI has no RTC the kernel could read), a bounce
+copy of the kernel's one PT_LOAD, `ExitBootServices`, then — with the caches cleaned over
+everything the next step reads or writes — the MMU OFF at the level the firmware left,
+the copy to the segment's physical address, and the Image entered with `x0` = the stub's
+boot block (`kmain::BootBlock`). A range that is not RAM, or that holds ACPI tables, is
+REFUSED with a message. On the kernel's side `arch/aarch64/acpiboot.rs` reads what
+`dtb.rs` reads from a tree — the MADT's GICC/GICD/GICR/ITS entries, the GTDT's timer
+interrupts, the SPCR's console, the FADT's PSCI flags — into the same `dtb::Summary`
+(four host tests on tables built in the test), and the memory map is the firmware's (11
+entries under `edk2`, the PVH format `mem::init` reads). `edk2` under QEMU publishes NO
+device tree next to its ACPI tables, so the gate's UEFI block is the EC2 shape: four cores
+through PSCI as the FADT names it, the ECAM from the MCFG, an NVMe whose 64-bit BAR the
+FIRMWARE assigned above 4 GB (`0x80_0000_4000`), `ext2` on it, the ITS the MADT names. It
+worked on the first boot. What it does not have yet: a 16550 console (a Nitro guest's
+SPCR names one — the kernel says so and prints nothing rather than guess an address), and
+a load address other than `0x4008_0000`.
+
+**What a loaded host found (the SHARED code; ENGINEERING-NOTES §6.1 items 23-25).** The
+gate failed once in `forkap` — a trap at pc `0x10` — while eight other QEMUs ran on the
+dev box's eight cores. Eight copies of that one boot in parallel reproduced it in a
+hundred boots, and three different defects came out one after another, each from one
+console:
+
+* `sched::stack_wait` gave the wait for a released kernel stack up after 10 ms and entered
+  anyway: a vCPU the host had taken away for longer than that was still on the stack. A
+  wait is now given up only when NO core says it is leaving that stack
+  (`percpu::off_stack`);
+* a thief stole the boot core's CURRENT task in the window where the boot core's switch
+  had announced `CURRENT = next` and then rolled back: `sched::bsp_on` asks the core's
+  committed word too;
+* a kernel stack's guard page stayed a hole in the address space that was active when the
+  stack was allocated, after the stack was freed: `sched::free_kstack` takes it back in
+  every live space.
+
+Before: a failure in 60-160 boots of `forkap` under that load. After the three: **0 of 480.**
+None of them is arm64's; a quiet KVM host never lost these races (the stand's soak was
+0/450 the day before), a shared EC2 host with its 8 ms steals can.
+
+**Also the stand's, not the kernel's:** the dev box's `talaria-qemu-aarch64` image was
+older than its Dockerfile (no `ip`, no `socat`; the Fedora mirrors refused a rebuild, the
+two tools were copied in from the x86 image of the same Fedora); a `socat` client closes
+0.5 s after its input ends, and under TCG a forking server answers at 0.8 s.
+
+### 10.6. The next session
+
+Phase 4 is closed under TCG; what is next is the stand and EC2 itself. In order:
+
+1. **The KVM stand on the new gate** (`infra/aws/kvm-stand-aarch64.sh` — it builds the
+   stub and loads `tun`/`vhost_net` now): `TAL_KVM=1 test-aarch64.sh` (the timing lines
+   of the network block and of UEFI's `smp4` are judged only there), the network numbers
+   (`kernel/netnum-aarch64.sh`: `udp_ping` against `userver` in three configurations,
+   `tcp_bench` against `diskserver`), the soak with the barriers in, the gate in a loop.
+   The parallel-load loop of §10.5 belongs on the stand too: `forkap` × N copies with
+   more vCPUs than cores is the cheapest race detector the port has.
+2. **EC2's own boot** (phase 6 proper): the 16550 console the SPCR of a Nitro guest names
+   (`uart.rs` is a PL011 only), `mk-ami.sh --architecture arm64` with the arm64 stub as
+   `BOOTAA64.EFI`, the first `c7g.large` to the mode prompt, then ENA on Graviton (the
+   driver is shared; its doorbells already have `dma_wmb`, its LLQ push needs the
+   Normal-NC mapping and `dsb st`), the PHC as the wall clock's reference (there is no
+   kvmclock; the base comes from the firmware now). The load address: the kernel is
+   linked at `0x4008_0000`, and the stub refuses a machine whose RAM is elsewhere — read
+   what a Graviton's map says before deciding whether that is enough.
+3. **The ordering audit proper** (phase 5): §4.13 file by file with the soak as the
+   meter, the hot `SeqCst` downgrades as measured x86 commits.
+4. **What phase 4 left open:** a virtio-pci transport (the tree has no driver for it on
+   either machine; under UEFI the gate has no NIC), bridges on arm64 without firmware
+   (bus numbers are nobody's there), the guard page of a FORKED task's kernel stack (it
+   is installed in the parent's space — §6.1 item 25 fixed the leak, not the coverage).
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),

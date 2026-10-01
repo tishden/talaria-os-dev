@@ -92,7 +92,8 @@ port's progress meter.
 ```sh
 kernel/build-aarch64.sh     # -> target/aarch64-talaria/release/talaria (ELF) and talaria.img (the raw Image)
 kernel/runq-aarch64.sh 15   # QEMU virt, TCG on an x86 host (docker image talaria-qemu-aarch64), 15 s of console
-kernel/test-aarch64.sh      # the bring-up's gate: five 4-core boots (the default sequence + four probes), 36 assertions
+kernel/uefi-stub/build.sh aarch64   # the arm64 UEFI stub (the kernel inside; target aarch64-unknown-uefi) — after every kernel build
+kernel/test-aarch64.sh      # the arm64 gate: 229 checks under TCG — the bring-up, ring 3, the disks, the network (a tap in the stand image), PCIe/NVMe/ITS, UEFI
 ```
 
 The arm64 vDSO (`kernel/user/vdso/vdso-aarch64.S`: `__kernel_clock_gettime`,
@@ -121,6 +122,15 @@ a warning: a degraded kernel, not a broken build.
      (`int 15h E820`), assemble a multiboot2 and go into the same `mb2_start`. There is no GRUB
      in that chain at all. The RSDP tags (14/15) tboot does NOT assemble — the kernel looks for the
      RSDP itself (see below), and that turned out to be decisive on bare metal.
+   - **arm64** (the `arm64-port` branch, `docs/ARM64-PLAN.md` §4.2) has two of its own, and
+     below `arch/aarch64/kmain.rs` they are the same `hvm_start_info` again: the **Linux
+     `Image` header** (`qemu-system-aarch64 -kernel`: `x0` = the device tree, read by
+     `dtb.rs`), and **UEFI** (`edk2`, EC2 Graviton): the arm64 half of `kernel/uefi-stub`
+     leaves the firmware, turns the MMU off, copies the kernel's segment to its physical
+     address and enters the same `Image` entry with `x0` = a boot block (the RSDP, the
+     firmware's memory map and clock, the command line); the machine is then read from
+     ACPI by `acpiboot.rs` — the MADT's GIC entries, the GTDT, the SPCR, the FADT's PSCI
+     flags — into the same summary the tree gives.
    The images: `tools/mk-ami.sh` (UEFI/an ESP), `tools/mk-bios.sh` (an MBR+GRUB; `HYBRID=1`
    is one disk for both paths), `tools/mk-tboot.sh` (our own bootloader; `SUITE=` is
    a set of modes on one image, §11.4).

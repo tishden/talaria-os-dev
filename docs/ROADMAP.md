@@ -271,19 +271,23 @@ reasoning does not have to be repeated.
 7. **The arm64 port** (EC2 Graviton, QEMU `virt`). Planned in full in
    `docs/ARM64-PLAN.md`: the inventory of every x86 mechanism the kernel leans
    on and its replacement, nine phases with named gates, the risks ranked.
-   Phases 0-3 are done on the `arm64-port` branch (§10 of the plan): the kernel
-   boots on QEMU `virt` and on a `c7g.metal` under KVM, and the ring-3 regression
-   that has an arm64 binary (42 of the 45 C sources, one source per test for both
-   machines) passes — the process model, the signals, the core dumps, the
-   supervisor; `kernel/test-aarch64.sh` is 119 checks. What is left is the other
-   two of the three genuinely new pieces: the GICv3 ITS (MSI-X — phase 4, with
-   virtio-net, PCIe and NVMe) and the weak memory model (an audit of 1 444
-   `Relaxed` and 367 `volatile` sites that TSO made correct — phase 5; the soak
-   that will judge it runs already, `kernel/soak-aarch64.sh`); the arm64 ABI's
-   other layouts are behind `arch::abi`. Then EC2's own boot path (phase 6) and
-   the six workloads (phase 7). The stand is `infra/aws/kvm-stand-aarch64.sh`:
-   QEMU under TCG on the x86 box runs the whole gate but can show neither the
-   timing gates nor a single ordering bug.
+   Phases 0-4 are done on the `arm64-port` branch (§10 of the plan): the kernel
+   boots on QEMU `virt` and on a `c7g.metal` under KVM, and the regression that
+   has an arm64 form passes — the ring-3 set (one source per test for both
+   machines, the C++ set included), the process model, the signals, the core
+   dumps of a workload and of the kernel, the supervisor, the network over
+   virtio-net, PCIe through ECAM, NVMe, MSI-X through the GICv3 ITS, the
+   ext2/jbd2 block on both disks; `kernel/test-aarch64.sh` is 229 checks. The
+   product boot path runs under `edk2`: the arm64 half of `kernel/uefi-stub`
+   and the machine described by ACPI alone. What is left: EC2's own boot
+   (phase 6 proper — a 16550 console, the AMI, ENA on Graviton), the weak
+   memory model (an audit of 1 444 `Relaxed` and 367 `volatile` sites that TSO
+   made correct — phase 5; the device barriers are in, the soak that judges the
+   rest is `kernel/soak-aarch64.sh`), and the six workloads (phase 7). The stand
+   is `infra/aws/kvm-stand-aarch64.sh`: QEMU under TCG on the x86 box runs the
+   whole gate but can show neither the timing gates nor a single ordering bug —
+   though a LOADED TCG host found four races of the shared code that a quiet KVM
+   one never lost (`docs/ENGINEERING-NOTES.md` §6.1).
 
 ---
 

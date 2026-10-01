@@ -483,8 +483,9 @@ each recurs.
 
 ### 6.1. What a second architecture found in the shared code
 
-The arm64 port (`docs/ARM64-PLAN.md` §10.4) ran the same ring-3 set on a second
-machine and found four defects in code x86 had been running for a year. They are
+The arm64 port (`docs/ARM64-PLAN.md` §10.4, §10.5) ran the same ring-3 set on a second
+machine and found four defects in code x86 had been running for a year — and then,
+when its gate ran on a LOADED host, four more (22-25 below). They are
 one class: **a race or an assumption that the first machine's timing or layout
 never exposed.** Each surfaced under TCG, where every window is a hundred times
 wider, and each is real under KVM.
@@ -527,6 +528,67 @@ wider, and each is real under KVM.
     waited a second for sisters that never left their cores, and a dedicated core
     (no tick) could not be kicked at all. An interface with a magic value needs
     the value named on both sides (`RESCHED_SGI`).
+22. **"An acknowledgement that asked for a lock."** The card's line handler cleared
+    the device's interrupt status through a `try_take` of the shared queue. When it
+    had interrupted a pass that HELD the queue, the status stayed set. An edge-routed
+    line does not care; the GIC's SPI of a virtio-mmio window is a level, it stayed
+    raised, and the handler was re-entered 600 thousand times a second while the
+    interrupted pass — the one that would have released the queue — got not one
+    instruction (`diskserver` with `talaria.netirq=1` on arm64: one boot in four
+    never answered; the tell was `NIC_IRQS` racing and the device's status register
+    reading 1 from the QEMU monitor). What silences a line must not depend on
+    anything the interrupted code can hold: `NetDev::intr_regs` gives the two
+    registers, the handler writes them directly.
+23. **"Ten milliseconds is not a death certificate."** `sched::stack_wait` — a core
+    that takes a task waits until the core that released it has left its kernel
+    stack — gave the wait up after 10 ms ("the releasing core died") and entered
+    anyway. A releasing core that is merely SLOW (a vCPU its host took away, an
+    emulator on a loaded machine; the 8 ms steals of a shared EC2 host are the same
+    thing) was still on the stack: two cores on one kernel stack, a return into
+    address 0x10, and a crash dump whose frame was overwritten by the other core's
+    interrupt WHILE IT WAS BEING PRINTED (two different pcs for one exception — the
+    tell). A timeout may detect a leak only when it can tell a leak from a delay:
+    the releasing core names the stack it is leaving (`percpu::off_stack`), and the
+    wait ends early only when no core names it.
+24. **"A transaction's middle read as the truth."** The boot core's switch announces
+    `CURRENT = next`, checks whether a thief took `next`, and rolls back when one
+    did. For the length of that transaction `CURRENT` names a task the core is not
+    on — and the task it IS on looked free to a second thief, which took it and
+    entered the frame the tick had just saved while the boot core returned into the
+    same frame. The crash dump showed it in one line: "core 0 runs t1, core 1 runs
+    t1". A word that is written at a commit (`percpu::cur_task`) and not at an
+    announcement is the one a third party may trust: a task is the boot core's if
+    EITHER word names it (`sched::bsp_on`).
+25. **"A hole made in one address space, a frame reused in all."** A kernel stack's
+    bottom page is a guard: not present, so that an overflow faults. `paging::guard`
+    made the hole in the space that was ACTIVE when the stack was allocated (a
+    parent's, during its `fork`) — and a stack freed later left the hole behind in
+    that space. The frame went to another kernel stack, and the scheduler, running
+    under the space with the hole, faulted reading the frame of the task it was
+    about to enter. `sched::free_kstack` takes the guard back in every live space
+    (`paging::unguard_in`). The general rule is §6's "mine in the identity window":
+    whatever punches the identity map of ONE space must be undone in that space,
+    not in whichever is current when the memory comes back.
+
+All four of 22-25 are races of the SHARED code that a quiet KVM host never lost.
+They surfaced when the arm64 gate ran next to eight other QEMUs on eight host
+cores (a failure in 60-160 boots of `forkap`), and what made them diagnosable was
+the crash dump itself: once it printed whose kernel stack the core was on, which
+task every core believed it ran, and the last decisions of every core's scheduler
+(`arch/aarch64/trap.rs`), each took one failing console to name. **Run a gate
+under load on purpose** (`N` copies of one boot in parallel, more vCPUs than host
+cores): a host that steals a vCPU for 10 ms is the cheapest race detector there is.
+
+Two that were the STAND's, not the kernel's, and cost an hour each:
+
+* **The gate's image is part of the gate.** The dev box's `talaria-qemu-aarch64` was
+  older than its Dockerfile — no `ip`, no `socat` — so the tap was never configured
+  and "the NIC does not answer" was the container. Check the tools the block needs
+  before the block (`test-aarch64.sh` does, and says SKIPPED with the reason).
+* **A client that gives up before a slow machine answers.** `socat` closes 0.5 s
+  after its input ends; under TCG the answer of a forking server came at 0.8 s and
+  the "kernel lost the connection" was the client's reset. The packet trace on the
+  tap (a ten-line `AF_PACKET` reader) showed the guest answering every time.
 
 ---
 
