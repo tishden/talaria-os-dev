@@ -299,7 +299,7 @@ impl Ena {
         self.mmio_seq = self.mmio_seq.wrapping_add(1);
         let seq = self.mmio_seq;
         unsafe { core::ptr::write_volatile(self.mmio_resp as *mut u32, (seq as u32).wrapping_add(0xDEAD) << 16); }
-        fence(Ordering::SeqCst);
+        crate::arch::barrier::dma_wmb();
         w32(self.regs + REG_MMIO_REG_READ, ((off as u32) << 16) | seq as u32);
         for _ in 0..20_000 {
             let hdr = unsafe { core::ptr::read_volatile(self.mmio_resp as *const u32) };
@@ -332,7 +332,7 @@ impl Ena {
         cmd[0] = (cmd[0] & 0xFFFF_0000) | (cid as u32) | ((self.aq_phase_flag as u32) << 24);
         let slot = self.aq + (self.aq_tail as u64) * AQ_ENTRY as u64;
         unsafe { core::ptr::copy_nonoverlapping(cmd.as_ptr() as *const u8, slot as *mut u8, AQ_ENTRY); }
-        fence(Ordering::SeqCst);
+        crate::arch::barrier::dma_wmb();
         self.aq_tail += 1;
         if self.aq_tail == AQ_DEPTH { self.aq_tail = 0; self.aq_phase_flag = !self.aq_phase_flag; }
         w32(self.regs + REG_AQ_DB, self.aq_tail as u32);
@@ -468,7 +468,7 @@ impl Ena {
         if !(self.tx_db_dirty || self.rx_db_dirty || self.rx_cq_dirty || self.tx_cq_dirty) { return false; }
         let kicked = self.tx_db_dirty;
         let had_rx = self.rx_cq_dirty;   // §4.6: was the receive path handled in this pass
-        fence(Ordering::SeqCst);
+        crate::arch::barrier::dma_wmb();
         if self.tx_db_dirty { w32(self.regs + self.tx_db, self.tx_tail as u32); self.tx_db_dirty = false; self.db_writes += 1;
             self.llq_burst_left = self.llq_burst; }
         if self.rx_db_dirty { w32(self.regs + self.rx_db, self.rx_tail as u32); self.rx_db_dirty = false; self.db_writes += 1; }
@@ -514,7 +514,7 @@ impl Ena {
     /// A call into the transmit tail. It also recharges the LLQ burst's budget
     /// (ena_com_write_tx_sq_doorbell does exactly that).
     fn tx_doorbell(&mut self) {
-        fence(Ordering::SeqCst);
+        crate::arch::barrier::dma_wmb();
         w32(self.regs + self.tx_db, self.tx_tail as u32);
         self.tx_db_dirty = false; self.db_writes += 1;
         self.llq_burst_left = self.llq_burst;

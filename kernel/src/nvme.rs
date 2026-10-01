@@ -22,7 +22,6 @@
 //!   - every CID has its own page of the PRP list, living exactly until the completion.
 //! The order "my writes -> my barrier" is held by the fact that everyone waits for THEIR OWN
 //! completions, while the mutual exclusion of the ring is held by a short lock in `fs.rs`.
-use core::sync::atomic::{fence, Ordering};
 
 const QD: usize = 64;            // the depth of the queues (admin and IO)
 const SQE: usize = 64;           // bytes per SQ entry
@@ -86,7 +85,7 @@ impl Nvme {
         unsafe {
             core::ptr::copy_nonoverlapping(cmd.as_ptr() as *const u8, (sq + (tail as u64) * SQE as u64) as *mut u8, SQE);
         }
-        fence(Ordering::SeqCst);
+        crate::arch::barrier::dma_wmb();   // the command is in the queue's memory before the doorbell says so
         let new_tail = (tail + 1) % QD as u16;
         self.w32(self.doorbell_sq(qid), new_tail as u32);
         // wait for the completion (one command at a time — it will come first)
@@ -95,7 +94,7 @@ impl Nvme {
         let status = loop {
             let ce = (cq + (head as u64) * CQE as u64) as *const u32;
             let dw3 = unsafe { core::ptr::read_volatile(ce.add(3)) };
-            if ((dw3 >> 16) & 1 != 0) == phase { break (dw3 >> 17) as u16; }
+            if ((dw3 >> 16) & 1 != 0) == phase { crate::arch::barrier::dma_rmb(); break (dw3 >> 17) as u16; }
             if crate::tsc::rdtsc() - t0 > 2 * hz { return 0xFFFF; } // a timeout
             core::hint::spin_loop();
         };
@@ -186,7 +185,7 @@ impl Nvme {
         Some(cid)
     }
     /// A doorbell into the SQ doorbell — one MMIO write for the whole batch.
-    pub fn kick(&mut self) { fence(Ordering::SeqCst); self.w32(self.doorbell_sq(1), self.io_tail as u32); }
+    pub fn kick(&mut self) { crate::arch::barrier::dma_wmb(); self.w32(self.doorbell_sq(1), self.io_tail as u32); }
 
     /// Take off ALL the ready completions (by whomever they were submitted) and lay them out
     /// by CID. It returns the number taken off.
@@ -210,7 +209,8 @@ impl Nvme {
             if self.io_head == 0 { self.io_phase = !self.io_phase; }
             n += 1;
         }
-        if n > 0 { self.w32(self.doorbell_cq(1), self.io_head as u32); }
+        // The payload of a completed read is loaded AFTER its completion entry was.
+        if n > 0 { crate::arch::barrier::dma_rmb(); self.w32(self.doorbell_cq(1), self.io_head as u32); }
         n
     }
     /// Take ONE'S OWN completion. None — it has not come yet. Some(true) — the status is 0.
