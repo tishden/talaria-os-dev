@@ -244,6 +244,16 @@ impl Nvme {
         ((self.max_xfer / 512).max(1) as u64).min(by_prp).min(u16::MAX as u64) as u16
     }
 
+    /// One admin command with no data (Get Features: the number of queues) — the admin queue's
+    /// completion always raises the device's vector 0, so this is how a gate fires an
+    /// interrupt on demand (`talaria.test=its`). True — the command completed without an error.
+    // The caller is the arm64 bring-up (a device tree, an ITS); the x86 build has none.
+    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+    pub fn admin_ping(&mut self) -> bool {
+        let mut c = [0u32; 16];
+        c[0] = 0x0A; c[10] = 0x07;
+        self.submit(&mut c) == 0
+    }
     /// A SYNCHRONOUS read BEFORE the device is published (`open_nvme_boot`): the recognition of
     /// the disk goes earlier than the ring's lock appears, and there are no other owners of the queue
     /// at that moment by construction.

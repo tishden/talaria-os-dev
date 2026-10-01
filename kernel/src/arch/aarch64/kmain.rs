@@ -133,7 +133,15 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     crate::println!("    timer ppis: secure {} phys {} virt {} hyp {}; psci {}", s.timer_ppi[0], s.timer_ppi[1], s.timer_ppi[2], s.timer_ppi[3],
         match s.psci { Some(dtb::Psci::Hvc) => "hvc", Some(dtb::Psci::Smc) => "smc", None => "none" });
     if let Some(r) = s.rtc { crate::println!("    rtc pl031 at {:#x}", r.base); super::tsc::RTC_BASE.store(r.base, Ordering::Relaxed); }
-    if let Some(e) = s.ecam { crate::println!("    pcie ecam at {:#x} (+{:#x})", e.base, e.size); }
+    if let Some(e) = s.ecam {
+        crate::println!("    pcie ecam at {:#x} (+{:#x}); the 32-bit memory window {:#x} (+{:#x})", e.base, e.size,
+            s.pci_mem32.map(|r| r.base).unwrap_or(0), s.pci_mem32.map(|r| r.size).unwrap_or(0));
+        // What the MCFG says on x86: the config window (1 MiB per bus) — and, since no firmware
+        // ran before us, the window the BARs are assigned from. Bus 0 only: nobody numbered
+        // the buses behind the bridges either.
+        crate::acpi::set_ecam(e.base, 0);
+        if let Some(w) = s.pci_mem32 { crate::pci::set_mmio_window(w.base); }
+    }
     let si = start_info_from(tree, &s);
     crate::println!("talaria: start_info at {:#x} ({} memmap entries)", si, s.nmem);
 
@@ -183,6 +191,9 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     for (i, &mpidr) in s.cpus[..s.ncpu].iter().enumerate() {
         if i < MAX_AP { probes::CPU_MPIDR[i].store(mpidr, Ordering::Relaxed); }
     }
+    // MSI-X: the ITS the tree names (QEMU `virt,its=on`); without one the PCIe devices are
+    // polled. After the core map: a collection is a core.
+    if let Some(i) = s.its { unsafe { super::its::init(i.base); } }
     // The virtio-mmio windows, for the drivers' scan (`arch::virtio_mmio_slot`).
     for (i, &(base, intid)) in s.virtio[..s.nvirtio].iter().enumerate() {
         VIRTIO_WINDOWS[i].store(base, Ordering::Relaxed);

@@ -323,6 +323,11 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             println!("talaria: the self-test of the APPLICATION of the measurement settings from the manifest");
             crate::cellman::selftest_tuning();
         }
+        "its" => {
+            // arm64: a device's MSI-X vector through the ITS to a chosen core (talaria.pci=1).
+            crate::smp::start_from_cmdline(cmdline);
+            crate::arch::msi_selftest()
+        }
         "msix" => {
             // The routing of the devices' interrupts: the message's address is written into the table
             // and read BACK. The parsing of PCI is needed, so the mode requires talaria.pci=1.

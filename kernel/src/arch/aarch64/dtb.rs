@@ -67,6 +67,9 @@ pub struct Summary {
     pub uart: Option<Range>,
     /// The PL031 real-time clock (`arm,pl031`): the wall clock's base at boot.
     pub rtc: Option<Range>,
+    /// The host bridge's 32-bit memory window (`ranges` of `pci-host-ecam-generic`), as CPU
+    /// addresses: the BARs nobody assigned are taken from it.
+    pub pci_mem32: Option<Range>,
     /// The GIC v3 distributor and the redistributor region (`reg` of `arm,gic-v3`).
     pub gicd: Option<Range>,
     pub gicr: Option<Range>,
@@ -92,7 +95,7 @@ pub struct Summary {
 impl Default for Summary {
     fn default() -> Self {
         Summary {
-            mem: [Range::default(); MAX_MEM], nmem: 0, mem_seen: 0, bootargs: None, uart: None, rtc: None,
+            mem: [Range::default(); MAX_MEM], nmem: 0, mem_seen: 0, bootargs: None, uart: None, rtc: None, pci_mem32: None,
             gicd: None, gicr: None, its: None, timer_ppi: [0; 4], psci: None,
             cpus: [0; MAX_CPU], ncpu: 0, cpu_seen: 0, virtio: [(0, 0); MAX_VIRTIO], nvirtio: 0, virtio_seen: 0,
             ecam: None,
@@ -107,6 +110,7 @@ impl Default for Summary {
 struct Node {
     name: Span,
     reg: Option<Span>,
+    ranges: Option<Span>,
     interrupts: Option<Span>,
     compatible: Option<Span>,
     device_type: Option<Span>,
@@ -229,6 +233,7 @@ pub fn parse(d: &[u8]) -> Result<Summary, Error> {
                 let node = &mut stack[depth - 1];
                 match pname {
                     b"reg" => node.reg = Some(val),
+                    b"ranges" => node.ranges = Some(val),
                     b"interrupts" => node.interrupts = Some(val),
                     b"compatible" => node.compatible = Some(val),
                     b"device_type" => node.device_type = Some(val),
@@ -334,6 +339,24 @@ fn classify(d: &[u8], node: &Node, parent: &Node, out: &mut Summary,
     }
     if compat_has(d, node.compatible, b"pci-host-ecam-generic") {
         out.ecam = reg0(0);
+        // `ranges`: (the child's address: 3 cells — the space code in bits 25:24 of the first,
+        // then the 64-bit bus address), (the parent's address: the PARENT's address cells),
+        // (the size: 2 cells). The first 32-bit memory window (code 2) is where a kernel with
+        // no firmware before it assigns the BARs.
+        if let Some(rg) = node.ranges {
+            let entry = (3 + ac as usize + 2) * 4;
+            let mut o = 0;
+            while o + entry <= rg.len {
+                let at = rg.off + o;
+                let code = be32(d, at).map(|f| (f >> 24) & 3);
+                let cpu = cells(d, at + 12, ac);
+                let size = cells(d, at + 12 + 4 * ac as usize, 2);
+                if let (Some(2), Some(base), Some(size)) = (code, cpu, size) {
+                    if out.pci_mem32.is_none() && size != 0 { out.pci_mem32 = Some(Range { base, size }); }
+                }
+                o += entry;
+            }
+        }
     }
 }
 
@@ -359,6 +382,7 @@ mod tests {
         assert_eq!(s.mem[0], Range { base: 0x4000_0000, size: 0x4000_0000 });
         assert_eq!(s.uart, Some(Range { base: 0x0900_0000, size: 0x1000 }));
         assert_eq!(s.rtc, Some(Range { base: 0x0901_0000, size: 0x1000 }));
+        assert_eq!(s.pci_mem32, Some(Range { base: 0x1000_0000, size: 0x2eff_0000 }));
         assert_eq!(s.gicd, Some(Range { base: 0x0800_0000, size: 0x1_0000 }));
         assert_eq!(s.gicr, Some(Range { base: 0x080a_0000, size: 0xf6_0000 }));
         assert_eq!(s.its, Some(Range { base: 0x0808_0000, size: 0x2_0000 }));

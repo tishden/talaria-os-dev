@@ -696,8 +696,8 @@ pub fn route_device_irqs(d: &crate::pci::PciDev, what: &str) {
         // A read-back: with a function behind a bridge that does not forward it, a write into the
         // config goes into nowhere, and "we configured it" would look like "it works".
         let (addr, data, on) = crate::pci::msi_readback(d);
-        let want = 0xFEE0_0000 | (crate::smp::apic_of(cpu) << 12);
-        if !on || addr != want || data != crate::idt::MSI_VECTOR_BASE as u32 {
+        let want = crate::arch::msi::expect_addr(cpu);
+        if !on || addr != want || data != crate::arch::msi::expect_data(crate::idt::MSI_VECTOR_BASE as u16) {
             crate::println!("sched-plan: ATTENTION — the MSI of {} was not accepted by the device (the address {:#x}, we expected {:#x}, the data {:#x}, \
                 enabled {})",
                 what, addr, want, data, on);
@@ -746,19 +746,26 @@ pub fn selftest_msix() -> ! {
 
     // 1. A route to core 0 (the control plane) — the address must become the BSP's APIC id.
     let a0 = crate::pci::msix_route(&d, 0);
-    let want0 = 0xFEE0_0000 | (crate::smp::apic_of(0) << 12);
+    let want0 = crate::arch::msi::expect_addr(0);
     let got0 = crate::pci::msix_msg_addr(&d, 0);
     crate::println!("msix: the route to core 0: the address {:#x} (we expected {:#x}), apic {}", got0, want0, a0);
-    check(got0 == want0, "the message's address is read back and equals the LAPIC of core 0");
+    check(got0 == want0, "the message's address is read back and is the one a message to core 0 carries");
 
     // 2. A route to another core changes EXACTLY the APIC id field rather than something else.
     let target = if crate::smp::nr_cpus() > 1 { 1 } else { 0 };
     let a1 = crate::pci::msix_route(&d, target);
-    let want1 = 0xFEE0_0000 | (crate::smp::apic_of(target) << 12);
+    let want1 = crate::arch::msi::expect_addr(target);
     let got1 = crate::pci::msix_msg_addr(&d, 0);
     crate::println!("msix: the route to core {}: the address {:#x} (we expected {:#x}), apic {}", target, got1, want1, a1);
-    check(got1 == want1, "the redirection changes the APIC id field in the message's address");
-    check(got1 & 0xFFF0_0000 == 0xFEE0_0000, "the address's upper part has stayed the LAPIC's window");
+    if crate::arch::msi::ADDRESS_NAMES_CORE {
+        check(got1 == want1, "the redirection changes the APIC id field in the message's address");
+        check(got1 & 0xFFF0_0000 == 0xFEE0_0000, "the address's upper part has stayed the LAPIC's window");
+    } else {
+        // arm64: every message goes to the ITS's translation register; the core is the
+        // ITS's business (`talaria.test=its` fires a vector and counts where it arrives).
+        check(got1 == want1 && got1 == got0, "the redirection leaves the address alone: the route is a command to the ITS");
+        check(a1 != u32::MAX, "the ITS accepted the re-route of every vector");
+    }
 
     // 3. All the table's vectors have been moved rather than only the zeroth one.
     let mut all = true;
@@ -790,11 +797,11 @@ pub fn selftest_msix() -> ! {
                 d.bus, d.dev, d.func, d.vendor, d.device, d.msi_cap);
             let a = crate::pci::msi_enable(&d, 0, crate::idt::MSI_VECTOR_BASE as u8);
             let (addr, data, on) = crate::pci::msi_readback(&d);
-            let want = 0xFEE0_0000 | (crate::smp::apic_of(0) << 12);
+            let want = crate::arch::msi::expect_addr(0);
             crate::println!("msix: the MSI is read back: the address {:#x} (we expected {:#x}), the data {:#x}, enabled {}, apic {}",
                 addr, want, data, on, a);
             check(addr == want, "MSI: the message's address is written and read back");
-            check(data == crate::idt::MSI_VECTOR_BASE as u32, "MSI: the vector's number is written and read back");
+            check(data == crate::arch::msi::expect_data(crate::idt::MSI_VECTOR_BASE as u16), "MSI: the message's data is written and read back");
             check(on, "MSI: the Enable bit is raised");
         }
     }

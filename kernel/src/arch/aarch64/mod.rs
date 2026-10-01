@@ -27,6 +27,8 @@ pub mod gic;
 pub mod icache;
 pub mod idt;     // the INTIDs under the x86 vector names, the handler table, ExcFrame
 pub mod ioapic;  // a device line to a core = a GIC SPI route
+pub mod its;     // MSI-X: the ITS's tables and commands, LPIs
+pub mod msi;     // what a device's MSI/MSI-X entry holds on this machine
 pub mod kmain;
 pub mod mmu;
 pub mod percpu;
@@ -72,3 +74,6 @@ pub const PLATFORM: [u8; 8] = *b"aarch64\0";
 
 /// The vDSO symbol a libc looks for on this architecture; `vdso::init` refuses an image without it.
 pub const VDSO_CLOCK_SYMBOL: &[u8] = b"__kernel_clock_gettime";
+
+/// `talaria.test=its`: MSI-X through the interrupt translation service (arm64).
+pub fn msi_selftest() -> ! { its::selftest() }
