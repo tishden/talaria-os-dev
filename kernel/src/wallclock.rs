@@ -186,7 +186,7 @@ pub fn wall_init(cmdline: &str) {
     SRC.store(if kvm { SRC_KVM } else { SRC_NONE }, Ordering::Relaxed);
     LAST_SYNC_TSC.store(t, Ordering::Relaxed);
     crate::println!("talaria: the wall clock's base is {} unix={}s; the discipline is {}",
-        if from_cmdline { "the cmdline" } else if known { "kvmclock" } else if from_rtc { crate::arch::tsc::RTC_NAME } else { "a fallback (there is no source)" },
+        if from_cmdline { "the cmdline" } else if known { "kvmclock" } else if from_rtc { crate::arch::tsc::rtc_name() } else { "a fallback (there is no source)" },
         b / 1_000_000_000,
         if kvm && SYNC_IV_NS.load(Ordering::Relaxed) != 0 { "kvmclock" }
         else if kvm { "SWITCHED OFF (talaria.clocksync=0)" }

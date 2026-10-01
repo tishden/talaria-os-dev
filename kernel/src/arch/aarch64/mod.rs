@@ -16,6 +16,7 @@
 pub mod uart;    // the PL011; `print!`/`println!` — first, so the macros are in scope for the rest
 pub use uart as serial; // the x86 name the shared modules use
 pub mod abi;
+pub mod acpiboot; // the machine's description from ACPI (UEFI boot: no device tree)
 pub mod barrier; // dma_wmb: the ring's stores before the doorbell, as the DEVICE sees them
 pub mod boot;
 pub mod cat;     // no cache allocation on arm64: the surface answers "no"
