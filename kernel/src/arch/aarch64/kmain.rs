@@ -132,6 +132,7 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     }
     crate::println!("    timer ppis: secure {} phys {} virt {} hyp {}; psci {}", s.timer_ppi[0], s.timer_ppi[1], s.timer_ppi[2], s.timer_ppi[3],
         match s.psci { Some(dtb::Psci::Hvc) => "hvc", Some(dtb::Psci::Smc) => "smc", None => "none" });
+    if let Some(r) = s.rtc { crate::println!("    rtc pl031 at {:#x}", r.base); super::tsc::RTC_BASE.store(r.base, Ordering::Relaxed); }
     if let Some(e) = s.ecam { crate::println!("    pcie ecam at {:#x} (+{:#x})", e.base, e.size); }
     let si = start_info_from(tree, &s);
     crate::println!("talaria: start_info at {:#x} ({} memmap entries)", si, s.nmem);
@@ -183,7 +184,10 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
         if i < MAX_AP { probes::CPU_MPIDR[i].store(mpidr, Ordering::Relaxed); }
     }
     // The virtio-mmio windows, for the drivers' scan (`arch::virtio_mmio_slot`).
-    for (i, &(base, _intid)) in s.virtio[..s.nvirtio].iter().enumerate() { VIRTIO_WINDOWS[i].store(base, Ordering::Relaxed); }
+    for (i, &(base, intid)) in s.virtio[..s.nvirtio].iter().enumerate() {
+        VIRTIO_WINDOWS[i].store(base, Ordering::Relaxed);
+        VIRTIO_INTIDS[i].store(intid as u64, Ordering::Relaxed);
+    }
     // THE FORK IN THE ROAD. The bring-up's own sequence (the tick counted, the secondaries
     // through PSCI, an SGI to each, EL0 and the vDSO probes) and the four probes TCG cannot
     // judge run under `talaria.test=bringup|ring|icache|bbm|svccost`. Anything else is the
@@ -241,6 +245,8 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
 
 /// The `virtio,mmio` windows of the tree, by index (0 = none): `arch::virtio_mmio_slot`.
 pub static VIRTIO_WINDOWS: [core::sync::atomic::AtomicU64; dtb::MAX_VIRTIO] = [const { core::sync::atomic::AtomicU64::new(0) }; dtb::MAX_VIRTIO];
+/// The INTID of each window's line, by the same index (0 = none): `arch::virtio_mmio_gsi`.
+pub static VIRTIO_INTIDS: [core::sync::atomic::AtomicU64; dtb::MAX_VIRTIO] = [const { core::sync::atomic::AtomicU64::new(0) }; dtb::MAX_VIRTIO];
 
 /// PSCI `CPU_ON` for the core with `mpidr`, with the stack of slot `i`; the PSCI result.
 pub fn start_secondary(i: usize, mpidr: u64) -> i64 {

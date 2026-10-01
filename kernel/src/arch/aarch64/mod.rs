@@ -53,6 +53,13 @@ pub fn virtio_mmio_slot(i: usize) -> Option<(usize, usize)> {
     let base = kmain::VIRTIO_WINDOWS[i].load(core::sync::atomic::Ordering::Relaxed);
     if base == 0 { None } else { Some((base as usize, 0x200)) }
 }
+/// The "GSI" (the SPI's number: INTID - 32) of the virtio-mmio window in slot `i` — the
+/// device tree names it for every window (`virt`: SPIs 16..47), nothing is derived.
+pub fn virtio_mmio_gsi(i: usize) -> Option<u32> {
+    if i >= VIRTIO_MMIO_SLOTS { return None; }
+    let intid = kmain::VIRTIO_INTIDS[i].load(core::sync::atomic::Ordering::Relaxed);
+    if intid < 32 { None } else { Some(intid as u32 - 32) }
+}
 
 /// The ELF `e_machine` this kernel runs, the `AT_HWCAP` word it hands a process and the
 /// `AT_PLATFORM` string. The HWCAP bits are the ones a Graviton3 and QEMU `max` both have —

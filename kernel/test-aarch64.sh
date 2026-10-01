@@ -282,6 +282,24 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
   else
     echo "== the ext2 disk on arm64: SKIPPED — no mkfs.ext2 (e2fsprogs) on the host =="
   fi
+  # ── the network (docs/ARM64-PLAN.md §10.3 step 1): virtio-net over the tree's virtio-mmio
+  # windows. The guest and its clients share a tap, so the block runs INSIDE the stand image
+  # (`kernel/test-aarch64-net.sh`), which needs NET_ADMIN and /dev/net/tun; its PASS/FAIL
+  # lines are printed as they are and its totals are added to the gate's.
+  if command -v docker >/dev/null 2>&1 && [ -c /dev/net/tun ] \
+     && docker run --rm talaria-qemu-aarch64 sh -c 'command -v ip && command -v socat && command -v python3' >/dev/null 2>&1; then
+    E2=""; [ -s "$REPO/kernel/target/a64-disks/ext2.img" ] && E2=kernel/target/a64-disks/ext2.img
+    NETLOG=$(mktemp)
+    docker run --rm $KVMDEV --cap-add NET_ADMIN --device /dev/net/tun -v "$REPO:/w" -w /w \
+      -e TAL_IMG="$IMG" -e TAL_ACCEL="$ACCEL" -e TAL_KVM="$KVM" -e TAL_DISK="$DISK" -e TAL_EXT2="$E2" \
+      talaria-qemu-aarch64 bash kernel/test-aarch64-net.sh > "$NETLOG" 2>&1
+    grep -vE '^NET TOTAL' "$NETLOG"
+    NP=$(sed -n 's/^NET TOTAL: PASS=\([0-9]*\) FAIL=\([0-9]*\)$/\1/p' "$NETLOG"); NF=$(sed -n 's/^NET TOTAL: PASS=\([0-9]*\) FAIL=\([0-9]*\)$/\2/p' "$NETLOG")
+    if [ -n "$NP" ] && [ -n "$NF" ]; then PASS=$((PASS+NP)); FAIL=$((FAIL+NF)); else echo "  FAIL  net: the network block did not report its totals"; FAIL=$((FAIL+1)); fi
+    rm -f "$NETLOG"
+  else
+    echo "== the network on arm64: SKIPPED — it needs docker, /dev/net/tun and iproute+socat in the talaria-qemu-aarch64 image =="
+  fi
 else
   echo "== ring 3 on arm64: SKIPPED — no kernel/user/aarch64 binaries here (make -C kernel/user aarch64) =="
 fi

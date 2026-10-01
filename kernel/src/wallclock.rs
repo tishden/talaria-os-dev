@@ -170,6 +170,12 @@ pub fn wall_init(cmdline: &str) {
         if let Some((ns, tk)) = crate::arch::tsc::ref_read() { base = Some(ns); t = tk; }
     }
     let known = base.is_some();
+    // No paravirtual clock: the machine's real-time clock gives the BASE (whole seconds).
+    // It is not a reference — the discipline stays off and the line below says so.
+    let mut from_rtc = false;
+    if base.is_none() {
+        if let Some((ns, tk)) = crate::arch::tsc::rtc_read() { base = Some(ns); t = tk; from_rtc = true; }
+    }
     let b = base.unwrap_or(1_700_000_000 * 1_000_000_000); // there is no source — a fixed epoch
     unsafe {
         let p = core::ptr::addr_of_mut!(SERVO);
@@ -180,7 +186,7 @@ pub fn wall_init(cmdline: &str) {
     SRC.store(if kvm { SRC_KVM } else { SRC_NONE }, Ordering::Relaxed);
     LAST_SYNC_TSC.store(t, Ordering::Relaxed);
     crate::println!("talaria: the wall clock's base is {} unix={}s; the discipline is {}",
-        if from_cmdline { "the cmdline" } else if known { "kvmclock" } else { "a fallback (there is no source)" },
+        if from_cmdline { "the cmdline" } else if known { "kvmclock" } else if from_rtc { crate::arch::tsc::RTC_NAME } else { "a fallback (there is no source)" },
         b / 1_000_000_000,
         if kvm && SYNC_IV_NS.load(Ordering::Relaxed) != 0 { "kvmclock" }
         else if kvm { "SWITCHED OFF (talaria.clocksync=0)" }
