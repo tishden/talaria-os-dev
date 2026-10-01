@@ -84,7 +84,8 @@ ssh $SSH_OPTS ec2-user@"$IP" "sudo dnf install -y -q docker git gcc binutils pyt
   sudo systemctl enable --now docker && sudo usermod -aG docker ec2-user && sudo chmod 666 /dev/kvm && \
   curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none -q && . \$HOME/.cargo/env && \
   rustup toolchain install $PIN --profile minimal -c rust-src -c clippy >/dev/null && \
-  rustup target add aarch64-unknown-none --toolchain $PIN" >"$LOGD/provision.log" 2>&1 || { echo "provisioning failed — $LOGD/provision.log"; tail -5 "$LOGD/provision.log"; exit 1; }
+  rustup target add aarch64-unknown-none aarch64-unknown-uefi --toolchain $PIN && \
+  (sudo modprobe tun; sudo modprobe vhost_net; sudo chmod 666 /dev/vhost-net 2>/dev/null; true)" >"$LOGD/provision.log" 2>&1 || { echo "provisioning failed — $LOGD/provision.log"; tail -5 "$LOGD/provision.log"; exit 1; }
 T2=$(date +%s); echo "provisioned after $((T2-T1)) s" | tee -a "$LOGD/timing.log"
 
 echo "== uploading the tree (git archive HEAD of the checked-out branch) =="
@@ -103,6 +104,10 @@ echo "== the kernel and the raw Image (native objcopy) =="
 ssh $SSH_OPTS ec2-user@"$IP" '. $HOME/.cargo/env && cd talaria && AARCH64_OBJCOPY=objcopy VDSO_CC_AARCH64=gcc kernel/build-aarch64.sh' >"$LOGD/build.log" 2>&1 || { echo "the kernel did not build — $LOGD/build.log"; tail -8 "$LOGD/build.log"; exit 1; }
 T3=$(date +%s); echo "built after $((T3-T2)) s" | tee -a "$LOGD/timing.log"
 
+# The UEFI stub carries the kernel inside: after the kernel, before the gate (its UEFI block
+# is skipped without a fresh stub).
+ssh $SSH_OPTS ec2-user@"$IP" '. $HOME/.cargo/env && cd talaria && kernel/uefi-stub/build.sh aarch64' >"$LOGD/stub.log" 2>&1 || { echo "the UEFI stub did not build — $LOGD/stub.log (the gate will skip its UEFI block)"; tail -5 "$LOGD/stub.log"; }
+
 if [ "${UPONLY:-0}" = 1 ]; then
   KEEP=1
   echo "UPONLY=1: built and kept. ssh $SSH_OPTS ec2-user@$IP"
@@ -111,6 +116,12 @@ fi
 
 echo "== the bring-up gate under KVM (TAL_KVM=1: the timing lines are judged too) =="
 ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && TAL_KVM=1 kernel/test-aarch64.sh' 2>&1 | tee "$LOGD/gate.log" | grep -E 'FAIL|TOTAL|SKIP'
+
+# The network numbers: the guest on a tap with vhost, the meters (the arm64 builds of
+# udp_ping/tcp_bench) next to it in the stand image.
+echo "== the network numbers (kernel/netnum-aarch64.sh: udp_ping against userver, tcp_bench against diskserver) =="
+ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && docker run --rm --device /dev/kvm --device /dev/net/tun $( [ -c /dev/vhost-net ] && echo --device /dev/vhost-net ) --cap-add NET_ADMIN \
+  -v "$PWD:/w" -w /w -e TAL_ACCEL="-enable-kvm -cpu host" talaria-qemu-aarch64 bash kernel/netnum-aarch64.sh' 2>&1 | tee "$LOGD/netnum.log" | grep -E "netnum|udp \[|tcp \[" | cut -c1-200
 
 # The numbers of the set (docs/MEASUREMENTS.md): the whole console of each, three boots —
 # `mbench` is the twin of the x86 scoreboard's primitives, `futexlat` the wakeup latency,

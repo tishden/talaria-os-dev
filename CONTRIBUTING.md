@@ -27,7 +27,8 @@ make -C kernel/user all && (cd kernel && python3 mkfs.py)   # regression binarie
 (cd kernel && cargo -Z json-target-spec build --release)    # toolchain pinned in rust-toolchain.toml
 (cd kernel && cargo clippy -Zjson-target-spec --release -- -D warnings)
 kernel/build-aarch64.sh                                     # the arm64 kernel (docs/ARM64-PLAN.md): it must still build
-kernel/test-aarch64.sh                                      # the arm64 bring-up gate under TCG: 5 boots, 36 assertions, ~2 min
+kernel/uefi-stub/build.sh aarch64                           # the arm64 UEFI stub carries the kernel inside: rebuild it too
+kernel/test-aarch64.sh                                      # the arm64 gate under TCG: 229 checks with kernel/user/aarch64 built (36 without), ~20 min
 (cd kernel && cargo clippy -Zjson-target-spec --release --target aarch64-talaria.json -- -D warnings)
 (cd kernel-unit && cargo test && cargo clippy --all-targets -- -D warnings)
 kernel/test.sh          # QEMU regression: "TOTAL: ... FAIL=0"
@@ -65,6 +66,7 @@ Known flakes (do not "fix" blindly, re-run):
 
 Tests that need a fresh `kernel/uefi-stub` are skipped honestly otherwise: the
 stub carries the kernel ELF inside, so rebuild it with `kernel/uefi-stub/build.sh`
+(and `kernel/uefi-stub/build.sh aarch64` for the arm64 gate's UEFI block)
 after every kernel build (`test.sh` does it when the stub is stale).
 
 ## Rules for changes

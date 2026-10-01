@@ -28,7 +28,10 @@ ExitBootServices, converts the EFI memory map to the PVH format and jumps
 through a 32-bit trampoline (< 4 GB) with paging off into the existing
 `pvh_start`. Build it with `uefi-stub/build.sh` after every kernel build; it is
 exercised by the `uefi` block of `test.sh` (OVMF q35). The RSDP from UEFI goes
-into `start_info.rsdp_paddr`.
+into `start_info.rsdp_paddr`. The same crate builds the arm64 stub (`uefi-stub/build.sh
+aarch64`, `aarch64-unknown-uefi`): it turns the MMU off instead of dropping modes and
+enters the arm64 Image with a boot block in `x0`; the kernel reads the machine from ACPI
+(`arch/aarch64/acpiboot.rs`) — exercised by the UEFI block of `test-aarch64.sh` (edk2 on `virt`).
 
 **BIOS boot without GRUB** (the `*.metal` path): `../tools/tboot/` — stage1 (72 B)
 and stage2 (~1.7 KB) read the kernel from disk themselves (`int 13h`, unreal
