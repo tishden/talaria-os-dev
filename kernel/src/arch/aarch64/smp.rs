@@ -87,6 +87,12 @@ pub fn apic_of(cpu: usize) -> u32 {
     let v = AFF_OF[cpu].load(Ordering::SeqCst);
     if v == u64::MAX { cpu as u32 } else { pack_aff(v) }
 }
+/// The affinity (MPIDR without the flag bits) of a logical core; None before the map is built.
+pub fn mpidr_of(cpu: usize) -> Option<u64> {
+    if cpu >= MAXCPU { return None; }
+    let v = AFF_OF[cpu].load(Ordering::SeqCst);
+    if v != u64::MAX { Some(v) } else if cpu == 0 { Some(cpu::mpidr() & 0xFF00_FFFFFF) } else { None }
+}
 fn pack_aff(mpidr: u64) -> u32 { ((mpidr & 0xFF_FFFF) | ((mpidr >> 32) & 0xFF) << 24) as u32 }
 fn unpack_aff(a: u32) -> u64 { (a as u64 & 0xFF_FFFF) | ((a as u64 >> 24) << 32) }
 pub fn logical_of(apic: u32) -> usize {

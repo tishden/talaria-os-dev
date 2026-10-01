@@ -571,6 +571,19 @@ pub fn nr_cpus() -> u32 { NCPU.load(Ordering::Relaxed) }
 pub fn apic_id(i: usize) -> u32 { unsafe { APIC_IDS[i.min(MAX_CPUS - 1)] } }
 /// The ECAM base from the MCFG (0 — there is none; §4.3).
 pub fn ecam_base() -> u64 { ECAM_BASE.load(Ordering::Relaxed) }
+/// The ECAM window from a source other than the MCFG: the device tree's `pci-host-ecam-generic`
+/// on an arm64 machine booted without ACPI. `bus_end` is the last bus the walk visits beyond
+/// the bridges it descends through (0: bus 0 and whatever its bridges lead to).
+// The caller is the arm64 bring-up (a device tree, an ITS); the x86 build has none.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+pub fn set_ecam(base: u64, bus_end: u8) {
+    ECAM_BASE.store(base, Ordering::Relaxed);
+    ECAM_BUS_END.store(bus_end as _, Ordering::Relaxed);
+    ECAM_FROM_TREE.store(true, Ordering::Relaxed);
+}
+static ECAM_FROM_TREE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Who named the ECAM window (for the boot line).
+pub fn ecam_source() -> &'static str { if ECAM_FROM_TREE.load(Ordering::Relaxed) { "the device tree" } else { "MCFG" } }
 /// The last bus covered by the ECAM window (the MCFG). §4.8: on the 7th generation the devices
 /// live not only on bus 0, and the enumeration has to be carried up to this boundary.
 pub fn ecam_bus_end() -> u8 { ECAM_BUS_END.load(Ordering::Relaxed).min(255) as u8 }

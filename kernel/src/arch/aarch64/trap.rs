@@ -631,6 +631,9 @@ extern "C" fn irq_entry(_kind: u64, f: &mut Frame) -> u64 {
             // timer's vector): the tick's path, with the timer left as it is.
             super::idt::IPI_COUNT.fetch_add(1, Ordering::Relaxed);
             tick = true;
+        } else if id >= super::its::LPI_BASE {
+            // A message-signalled interrupt: the ITS translated a device's event into this LPI.
+            super::its::on_lpi(id, cpu);
         } else if let Some(h) = super::idt::handler_of(id) {
             h();
         } else if id < 16 {

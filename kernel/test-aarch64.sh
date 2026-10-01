@@ -282,6 +282,108 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
   else
     echo "== the ext2 disk on arm64: SKIPPED — no mkfs.ext2 (e2fsprogs) on the host =="
   fi
+  # ── the file system and PCIe (docs/ARM64-PLAN.md §10.3 step 2): the ext2/jbd2 block on
+  # virtio-blk AND on NVMe — the config space through the ECAM window the device tree names,
+  # the BARs assigned by the kernel (no firmware ran before it), MSI-X through the ITS.
+  # bootp SECS APPEND DISK DEV [UNTIL]: DISK (a path under the repository, NOT copied — a
+  # test of two boots keeps its volume) on DEV (virtio|nvme). With UNTIL the machine is
+  # KILLED as soon as the pattern is on the console: a power cut, no sync, no power-off.
+  bootp() {
+    local dev="-device virtio-blk-device,drive=d0" po="talaria.poweroff=1" run
+    [ "$4" = nvme ] && dev="-device nvme,drive=d0,serial=tal001"
+    [ -n "${5:-}" ] && po=""
+    QEMU="qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp 4 -m 1024 -display none -serial file:\$O \
+      -kernel /w/$IMG -append \"console=ttyAMA0 $2 talaria.smp=4 $po\" \
+      -drive id=d0,file=/w/$3,format=raw,if=none $dev"
+    run='O=$(mktemp); '"$QEMU"' >/dev/null 2>&1 & q=$!; i=0
+      while [ $i -lt $((SECS * 2)) ] && kill -0 $q 2>/dev/null; do
+        [ -n "$UNTIL" ] && grep -aqE "$UNTIL" $O 2>/dev/null && break; sleep 0.5; i=$((i+1)); done
+      kill -9 $q 2>/dev/null; wait $q 2>/dev/null; cat $O; rm -f $O'
+    if command -v qemu-system-aarch64 >/dev/null 2>&1; then
+      SECS=$1 UNTIL="${5:-}" sh -c "$(echo "$run" | sed "s|/w/|$REPO/|g")" > "$LOG" 2>&1
+    else
+      docker run --rm $KVMDEV -e SECS="$1" -e UNTIL="${5:-}" -v "$REPO:/w" -w /w talaria-qemu-aarch64 sh -c "$run" > "$LOG" 2>&1
+    fi
+  }
+  plain() { # plain NAME: an ext2 volume with hello.txt alone (the tests below write their own files)
+    local d rc; d=$(mktemp -d) || return 1; echo hello > "$d/hello.txt"
+    "$REPO/kernel/mkext2.sh" "$d" "$REPO/$TD/$1.img" 64M >/dev/null 2>&1; rc=$?; rm -rf "${d:?}"; [ $rc = 0 ]
+  }
+  if [ -s "$REPO/$TD/ext2.img" ] && plain fsb && plain jrn; then
+    for DEV in virtio nvme; do
+      PCI=""; [ $DEV = nvme ] && PCI="talaria.pci=1 "
+      echo "== the file system on arm64: ext2 and the journal on $DEV =="
+      cp "$REPO/$TD/ext2.img" "$REPO/$TD/fs.img"
+      bootp 120 "${PCI}talaria.test=ext2" "$TD/fs.img" $DEV
+      [ $DEV = nvme ] && assert 'pci: ECAM 0x[0-9a-f]+ \(the device tree\)'    'pci: the config space through the ECAM window the device tree names (above 4 GB, mapped on demand)'
+      [ $DEV = nvme ] && assert 'nvme: 00:[0-9a-f]+\.0 BAR0=0x1[0-9a-f]+ .* polling' 'nvme: the controller is up — the BAR assigned by the kernel from the host bridge window, the admin and IO queues'
+      assert 'ext2-test: ALL OK'                                              "ext2 ($DEV): the RW FS (create/write/pread/ftruncate/rename/unlink/mkdir/rmdir/getdents64)"
+      assertnot "$BAD"                                                       "ext2 ($DEV): no trap, no unknown syscall"
+      # ext2v reads what TWO earlier boots left on the volume: /t/hello.txt of the ext2 test and
+      # /t/app.log that sigtest appends and leaves in the write-back cache until its exit.
+      bootp 150 "${PCI}talaria.test=sigtest" "$TD/fs.img" $DEV
+      assert 'sigtest: ALL OK'                                                "sigtest ($DEV): the process model from this volume"
+      bootp 120 "${PCI}talaria.test=ext2v" "$TD/fs.img" $DEV
+      assert 'ext2v: .*PERSISTED OK'                                          "ext2v ($DEV): the data survived a reboot (the write-back cache was flushed)"
+      cp "$REPO/$TD/fsb.img" "$REPO/$TD/fs.img"
+      bootp 150 "${PCI}talaria.test=fsbench" "$TD/fs.img" $DEV
+      assert 'fsbench: ALL OK'                                                "fsbench ($DEV): an fsync of 512 blocks — the coalescing into ranges, a repeated fsync is almost free"
+      assert 'fsbench: the queue: [0-9]+ commands submitted, the greatest depth ([2-9]|[1-9][0-9]+)' "fsbench ($DEV): the block layer has a DEPTH (the commands fly in a batch)"
+      assertnot "$BAD"                                                       "fsbench ($DEV): no trap, no unknown syscall"
+      for JM in "" " talaria.ext2=journal=data"; do
+        cp "$REPO/$TD/jrn.img" "$REPO/$TD/fs.img"
+        bootp 120 "${PCI}talaria.test=journal1$JM" "$TD/fs.img" $DEV 'journal1: COMMITTED|PANIC|\[trap\]'
+        assert 'journal1: COMMITTED'                                          "journal ($DEV${JM:+, journal=data}): the transaction is committed, then the power is CUT (no checkpoint)"
+        bootp 120 "${PCI}talaria.test=journal2$JM" "$TD/fs.img" $DEV
+        assert 'journal2: .*RECOVERED OK'                                     "journal ($DEV${JM:+, journal=data}): after the cut the replay of the journal restores the ${JM:+file's DATA and the }metadata"
+        if command -v e2fsck >/dev/null 2>&1; then
+          if e2fsck -fn "$REPO/$TD/fs.img" >/dev/null 2>&1; then echo "  PASS  journal ($DEV${JM:+, journal=data}) (host): e2fsck -fn is clean after the replay"; PASS=$((PASS+1)); else echo "  FAIL  journal ($DEV${JM:+, journal=data}) (host): e2fsck -fn found errors after the replay"; FAIL=$((FAIL+1)); fi
+        fi
+      done
+    done
+    echo "== the file system on arm64: the rest of the block on virtio-blk (symlinks, no journal, a cut transaction, htree) =="
+    cp "$REPO/$TD/ext2.img" "$REPO/$TD/fs.img"
+    bootp 120 "talaria.test=symlink" "$TD/fs.img" virtio
+    assert 'symlink-test: ALL OK'                                             'symlink: a read through a link, a link in the middle of a path, readlink, stat/lstat, a creation by the kernel, ELOOP'
+    cp "$REPO/$TD/ext2.img" "$REPO/$TD/fs.img"
+    bootp 120 "talaria.test=ext2 talaria.ext2=nojournal" "$TD/fs.img" virtio
+    assert 'the journal is off by the flag'                                   'nojournal: the mode without transactions is on'
+    assert 'ext2-test: ALL OK'                                                'nojournal: the RW FS works without a journal'
+    cp "$REPO/$TD/jrn.img" "$REPO/$TD/fs.img"
+    bootp 150 "talaria.test=journalbig1 talaria.ext2=journal=data" "$TD/fs.img" virtio 'journal1: COMMITTED|PANIC|\[trap\]'
+    assert 'the transactions [2-9]'                                           'journal=data: a transaction larger than the journal is CUT into parts'
+    assert 'journal1: COMMITTED'                                              'journal=data: the cut transaction is committed'
+    assertnot 'THE JOURNAL HAS BEEN OVERFLOWED'                               'journal=data: not a single part moved over the journal'"'"'s end'
+    bootp 150 "talaria.test=journalbig2 talaria.ext2=journal=data" "$TD/fs.img" virtio
+    assert 'journal2: .*RECOVERED OK'                                         'journal=data: the file from the cut transaction is restored in full (1500 blocks)'
+    if command -v e2fsck >/dev/null 2>&1; then
+      DXD=$(mktemp -d); mkdir -p "$DXD/big"; i=1; while [ $i -le 3000 ]; do echo x > "$DXD/big/file_$i.txt"; i=$((i+1)); done
+      if DIRIDX=1 "$REPO/kernel/mkext2.sh" "$DXD" "$REPO/$TD/dx.img" 64M >/dev/null 2>&1; then
+        bootp 400 "talaria.test=htree talaria.ext2=dxcheck" "$TD/dx.img" virtio
+        assert 'htree: ALL OK'                                                'htree: 3000 names in an indexed directory — the search by the dir_index matches the enumeration'
+        assert 'the leaves. splits [1-9]'                                     'htree: the growth of a directory by 3000 names splits the leaves and edits the index'
+        assert 'has been indexed \(an htree was built from scratch'           'htree: a linear directory that has outgrown a block is indexed by the kernel'
+        assertnot "$BAD"                                                     'htree: no trap, no unknown syscall'
+        if e2fsck -fn "$REPO/$TD/dx.img" >/dev/null 2>&1; then echo "  PASS  htree (host): e2fsck -fn is clean — the tree after the kernel's splits is correct"; PASS=$((PASS+1)); else echo "  FAIL  htree (host): e2fsck -fn found errors in the directory"; FAIL=$((FAIL+1)); fi
+      else echo "  SKIP  htree: the indexed image was not built"; fi
+      rm -rf "${DXD:?}"
+    else echo "  SKIP  htree: no e2fsck on the host"; fi
+    echo "== MSI-X on arm64: the ITS (talaria.test=its|msix) =="
+    cp "$REPO/$TD/fsb.img" "$REPO/$TD/fs.img"
+    bootp 90 "talaria.pci=1 talaria.test=its" "$TD/fs.img" nvme
+    assert 'its: 0x[0-9a-f]+ is up: .*the commands were taken'                'its: the tables, the command queue and LPIs on the boot core'
+    assert 'the MSI-X entry holds the address of the translation register'   'its: a device'"'"'s MSI-X entry is written and read back'
+    assert 'its: OK   the admin completions arrived as LPIs on core 0'        'its: an NVMe admin completion arrives as an LPI and reaches the vector'"'"'s handler'
+    assert 'its: OK   after the re-route \(MOVI\) the LPIs arrive on core 1'  'its: a re-route moves the interrupts to the other core (and not one stays on core 0)'
+    assert 'its: ALL CHECKS PASSED'                                           'its: the summary'
+    assertnot '\[trap\]|PANIC|its: FAILURE'                                  'its: no trap, no failed check'
+    bootp 90 "talaria.pci=1 talaria.test=msix" "$TD/fs.img" nvme
+    assert 'msix: OK   the redirection leaves the address alone: the route is a command to the ITS' 'msix: the shared routing gate on arm64 — the route is the ITS'"'"'s'
+    assert 'msix: OK   ALL the table.s vectors have been moved'               'msix: the re-route covers the whole table'
+    assert 'msix: ALL CHECKS PASSED'                                          'msix: the summary (the rule "not to a dedicated core" included)'
+  else
+    echo "== the file system on arm64: SKIPPED — the ext2 images were not built =="
+  fi
   # ── the network (docs/ARM64-PLAN.md §10.3 step 1): virtio-net over the tree's virtio-mmio
   # windows. The guest and its clients share a tap, so the block runs INSIDE the stand image
   # (`kernel/test-aarch64-net.sh`), which needs NET_ADMIN and /dev/net/tun; its PASS/FAIL

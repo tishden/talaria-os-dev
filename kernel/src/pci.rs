@@ -11,6 +11,12 @@ const MMIO_ALLOC_START: u64 = 0xC000_0000;
 static ECAM: AtomicU64 = AtomicU64::new(0);
 static PORTIO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static MMIO_NEXT: AtomicU64 = AtomicU64::new(MMIO_ALLOC_START);
+/// The window the BARs nobody assigned are taken from, when the machine names one: the host
+/// bridge's 32-bit memory range of the device tree (arm64 `virt` boots the kernel with no
+/// firmware before it, and `0xC000_0000` there is RAM). Call it before `init`.
+// The caller is the arm64 bring-up (a device tree, an ITS); the x86 build has none.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+pub fn set_mmio_window(base: u64) { MMIO_NEXT.store(base, Ordering::Relaxed); }
 /// The next free address INSIDE the bridge's window (A11): when assigning a BAR ourselves, we
 /// are bound to land in the window that the bridge forwards, otherwise the device does not answer.
 static BRIDGE_NEXT: AtomicU64 = AtomicU64::new(0);
@@ -329,7 +335,7 @@ pub fn reset_access() {
 pub fn init() {
     if !present() { crate::println!("pci: there is no ECAM (a microvm without pcie=on) — skipped"); return; }
     if ecam() != 0 {
-        crate::println!("pci: ECAM {:#x} ({})", ecam(), if crate::acpi::ecam_base() != 0 { "MCFG" } else { "microvm" });
+        crate::println!("pci: ECAM {:#x} ({})", ecam(), if crate::acpi::ecam_base() != 0 { crate::acpi::ecam_source() } else { "microvm" });
     } else {
         crate::println!("pci: the config through the ports 0xCF8/0xCFC (legacy, there is no MCFG)");
     }
@@ -397,13 +403,23 @@ pub fn msix_enable_masked(d: &PciDev) -> u16 {
     if bar_base != 0 {
         for i in 0..size as u64 {
             let e = bar_base + off + i * 16;
+            // The message: the boot core, the vector MSI_VECTOR_BASE+i. WHAT that is in the
+            // entry is the machine's (`arch::msi`): the LAPIC's address and the IDT vector on
+            // x86, the ITS's translation register and the event number on arm64. A machine
+            // that cannot take the message (no ITS) leaves the entry masked.
+            let msg = crate::arch::msi::compose(d, i as u16, size, crate::arch::msi::BOOT, crate::idt::MSI_VECTOR_BASE as u16 + i as u16);
             unsafe {
-                core::ptr::write_volatile(e as *mut u32, 0xFEE0_0000);        // msg addr: LAPIC BSP
-                core::ptr::write_volatile((e + 4) as *mut u32, 0);            // msg addr hi
-                core::ptr::write_volatile((e + 8) as *mut u32, crate::idt::MSI_VECTOR_BASE as u32 + i as u32); // msg data: the vector
-                // vector control: unmasked (in the IDT there stand the stubs
-                // MSI_VECTOR_BASE.. with an EOI — the delivery is safe)
-                core::ptr::write_volatile((e + 12) as *mut u32, 0);
+                match msg {
+                    Some((lo, hi, data)) => {
+                        core::ptr::write_volatile(e as *mut u32, lo);                 // msg addr
+                        core::ptr::write_volatile((e + 4) as *mut u32, hi);           // msg addr hi
+                        core::ptr::write_volatile((e + 8) as *mut u32, data);         // msg data
+                        // vector control: unmasked (in the IDT there stand the stubs
+                        // MSI_VECTOR_BASE.. with an EOI — the delivery is safe)
+                        core::ptr::write_volatile((e + 12) as *mut u32, 0);
+                    }
+                    None => core::ptr::write_volatile((e + 12) as *mut u32, 1),
+                }
             }
         }
     }
@@ -431,12 +447,19 @@ pub fn msix_route(d: &PciDev, cpu: usize) -> u32 {
     let tbl = rd(d.bus, d.dev, d.func, d.msix_cap + 4);
     let (bar_base, _) = bar(d.bus, d.dev, d.func, (tbl & 0x7) as u16);
     if bar_base == 0 { return u32::MAX; }
+    if !crate::arch::msi::reachable(cpu) { return u32::MAX; }
     let apic = crate::smp::apic_of(cpu);
-    if apic > 254 { return u32::MAX; } // the xAPIC addresses 8-bit ids (see smp.rs)
     let off = (tbl & !0x7) as u64;
     for i in 0..size {
         let e = bar_base + off + i * 16;
-        unsafe { core::ptr::write_volatile(e as *mut u32, 0xFEE0_0000 | (apic << 12)); }
+        // x86: the address names the core. arm64: the ITS moves the event to the core's
+        // collection and the entry keeps the address of the translation register.
+        if let Some((lo, hi)) = crate::arch::msi::retarget(d, i as u16, size as u16, cpu) {
+            unsafe {
+                core::ptr::write_volatile(e as *mut u32, lo);
+                core::ptr::write_volatile((e + 4) as *mut u32, hi);
+            }
+        }
     }
     apic
 }
@@ -471,16 +494,18 @@ fn msi_layout(d: &PciDev) -> (bool, bool, u8) {
 pub fn msi_enable(d: &PciDev, cpu: usize, vector: u8) -> u32 {
     if d.msi_cap == 0 { return u32::MAX; }
     let apic = crate::smp::apic_of(cpu);
-    if apic > 254 { return u32::MAX; }  // the xAPIC addresses 8-bit ids (see smp.rs)
     let (is64, maskable, _) = msi_layout(d);
-    let addr = 0xFEE0_0000u32 | (apic << 12);
+    // One vector, index 0 (see below). A 32-bit MSI capability cannot hold an address above
+    // 4 GB: such a message is refused rather than truncated.
+    let Some((addr, addr_hi, data)) = crate::arch::msi::compose(d, 0, 1, cpu, vector as u16) else { return u32::MAX; };
+    if addr_hi != 0 && !is64 { return u32::MAX; }
     wr(d.bus, d.dev, d.func, d.msi_cap + 4, addr);
     if is64 {
-        wr(d.bus, d.dev, d.func, d.msi_cap + 8, 0);
-        wr(d.bus, d.dev, d.func, d.msi_cap + 0x0C, vector as u32);
+        wr(d.bus, d.dev, d.func, d.msi_cap + 8, addr_hi);
+        wr(d.bus, d.dev, d.func, d.msi_cap + 0x0C, data);
         if maskable { wr(d.bus, d.dev, d.func, d.msi_cap + 0x10, 0); } // the masks are cleared
     } else {
-        wr(d.bus, d.dev, d.func, d.msi_cap + 8, vector as u32);
+        wr(d.bus, d.dev, d.func, d.msi_cap + 8, data);
         if maskable { wr(d.bus, d.dev, d.func, d.msi_cap + 0x0C, 0); }
     }
     // Message Control: Enable = bit 0, Multiple Message Enable = bits 6..4 -> 0.

@@ -7,7 +7,7 @@
 //!
 //! INTIDs: SGIs 0..15 (the IPIs), PPIs 16..31 (per core: the timer is 27), SPIs
 //! 32..1019 (wired lines: virtio-mmio on `virt`), LPIs 8192.. (MSI-X through the ITS —
-//! not here yet). Everything is put in group 1 (the only group on a machine with one
+//! `its.rs`). Everything is put in group 1 (the only group on a machine with one
 //! security state, which is what QEMU `virt` and a Nitro guest are).
 //!
 //! # Safety
@@ -103,6 +103,30 @@ fn my_redistributor() -> Option<u64> {
     }
 }
 
+/// This core's redistributor frame, for the LPI tables (`its`).
+pub fn my_frame() -> Option<u64> { my_redistributor() }
+/// The redistributor of the core with `mpidr`: (its frame, its `GICR_TYPER`).
+pub fn redistributor_of(mpidr: u64) -> Option<(u64, u64)> {
+    let mut f = GICR.load(Ordering::Relaxed);
+    let end = GICR_END.load(Ordering::Relaxed);
+    if f == 0 { return None; }
+    loop {
+        if f + GICR_FRAME > end { return None; }
+        let typer = unsafe { core::ptr::read_volatile((f + GICR_TYPER) as *const u64) };
+        let aff = typer >> 32;
+        if (aff & 0xFF_FFFF) | ((aff >> 24) << 32) == mpidr { return Some((f, typer)); }
+        if typer & TYPER_LAST != 0 { return None; }
+        f += GICR_FRAME;
+    }
+}
+/// Does the distributor implement LPIs (`GICD_TYPER.LPIS`) with at least 14 INTID bits?
+pub fn lpis_supported() -> bool {
+    let d = GICD.load(Ordering::Relaxed);
+    if d == 0 { return false; }
+    let typer = unsafe { r32(d + GICD_TYPER) };
+    typer & (1 << 17) != 0 && ((typer >> 19) & 0x1F) + 1 >= 14
+}
+
 /// This core: wake its redistributor, put its SGIs and PPIs in group 1 at one
 /// priority (all disabled), then the CPU interface — system-register access on,
 /// the priority mask open, group 1 enabled. `false` if no redistributor claims us.
@@ -127,6 +151,8 @@ pub unsafe fn init_cpu() -> bool {
         "isb",
         t = out(reg) _, options(nostack),
     );
+    // A core that comes up after the ITS takes LPIs as the boot core does.
+    if super::its::present() { super::its::enable_lpis_here(); }
     true
 }
 
