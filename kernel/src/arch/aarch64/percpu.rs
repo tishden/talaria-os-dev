@@ -87,6 +87,12 @@ pub fn cur_task_of(cpu: usize) -> u64 {
     if cpu >= MAXCPU { return u64::MAX; }
     unsafe { core::ptr::read_volatile(core::ptr::addr_of!(CPUS[cpu].cur_task)) }
 }
+/// The task whose kernel stack core `cpu` is leaving in the switch stub (u64::MAX — none):
+/// what a core that waits for that stack asks before it gives the wait up (`sched::stack_wait`).
+pub fn off_stack_of(cpu: usize) -> u64 {
+    if cpu >= MAXCPU { return u64::MAX; }
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(CPUS[cpu].off_stack)) }
+}
 
 /// The x86 name of `init_tpidr`: only the register, not the `ONLINE` mask.
 pub fn init_gs(cpu: usize) { init_tpidr(cpu); }

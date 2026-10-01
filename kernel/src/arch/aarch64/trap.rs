@@ -18,6 +18,7 @@ use super::{cpu, gic, timer};
 /// `idt::ExcFrame` for the fault paths, and the saved context the scheduler switches. The
 /// field names are the neutral ones the shared code reads (`nr`, `a1..a6`, `pc`, `flags`,
 /// `usp`); the rest of the file is reachable by number through `x()`/`set_x()`.
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Frame {
     pub a1: u64, pub a2: u64, pub a3: u64, pub a4: u64, pub a5: u64, pub a6: u64,  // x0..x5
@@ -388,6 +389,11 @@ extern "C" fn trap(kind: u64, f: &Frame) -> ! {
     static DEPTH: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
     let cpu = cpu::cpu_index().min(63);
     let depth = DEPTH[cpu].fetch_add(1, Ordering::Relaxed);
+    // A COPY, taken before the first line: when the cause is two cores on one stack, the
+    // other core's next interrupt frame lands on this one while it is being printed (the
+    // first arm64 dump of such a crash showed two different pcs for one exception).
+    let copy = *f;
+    let f = &copy;
     crate::println!("[trap] {}: esr={:#x} ({}) far={:#x} elr={:#x} spsr={:#x} sp={:#x}",
         kind_name(kind), f.esr, ec_name(f.esr), f.far, f.pc, f.flags, f.usp);
     for i in (0..30).step_by(2) {
@@ -407,7 +413,32 @@ extern "C" fn trap(kind: u64, f: &Frame) -> ! {
         let v = crate::syscall::LAST_SYS[t].load(Ordering::Relaxed);
         if v != u64::MAX { crate::println!("║ the task's last syscall: #{} (the return into {:#x})", v >> 48, v & 0xFFFF_FFFF_FFFF); }
         crate::println!("║ the task t{} (DEAD={}) its tables={:#x} ttbr0={:#x} core {}", t, !crate::sched::task_alive(t),
-            crate::sched::task_cr3(t), crate::paging::current_cr3(), cpu);
+            crate::sched::task_cr3(t), crate::paging::current_cr3(), cpu);        // Whose stack this core is on: the task's own, or one that is no longer (or not yet) its.
+        let (base, top, saved, on, limbo, bsp_cur) = crate::sched::crash_facts(t);
+        crate::println!("║ its kernel stack {:#x}..{:#x} (the sp is {}), the saved context {:#x}, assigned to core {}; the boot core: task t{}{}",
+            base, top, if (base..top).contains(&f.usp) { "INSIDE it" } else { "OUTSIDE it" }, saved, on, bsp_cur, if limbo { ", in limbo" } else { "" });
+        for c in 0..super::smp::MAXCPU {
+            let ct = super::percpu::cur_task_of(c);
+            if ct != u64::MAX && crate::percpu::ONLINE.load(Ordering::Relaxed) & (1 << c) != 0 { crate::println!("║   core {} runs t{}", c, ct); }
+        }
+        crate::sched::dead_kstacks(|tid, b, pages| crate::println!("║   an old stack of t{} waits to be freed: {:#x}..{:#x}", tid, b, b + pages * 4096));        let (stale, bad, foreign, longw) = crate::sched::ctx_counters();
+        crate::println!("║ the context instruments: entries into a used frame {}, not-a-frame {}, the boot core saved a foreign task {}, stack waits given up {} and waited out {}",
+            stale, bad, foreign, longw & 0xFFFF_FFFF, longw >> 32);
+        // What the scheduler of every core decided last (the newest at the right).
+        let hz = cpu::counter_hz().max(1);
+        let now = cpu::counter();
+        for c in 0..super::smp::MAXCPU {
+            if crate::percpu::ONLINE.load(Ordering::Relaxed) & (1 << c) == 0 { continue; }
+            let mut ev = [crate::sched::SEV0; 10];
+            let n = crate::sched::last_decisions(c, &mut ev);
+            if n == 0 { continue; }
+            crate::print!("║   core {} decided:", c);
+            for e in &ev[..n] {
+                crate::print!(" [-{}us {}t{}->t{} {}]", now.wrapping_sub(e.tsc).saturating_mul(1_000_000) / hz,
+                    if e.why & crate::sched::SW_TICK != 0 { "tick " } else { "yield " }, e.from, e.to, e.why & 0x7F);
+            }
+            crate::println!("");
+        }
     }
     let ec = (f.esr >> 26) & 0x3F;
     if matches!(ec, 0x20 | 0x21 | 0x24 | 0x25) {
