@@ -5,6 +5,7 @@
 pub mod abi;     // the Linux x86-64 syscall numbers ARE the internal ones: the identity decoder
 #[macro_use]
 pub mod serial;  // the 16550 UART on COM1 (port I/O), `print!`/`println!`
+pub mod barrier; // dma_wmb: the ring's stores before the doorbell, as the DEVICE sees them
 pub mod boot;    // the PVH / multiboot2 entry and the 32-bit -> long mode switch
 pub mod gdb;     // the gdb stub over COM2: the x86 register file, DR0/DR7 watchpoints
 pub mod gdt;     // the GDT, the per-core TSS, the iretq into ring 3
