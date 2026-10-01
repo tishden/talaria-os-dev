@@ -1712,6 +1712,33 @@ pub fn guard(vaddr: u64) {
     }
 }
 
+/// Take a guard page back in the address space `pml4_phys` — a walk that creates nothing and
+/// splits nothing: only a 4K entry that IS a guard (not present, `PTE_GUARD`) becomes the
+/// kernel's identity leaf again. `sched::free_kstack` calls it for every address space when
+/// a kernel stack is returned: `guard` makes the hole in ONE space (the one active when the
+/// stack was allocated — a parent's, during its `fork`), and a stack freed without this left
+/// that hole behind in it for good. The frame then went to another kernel stack, and the
+/// kernel, running under the space with the hole, faulted on a read of that stack (the
+/// scheduler reading the frame of the task it was about to enter — the arm64 `forkap` gate).
+pub fn unguard_in(pml4_phys: u64, vaddr: u64) {
+    let a = vaddr & !0xFFF;
+    if pml4_phys == 0 { return; }
+    // SAFETY: P1 + P2 — a read-only descent of a live space's tables (the entries above the
+    // leaf are only read), and one store into the entry of a KERNEL-STACK page, which the
+    // space's owner never writes: its `mprotect`/`munmap` work on its own ranges.
+    unsafe {
+        let e4 = pte_r((pml4_phys as *const Pte).add(((a >> 39) & 0x1FF) as usize));
+        if e4 & PTE_P == 0 { return; }
+        let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(((a >> 30) & 0x1FF) as usize));
+        if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { return; }
+        let e2 = pte_r(((e3 & ADDR_MASK) as *const Pte).add(((a >> 21) & 0x1FF) as usize));
+        if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { return; }
+        let pte = ((e2 & ADDR_MASK) as *mut Pte).add(((a >> 12) & 0x1FF) as usize);
+        let e = pte_r(pte);
+        if e & PTE_P == 0 && e & PTE_GUARD != 0 { pte_w(pte, ident_leaf(a)); }
+    }
+}
+
 /// A `munmap` in identity mode (the kernel's AS): remove ring 3's access, PRESERVING the kernel's
 /// identity mapping of the frame. Previously present was extinguished here — and a frame
 /// that returned into the free list was inaccessible to the kernel until it was

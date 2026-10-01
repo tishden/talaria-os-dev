@@ -661,6 +661,8 @@ pub static STACK_BUSY: [AtomicBool; NTASKS] = [const { AtomicBool::new(false) };
 pub static STACK_WAITS: AtomicU64 = AtomicU64::new(0);
 pub static STACK_WAIT_MAX_NS: AtomicU64 = AtomicU64::new(0);
 pub static STACK_WAIT_LONG: AtomicU64 = AtomicU64::new(0);
+/// The waits longer than 10 ms behind a core that was STILL leaving the stack (it was waited for).
+pub static STACK_WAIT_SLOW: AtomicU64 = AtomicU64::new(0);
 /// Wait until the core that released the task `t` leaves its kernel stack.
 /// It is called AFTER a successful marking (`AP_TAKEN.swap(true)` / `CURRENT=next`).
 #[inline]
@@ -669,12 +671,38 @@ pub fn stack_wait(t: usize) {
     let t0 = crate::tsc::rdtsc();
     STACK_WAITS.fetch_add(1, Ordering::Relaxed);
     let mut n = 0u32;
+    let mut slow = false;
+    let mut said = 0u64;
     while STACK_BUSY[t].load(Ordering::SeqCst) {
         core::hint::spin_loop();
         n = n.wrapping_add(1);
         if n & 0x3FF == 0 {
             let us = crate::tsc::rdtsc().wrapping_sub(t0).saturating_mul(1_000_000) / crate::tsc::calibrate_cached().max(1);
-            if us > 10_000 { STACK_WAIT_LONG.fetch_add(1, Ordering::Relaxed); break; }
+            if us > 10_000 {
+                // TEN MILLISECONDS IS NOT A DEATH CERTIFICATE. The flag used to be given up here
+                // unconditionally ("the releasing core died on a foreign stack — we enter all
+                // the same"), and a releasing core that was merely SLOW — a vCPU its host took
+                // away for longer than that, an emulator on a loaded machine — was still on the
+                // stack when the taker entered: two cores on one kernel stack, a return into
+                // address 0x10, a frame overwritten while its crash dump was being printed
+                // (the arm64 `forkap` gate under eight QEMUs on eight host cores: one boot in
+                // sixty; the same code, and the same 8 ms steals, exist on a shared EC2 host).
+                // A core that is still leaving this stack says so itself (`percpu::off_stack`,
+                // cleared by the stub after the stack is changed): while any does, we wait.
+                // Only a flag nobody stands behind is a leak, and only then do we enter.
+                let online = crate::percpu::ONLINE.load(Ordering::SeqCst);
+                let held = (0..MAXCPU).any(|c| online & (1 << c) != 0 && crate::percpu::off_stack_of(c) == t as u64);
+                if !held { STACK_WAIT_LONG.fetch_add(1, Ordering::Relaxed); break; }
+                if !slow { slow = true; STACK_WAIT_SLOW.fetch_add(1, Ordering::Relaxed); }
+                // A wait that lasts SECONDS is not a slow host any more: say who is being waited
+                // for, once a second, while the machine can still be read.
+                if us / 1_000_000 > said {
+                    said = us / 1_000_000;
+                    let who = (0..MAXCPU).find(|&c| online & (1 << c) != 0 && crate::percpu::off_stack_of(c) == t as u64).unwrap_or(MAXCPU);
+                    crate::println!("sched: core {} has been leaving the kernel stack of t{} for {} s — core {} waits to enter the task",
+                        who, t, said, crate::percpu::cpu_id());
+                }
+            }
         }
     }
     let ns = crate::tsc::cycles_to_ns(crate::tsc::rdtsc().wrapping_sub(t0), crate::tsc::calibrate_cached());
@@ -752,14 +780,32 @@ fn ap_claim(t: usize, cpu: usize) -> bool {
 }
 /// How many times the mark was removed because the task moved away between the check and the swap.
 pub static CLAIM_MOVED: AtomicU64 = AtomicU64::new(0);
+/// IS THE BOOT CORE ON THIS TASK. `CURRENT` alone does not answer that: the boot core's
+/// switch is a transaction — it announces `CURRENT = next`, looks whether a thief took
+/// `next`, and ROLLS BACK to the task it is on when one did. For the length of that
+/// transaction `CURRENT` names a task the core is not on, and the task it IS on looked
+/// free: a second thief took it (`AP_TAKEN`, `CPU_OF`), waited for `STACK_BUSY` — which the
+/// rollback itself clears — and entered the frame the tick had just saved, while the boot
+/// core returned into the same frame. Two cores in one context: a jump to the value of a
+/// saved stack pointer, a return into 0x10 (the arm64 `forkap` gate under eight QEMUs on
+/// eight host cores, one boot in a hundred; the window is two stores wide on a quiet
+/// machine, and it is in the shared code). The core's own "current task" word
+/// (`percpu::cur_task`) is written only when a switch is COMMITTED, so through the whole
+/// transaction it still names the task the core stands on: a task is the boot core's if
+/// EITHER word names it.
+#[inline]
+fn bsp_on(t: usize) -> bool {
+    !BSP_IDLE.load(Ordering::SeqCst)
+        && (CURRENT.load(Ordering::SeqCst) == t || crate::percpu::cur_task_of(0) == t as u64)
+}
 /// A steal with a check of the donor BSP (see `ap_schedule`): the BSP declares its occupancy
 /// through CURRENT rather than through AP_TAKEN — we verify AFTER our own marking.
 #[inline]
 fn ap_claim_steal(t: usize, cpu: usize) -> bool {
     if AP_TAKEN[t].swap(true, Ordering::SeqCst) { return false; }
     core::sync::atomic::fence(Ordering::SeqCst);
-    if CPU_OF[t].load(Ordering::SeqCst) == 0 && !BSP_IDLE.load(Ordering::SeqCst) && CURRENT.load(Ordering::SeqCst) == t {
-        AP_TAKEN[t].store(false, Ordering::SeqCst); // the BSP managed to enter it
+    if CPU_OF[t].load(Ordering::SeqCst) == 0 && bsp_on(t) {
+        AP_TAKEN[t].store(false, Ordering::SeqCst); // the BSP managed to enter it (or never left it: see `bsp_on`)
         STEAL_BSP_BUSY.fetch_add(1, Ordering::Relaxed);
         return false;
     }
@@ -770,7 +816,7 @@ fn ap_claim_steal(t: usize, cpu: usize) -> bool {
 pub static STEAL_BSP_BUSY: AtomicU64 = AtomicU64::new(0);
 pub fn is_running(t: usize) -> bool {
     let cpu = cpu_of(t);
-    if cpu == 0 { return !BSP_IDLE.load(Ordering::SeqCst) && CURRENT.load(Ordering::SeqCst) == t; }
+    if cpu == 0 { return bsp_on(t); }
     AP_TAKEN[t].load(Ordering::SeqCst)
 }
 
@@ -799,7 +845,7 @@ pub fn migrate_idle_task(t: usize, cpu: usize) -> bool {
     CPU_OF[t].store(cpu as u8, Ordering::SeqCst);
     core::sync::atomic::fence(Ordering::SeqCst);
     let entered = AP_TAKEN[t].load(Ordering::SeqCst)
-        || (old == 0 && !BSP_IDLE.load(Ordering::SeqCst) && CURRENT.load(Ordering::SeqCst) == t);
+        || (old == 0 && bsp_on(t));
     if entered {
         // A rollback happens only if CPU_OF is still ours: a thief could have already rewritten it to itself.
         let _ = CPU_OF[t].compare_exchange(cpu as u8, old as u8, Ordering::SeqCst, Ordering::SeqCst);
@@ -1014,7 +1060,7 @@ unsafe fn reap_dead_kstacks() {
         let tid = (v >> 56) as usize - 1;
         if tid == cur { continue; } // the BSP may still be on this stack (limbo)
         if s.compare_exchange(v, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-            crate::mem::free_contig(v & 0xFFFF_FFFF_FFFF, (v >> 48) & 0xFF);
+            free_kstack(v & 0xFFFF_FFFF_FFFF, (v >> 48) & 0xFF);
         }
     }
 }
@@ -1971,7 +2017,7 @@ unsafe fn reuse_slot() -> Option<usize> {
     for i in 0..n {
         if i == cur || !DEAD[i] || task_on_cpu(i) || dying(i) { continue; } // it still stands on its own stack (or is being run to the end)
         if REAPED[i] || proc_of(i) == my_proc {
-            if KSTACK[i] != 0 && KSZ[i] != 0 { crate::mem::free_contig(KSTACK[i] - KSZ[i] * 4096, KSZ[i]); }
+            if KSTACK[i] != 0 && KSZ[i] != 0 { free_kstack(KSTACK[i] - KSZ[i] * 4096, KSZ[i]); }
             PENDING[i].store(true, Ordering::SeqCst); // the slot is occupied, but the task is not assembled yet
             KSTACK[i] = 0; KSZ[i] = 0; DEAD[i] = false; GONE[i] = false; EXITREG_OK[i] = false; REAPED[i] = false; CTID[i] = 0; SIGRSP[i] = 0;
             CPU_OF[i].store(0, Ordering::SeqCst); AP_TAKEN[i].store(false, Ordering::SeqCst);
@@ -1986,12 +2032,55 @@ static mut KSZ: [u64; NTASKS] = [0; NTASKS];  // the pages of a task's kernel st
 // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it touches,
 // and what crosses cores is atomic (see the module's note).
 pub fn set_kstack_pages(tid: usize, pages: u64) { unsafe { KSZ[tid] = pages; } }
+/// For a crash dump: the task's kernel stack as (the base, the top), the context saved for
+/// it, the core it is assigned to — and whether the boot core is in limbo, on which task.
+/// "Which stack was this core on, and whose is it" is the first question of a crash that
+/// jumped into garbage.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))] // the arm64 crash dump prints it; x86's has its own block
+pub fn crash_facts(tid: usize) -> (u64, u64, u64, u8, bool, usize) {
+    if tid >= NTASKS { return (0, 0, 0, 0xFF, BSP_LIMBO.load(Ordering::Relaxed), CURRENT.load(Ordering::Relaxed)); }
+    // SAFETY: C1 — a read-only snapshot for a diagnosis; the values may be changing under us.
+    unsafe {
+        let top = core::ptr::read_volatile(core::ptr::addr_of!(KSTACK[tid]));
+        let pages = { let k = core::ptr::read_volatile(core::ptr::addr_of!(KSZ[tid])); if k != 0 { k } else { KSTACK_PAGES } };
+        (top.saturating_sub(pages * 4096), top, core::ptr::read_volatile(core::ptr::addr_of!(RSP[tid])),
+         CPU_OF[tid].load(Ordering::Relaxed), BSP_LIMBO.load(Ordering::Relaxed), CURRENT.load(Ordering::Relaxed))
+    }
+}
+/// The old stacks of migrated tasks not yet returned: (the task, the base, the pages).
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+pub fn dead_kstacks(mut f: impl FnMut(usize, u64, u64)) {
+    for s in DEAD_KSTK.iter() {
+        let v = s.load(Ordering::Relaxed);
+        if v != 0 { f((v >> 56) as usize - 1, v & 0xFFFF_FFFF_FFFF, (v >> 48) & 0xFF); }
+    }
+}
 /// The top of a task's kernel stack (rsp0). It is needed by the return from a signal handler:
 /// it builds an iret frame ABOVE the current top, where the syscall's stub will no longer
 /// return.
 // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it touches,
 // and what crosses cores is atomic (see the module's note).
 pub fn kstack_top(tid: usize) -> u64 { unsafe { core::ptr::read_volatile(core::ptr::addr_of!(KSTACK[tid])) } }
+
+/// Return a task's kernel stack `[base, base + pages)` to the allocator — and its guard
+/// page to EVERY address space. `alloc_kstack` makes the bottom page a hole in the space
+/// that is active at that moment (a parent's, when it forks); the frame's next owner is
+/// reached from other spaces too.
+///
+/// # Safety
+/// C1 + C3: nobody executes on the stack (the callers' own conditions), and the task table
+/// is read for the roots of the live spaces.
+unsafe fn free_kstack(base: u64, pages: u64) {
+    if base == 0 || pages == 0 { return; }
+    crate::paging::unguard_in(crate::paging::kernel_cr3(), base);
+    crate::paging::unguard_in(crate::paging::current_cr3() & !0xFFF, base);
+    let n = NREADY.load(Ordering::SeqCst).min(NTASKS);
+    for t in 0..n {
+        let c = core::ptr::read_volatile(core::ptr::addr_of!(CR3[t]));
+        if c != 0 { crate::paging::unguard_in(c & !0xFFF, base); }
+    }
+    crate::mem::free_contig(base, pages);
+}
 
 /// The pages of a kernel stack per task. It was 4 (16 KB) — that is too little for large
 /// workloads: the kernel executes syscalls on it, and on top of a syscall an
@@ -2336,7 +2425,7 @@ pub fn reset() {
         for i in 0..NTASKS {
             // the kernel stacks of the crashed instance's tasks go into the free list (nobody executes on them:
             // reset is called by the supervisor after a longjmp, a cli, the timer is stopped)
-            if KSTACK[i] != 0 && KSZ[i] != 0 { crate::mem::free_contig(KSTACK[i] - KSZ[i] * 4096, KSZ[i]); }
+            if KSTACK[i] != 0 && KSZ[i] != 0 { free_kstack(KSTACK[i] - KSZ[i] * 4096, KSZ[i]); }
             DEAD[i] = false; GONE[i] = false; EXITREG_OK[i] = false; REAPED[i] = false; CTID[i] = 0; CR3[i] = 0; HEAP_B[i] = 0; HEAP_BR[i] = 0; HEAP_TP[i] = 0;
                 EXITCODE[i] = 0; KSTACK[i] = 0; KSZ[i] = 0; FSBASE[i] = 0; PROC[i] = i as u8; PPID[i] = -1; FPU_VALID[i] = false; DEAD_AS[i] = 0;
                 CPU_OF[i].store(0, Ordering::SeqCst); AP_TAKEN[i].store(false, Ordering::SeqCst); COMM[i] = [0; 16]; }
@@ -2879,7 +2968,7 @@ fn rust_schedule_inner(cur_rsp: u64) -> u64 {
     // round.
     // We are still on `cur`'s kernel stack — see `STACK_BUSY`; at a back-off the flag is removed right here.
     let leaving = !idle && next != cur;
-    if leaving { STACK_BUSY[cur].store(true, Ordering::SeqCst); crate::percpu::set_off_stack(cur as u64); }
+    if leaving { crate::percpu::set_off_stack(cur as u64); STACK_BUSY[cur].store(true, Ordering::SeqCst); } // the name first: see `stack_wait`
     CURRENT.store(next, Ordering::SeqCst);
     if idle { BSP_IDLE.store(false, Ordering::SeqCst); }
     core::sync::atomic::fence(Ordering::SeqCst);
@@ -3223,6 +3312,26 @@ pub fn strace_note(cpu: usize, from: usize, to: usize, why: u8, hint: usize) {
             from: from.min(255) as u8, to: to.min(255) as u8, why, hint: hint.min(255) as u8 };
     }
 }
+/// The last `out.len()` decisions of the core `cpu`, the old ones first (a crash dump: what
+/// the scheduler did with the task just before it died). Returns how many were put.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))] // the arm64 crash dump prints it
+pub fn last_decisions(cpu: usize, out: &mut [SchedEv]) -> usize {
+    if cpu >= MAXCPU || out.is_empty() { return 0; }
+    let end = STRACE_POS[cpu].load(Ordering::Relaxed);
+    let n = end.min(STRACE_N).min(out.len());
+    for (j, slot) in out.iter_mut().take(n).enumerate() {
+        // SAFETY: C1 — a read of another core's ring for a diagnosis; a record being written is torn at worst.
+        *slot = unsafe { STRACE[cpu][(end - n + j) % STRACE_N] };
+    }
+    n
+}
+/// The context instruments, for a crash dump: (entries into a used frame, frames that were
+/// not frames, the boot core's saves of a task that belongs to another core, long stack waits).
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+pub fn ctx_counters() -> (u64, u64, u64, u64) {
+    (CTX_STALE.load(Ordering::Relaxed), CTX_BAD.load(Ordering::Relaxed), BSP_SAVE_FOREIGN.load(Ordering::Relaxed),
+     STACK_WAIT_LONG.load(Ordering::Relaxed) | STACK_WAIT_SLOW.load(Ordering::Relaxed) << 32)
+}
 /// Take from the core `cpu`'s ring the records from the cycle `since` (and `before` records before
 /// it — for the context), the old ones first. It returns how many were put into `out`.
 pub fn strace_take(cpu: usize, since: u64, before: usize, out: &mut [SchedEv]) -> usize {
@@ -3390,7 +3499,7 @@ fn ap_schedule(cpu: usize, cur_rsp: u64) -> u64 {
     acct_run(cpu, cur); acct_switch(cpu, cur);   // the same on a secondary core (see `RUN_TSC`)
     note_ready_off(cur);
     // The context is saved, but WE ARE STILL ON ITS STACK — the flag will be removed by the stub (see `STACK_BUSY`).
-    STACK_BUSY[cur].store(true, Ordering::SeqCst); crate::percpu::set_off_stack(cur as u64);
+    crate::percpu::set_off_stack(cur as u64); STACK_BUSY[cur].store(true, Ordering::SeqCst); // the name first: see `stack_wait`
     AP_TAKEN[cur].store(false, Ordering::SeqCst); // the task may be rehung onto another core
     // The task could have been rehung while it WAS EXECUTING: the balancer checks
     // "it is not executing" and moves `CPU_OF`, while between these two actions

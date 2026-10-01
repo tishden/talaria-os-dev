@@ -62,8 +62,14 @@ bootx() {
 }
 
 PASS=0; FAIL=0
+# The console of a boot that failed a check is KEPT (kernel/target/a64-fail/N.log): a trap
+# seen once in thirty runs is diagnosed from its dump, and the next boot overwrites $LOG.
+FAILDIR="$REPO/kernel/target/a64-fail"; rm -rf "${FAILDIR:?}"
+keepfail() {
+  mkdir -p "$FAILDIR" && cp "$LOG" "$FAILDIR/$((PASS+FAIL)).log" 2>/dev/null && echo "      the console: kernel/target/a64-fail/$((PASS+FAIL)).log"
+}
 assert() {
-  if grep -qE "$1" "$LOG"; then echo "  PASS  $2"; PASS=$((PASS+1)); else echo "  FAIL  $2 (no /$1/)"; FAIL=$((FAIL+1)); fi
+  if grep -qE "$1" "$LOG"; then echo "  PASS  $2"; PASS=$((PASS+1)); else echo "  FAIL  $2 (no /$1/)"; FAIL=$((FAIL+1)); keepfail; fi
 }
 # assertcount PAT N NAME: the pattern must appear at least N times (two processes, two lines).
 assertcount() {
@@ -72,7 +78,7 @@ assertcount() {
 }
 # assertnot PAT NAME: the pattern must NOT appear (a trap or a panic anywhere is a failure).
 assertnot() {
-  if grep -qE "$1" "$LOG"; then echo "  FAIL  $2 (found /$1/)"; FAIL=$((FAIL+1)); grep -E "$1" "$LOG" | head -3 | cut -c1-160 | sed 's/^/      /'; else echo "  PASS  $2"; PASS=$((PASS+1)); fi
+  if grep -qE "$1" "$LOG"; then echo "  FAIL  $2 (found /$1/)"; FAIL=$((FAIL+1)); grep -E "$1" "$LOG" | head -3 | cut -c1-160 | sed 's/^/      /'; keepfail; else echo "  PASS  $2"; PASS=$((PASS+1)); fi
 }
 
 boot 30 "talaria.test=bringup"
