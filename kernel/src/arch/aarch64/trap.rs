@@ -377,14 +377,71 @@ fn ec_name(esr: u64) -> &'static str {
     }
 }
 
+/// A fatal exception of the kernel's own. The first lines are the registers — they always
+/// reach the console; then the block x86 prints on its `CRASH DUMP` path (`idt.rs`): the
+/// task and its last syscall, what the abort was, the stack's words, the x29 chain, the
+/// flight recorder, and the kernel's core dump when the operator asked for one. Every
+/// later step reads more state than the one before it, so a SECOND fault inside the block
+/// (a wild sp, a table the fault itself broke) stops at the registers already printed.
 #[unsafe(no_mangle)]
 extern "C" fn trap(kind: u64, f: &Frame) -> ! {
+    static DEPTH: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+    let cpu = cpu::cpu_index().min(63);
+    let depth = DEPTH[cpu].fetch_add(1, Ordering::Relaxed);
     crate::println!("[trap] {}: esr={:#x} ({}) far={:#x} elr={:#x} spsr={:#x} sp={:#x}",
         kind_name(kind), f.esr, ec_name(f.esr), f.far, f.pc, f.flags, f.usp);
     for i in (0..30).step_by(2) {
         crate::println!("[trap]   x{:<2}={:#018x} x{:<2}={:#018x}", i, f.x(i), i + 1, f.x(i + 1));
     }
     crate::println!("[trap]   x30={:#018x}", f.lr);
+    // Before the per-core block exists there is no task, no scheduler and no FS to ask.
+    if depth != 0 || super::percpu::block_ptr().is_null() {
+        if depth != 0 { crate::println!("[trap] a fault inside the crash dump — halting on the registers above"); }
+        cpu::halt_irq_off_forever()
+    }
+    let el0 = f.flags & 0xF == 0;
+    crate::println!("\n╔═══ CRASH DUMP: {} — {} ═══", kind_name(kind), ec_name(f.esr));
+    crate::println!("║ pc={:#018x} spsr={:#x} sp={:#018x} the mode: {}", f.pc, f.flags, f.usp, if el0 { "EL0 (user)" } else { "EL1 (kernel)" });
+    let t = crate::sched::current_id();
+    if t < crate::sched::NTASKS {
+        let v = crate::syscall::LAST_SYS[t].load(Ordering::Relaxed);
+        if v != u64::MAX { crate::println!("║ the task's last syscall: #{} (the return into {:#x})", v >> 48, v & 0xFFFF_FFFF_FFFF); }
+        crate::println!("║ the task t{} (DEAD={}) its tables={:#x} ttbr0={:#x} core {}", t, !crate::sched::task_alive(t),
+            crate::sched::task_cr3(t), crate::paging::current_cr3(), cpu);
+    }
+    let ec = (f.esr >> 26) & 0x3F;
+    if matches!(ec, 0x20 | 0x21 | 0x24 | 0x25) {
+        // The fault status code: bits 5:2 name the kind, bits 1:0 the table level.
+        let fsc = f.esr & 0x3F;
+        let what = match fsc >> 2 {
+            0 => "an address size fault", 1 => "not mapped (a translation fault)", 2 => "the access flag",
+            3 => "protection (a permission fault)", 4 => "a synchronous external abort", 12 => "a TLB conflict",
+            _ => "another abort",
+        };
+        let rw = if ec == 0x20 || ec == 0x21 { "an instruction fetch" } else if f.esr & (1 << 6) != 0 { "a write" } else { "a read" };
+        crate::println!("║ the abort: FAR={:#018x} ({}, level {}, {})", f.far, what, fsc & 3, rw);
+    }
+    // The stack's first words — only where the sp points into memory the kernel maps for
+    // itself (a wild sp is the fault's likely CAUSE, and reading it would be the second fault).
+    let sp = f.usp;
+    if sp & 7 == 0 && sp >= 0x1000 && crate::paging::query(sp).0 && crate::paging::query(sp + 56).0 {
+        crate::println!("║ the stack @ {:#x}:", sp);
+        for i in 0..8u64 {
+            let a = sp + i * 8;
+            let v = unsafe { core::ptr::read_volatile(a as *const u64) };
+            crate::println!("║   [{:#014x}] = {:#018x}", a, v);
+        }
+    } else {
+        crate::println!("║ the stack: sp={:#x} is not a mapped, aligned address — not read", sp);
+    }
+    crate::obs::unwind::print_backtrace(if el0 { "workload" } else { "kernel" }, f.pc, f.fp, el0);
+    crate::fr::dump();
+    // The kernel's core dump — after the text: the text always arrives over the console, a
+    // write to the disk at the moment of a fault may not.
+    if !el0 { crate::coredump::dump_kernel(f, 11); }
+    crate::println!("╚═══ the kernel has been halted ═══");
+    // Only the boot core flushes the trace and reboots for the next item of a suite.
+    if super::smp::my_logical() == 0 { crate::suite::park(); }
     cpu::halt_irq_off_forever()
 }
 

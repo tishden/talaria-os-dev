@@ -140,6 +140,23 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
   assert 'PTHREADS: counter=200000 \(we expected 200000\) -> OK'              'pthreads: four threads through clone and futex, preempted by the tick, agree on the count'
   assert 'sched: all the 5 task\(s\) have finished'                           'pthreads: the process and its threads are reaped'
   assertnot '\[trap\]|PANIC|\[fault\]'                                        'pthreads: no trap, no fault'
+  # The C++ set: a libstdc++ built against the cross musl (the `aarch64-linux-musl-cross`
+  # toolchain, `make -C kernel/user aarch64` builds the four when its g++ is on the PATH).
+  if [ -f "$REPO/kernel/user/aarch64/cpptest" ]; then
+    echo "== ring 3 on arm64: C++ (static libstdc++ over musl) =="
+    boot 60 "talaria.test=cpp"
+    assert 'Talaria runs C..! sum.sq 1..10.=385'                               'cpp: STL, exceptions (the unwinder over .eh_frame) and static initialisers'
+    boot 90 "talaria.test=cpp2"
+    assert 'C.. threads: atomic=200000 guarded=200000'                         'cpp2: std::thread + mutex + chrono'
+    boot 60 "talaria.test=cpp3"
+    assert 'iostream.map.sort: talaria=3'                                      'cpp3: iostream + map + sort'
+    boot 60 "talaria.test=cppdtor"
+    assert 'the global destructor with the futex path has worked'              'cppdtor: the global destructors (a thread and a condvar after main)'
+    assert 'exit_group.the code=0. — the process has finished'                 'cppdtor: a clean exit_group(0)'
+    assertnot '\[trap\]|PANIC|\[fault\]|an unknown number'                    'cppdtor: no trap, no fault, no unknown syscall'
+  else
+    echo "  SKIP  cpp: no kernel/user/aarch64/cpptest (the aarch64-linux-musl-cross g++ is needed to build the C++ set)"
+  fi
   (cd "$REPO/kernel" && python3 mkfs.py "$REPO/$DISK" user/aarch64 >/dev/null 2>&1)
   echo "== the disk on arm64: virtio-blk over the tree's virtio-mmio, processes from it =="
   bootd 40 "talaria.test=fs"
@@ -266,6 +283,23 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
       else echo "  SKIP  core (host): no gdb that knows aarch64"; fi
       rm -rf "${CORE:?}"
     else echo "  SKIP  core (host): no debugfs"; fi
+    # The KERNEL's own crash: a deliberate data abort at EL1 three calls deep. The registers
+    # first (they always reach the console), then the block x86 prints — what the abort was,
+    # the stack, the x29 chain — and the kernel's core dump, opened by the host's gdb.
+    run 90 "talaria.test=corekernel talaria.core=/core.elf" core
+    assert '\[trap\] sync from EL1h: .*data abort, same EL'                  'corekernel: the registers of the fatal exception are printed first'
+    assert 'CRASH DUMP: sync from EL1h — data abort, same EL'                 'corekernel: the crash dump block follows them'
+    assert 'the abort: FAR=0x00007effdead0000 \(not mapped \(a translation fault\), level [0-3], a write\)' 'corekernel: the abort is decoded (the address, not mapped, a write)'
+    assert 'the stack kernel \([4-8] frame'                                   'corekernel: the call stack of the kernel is in the log (the x29 chain through the three test frames)'
+    assert '\[core\] [0-9]+ B into /core.elf: threads 1, memory segments'     'corekernel: a fault IN THE KERNEL writes an ELF core dump onto the disk'
+    assert 'the kernel has been halted'                                       'corekernel: the dump ends, the machine stops (no second fault inside it)'
+    if command -v debugfs >/dev/null 2>&1 && [ -n "${GDB:-}" ]; then
+      CORE=$(mktemp -d); debugfs -R "dump /core.elf $CORE/core.elf" "$REPO/$TD/run.img" >/dev/null 2>&1
+      KELF="$REPO/${IMG%.img}"
+      host '$GDB -batch -nx -ex bt "$KELF" "$CORE/core.elf" 2>/dev/null | grep -q "core_fault_l1"' 'corekernel (host): gdb opens the kernel'"'"'s dump at the faulting function'
+      host '$GDB -batch -nx -ex bt "$KELF" "$CORE/core.elf" 2>/dev/null | grep -q "core_fault_l3"' 'corekernel (host): and unwinds the kernel stack from the dump (three frames up)'
+      rm -rf "${CORE:?}"
+    else echo "  SKIP  corekernel (host): no debugfs or no gdb that knows aarch64"; fi
     run 120 "talaria.mode=cell talaria.core=/core.elf" coremt
     assert '\[core\] [0-9]+ B into /core.elf: threads 4,'                     'coredump-mt: the crash of one thread of a cell on four cores writes a dump with ALL the threads'
     assert "supervise: the workload.s threads were killed by signal 11"       'coredump-mt: the crash of one thread = the crash of the process (the supervisor learns it on the boot core)'
