@@ -48,6 +48,7 @@ pub fn set_base(b: u64) { BASE.store(b, Ordering::Relaxed); }
 /// 8N1, the FIFO on, 115200 against the 24 MHz reference clock QEMU models (QEMU
 /// ignores the divisor; a board does not).
 pub fn init() {
+    if BASE.load(Ordering::Relaxed) == 0 { return; }
     unsafe {
         w(CR, 0);
         w(ICR, 0x7FF);
@@ -63,6 +64,8 @@ pub fn init() {
 const TX_SPINS: u32 = 200_000;
 
 pub fn write_byte(b: u8) {
+    // No console (a machine described by ACPI whose SPCR names none we can drive).
+    if BASE.load(Ordering::Relaxed) == 0 { return; }
     unsafe {
         let mut n = 0u32;
         while r(FR) & FR_TXFF != 0 {
@@ -117,9 +120,10 @@ pub fn puts_locked(s: &[u8]) { let _g = lock(); for &b in s { putb(b); } }
 const FR_RXFE: u32 = 1 << 4;
 /// A byte from the receive FIFO, if there is one.
 pub fn getc() -> Option<u8> {
+    if BASE.load(Ordering::Relaxed) == 0 { return None; }
     unsafe { if r(FR) & FR_RXFE != 0 { None } else { Some((r(DR) & 0xFF) as u8) } }
 }
-pub fn port_has_data(_port: u16) -> bool { unsafe { r(FR) & FR_RXFE == 0 } }
+pub fn port_has_data(_port: u16) -> bool { BASE.load(Ordering::Relaxed) != 0 && unsafe { r(FR) & FR_RXFE == 0 } }
 /// # Safety
 /// There is no port I/O on arm64; the x86 self-test that pokes COM ports reads zero here.
 pub unsafe fn inb(_port: u16) -> u8 { 0 }
@@ -192,6 +196,8 @@ pub fn capture_drain_blocking() {
 pub fn capture_flush(budget_ns: u64, max_bytes: usize) -> usize {
     let len = CAP_LEN.load(Ordering::Relaxed);
     if CAP_OUT.load(Ordering::Relaxed) >= len { return 0; }
+    // No console: the block is dropped, not kept waiting for a transmitter that does not exist.
+    if BASE.load(Ordering::Relaxed) == 0 { CAP_OUT.store(len, Ordering::Relaxed); return 0; }
     let hz = crate::tsc::hz();
     let limit = if hz == 0 { u64::MAX } else { ((hz as u128 * budget_ns as u128) / 1_000_000_000u128) as u64 };
     let t0 = crate::tsc::rdtsc();

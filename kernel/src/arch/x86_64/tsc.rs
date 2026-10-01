@@ -173,4 +173,4 @@ pub fn rdrand64() -> Option<u64> {
 /// The wall clock's base from a real-time clock: x86 takes it from kvmclock (`ref_read`);
 /// the CMOS clock is not read.
 pub fn rtc_read() -> Option<(u64, u64)> { None }
-pub const RTC_NAME: &str = "the RTC";
+pub fn rtc_name() -> &'static str { "the RTC" }

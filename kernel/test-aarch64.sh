@@ -424,6 +424,52 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
   else
     echo "== the file system on arm64: SKIPPED — the ext2 images were not built =="
   fi
+  # ── the UEFI block (docs/ARM64-PLAN.md §4.2, the product path): edk2 -> the arm64 stub ->
+  # the kernel, the machine described by ACPI alone (edk2 publishes no device tree next to
+  # its tables) — the MADT's GIC entries, the GTDT, the SPCR, PSCI from the FADT, the ECAM
+  # from the MCFG, the BARs the firmware assigned. The stub carries the kernel inside:
+  # `kernel/uefi-stub/build.sh aarch64` after every kernel build, else the block is skipped.
+  EFI=kernel/uefi-stub/target/aarch64-unknown-uefi/release/talaria-uefi-stub.efi
+  FW=/usr/share/edk2/aarch64/QEMU_EFI.silent.fd
+  # bootu SECS APPEND [DISK]: through the firmware; DISK (a copy is made) on NVMe.
+  bootu() {
+    local drv=""
+    [ -n "${3:-}" ] && { cp "$REPO/$3" "$REPO/$TD/uefi.img"; drv="-drive id=d0,file=/w/$TD/uefi.img,format=raw,if=none -device nvme,drive=d0,serial=tal001"; }
+    QEMU="timeout $1 qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp 4 -m 1024 -nographic -bios $FW \
+      -kernel /w/$EFI -append \"console=ttyAMA0 $2 talaria.smp=4 talaria.poweroff=1\" $drv"
+    if command -v qemu-system-aarch64 >/dev/null 2>&1; then
+      sh -c "$(echo "$QEMU" | sed "s|/w/|$REPO/|g")" > "$LOG" 2>&1
+    else
+      docker run --rm $KVMDEV -v "$REPO:/w" -w /w talaria-qemu-aarch64 sh -c "$QEMU" > "$LOG" 2>&1
+    fi
+  }
+  if [ -f "$REPO/$EFI" ] && [ "$REPO/$EFI" -nt "$REPO/${IMG%.img}" ]; then
+    echo "== UEFI on arm64: edk2 -> the stub -> the kernel, the machine described by ACPI =="
+    bootu 120 "talaria.test=musl"
+    assert 'uefi-stub: Talaria UEFI boot \(aarch64\)'                        'uefi: the firmware starts the stub (the command line from LoadOptions)'
+    assert 'talaria: boot \(aarch64\), EL[12], the UEFI stub.s block='       'uefi: the stub leaves the firmware, turns the MMU off and enters the Image with its boot block'
+    assert 'talaria: ACPI \(the RSDP 0x[0-9a-f]+\): MADT true, GTDT true, SPCR true, FADT true; 4 cpu\(s\)' 'uefi-acpi: the cores, the GIC, the timer, the console and PSCI come from the ACPI tables (no device tree)'
+    assert 'the wall clock.s base is the firmware.s clock \(UEFI GetTime\)'   'uefi: the wall clock starts from the firmware'"'"'s time'
+    assert 'musl static binary -> Talaria OS!'                                'uefi: a musl process in ring 3 behind the firmware path'
+    assertnot '\[trap\]|PANIC|FATAL'                                         'uefi: no trap, no refusal of the stub'
+    bootu 200 "talaria.test=smp4"
+    if [ "$KVM" = 1 ]; then
+      assert 'SMP4: the parallel speedup [234]\.[0-9]+ on 4 cores .* ALL OK'  'uefi-smp4: four cores brought up through PSCI as the FADT names it, the speedup'
+    else
+      assert 'SMP4: the threads are on the cores 1/2/3'                       'uefi-smp4: four cores brought up through PSCI as the FADT names it (the MADT'"'"'s MPIDRs)'
+    fi
+    if [ -s "$REPO/$TD/ext2.img" ]; then
+      bootu 150 "talaria.pci=1 talaria.test=ext2" "$TD/ext2.img"
+      assert 'pci: ECAM 0x[0-9a-f]+ \(MCFG\)'                                 'uefi-pci: the ECAM window from the ACPI MCFG'
+      assert 'nvme: 00:[0-9a-f]+\.0 BAR0=0x[0-9a-f]{9,} '                     'uefi-nvme: the BAR the FIRMWARE assigned (64-bit, above 4 GB) is respected and mapped'
+      assert 'ext2-test: ALL OK'                                              'uefi-nvme: ext2 RW through NVMe behind the firmware path (EC2'"'"'s EBS path)'
+      bootu 120 "talaria.pci=1 talaria.test=its" "$TD/ext2.img"
+      assert 'its: ALL CHECKS PASSED'                                         'uefi-its: MSI-X through the ITS the MADT names'
+      assertnot '\[trap\]|PANIC|its: FAILURE'                                'uefi-its: no trap, no failed check'
+    fi
+  else
+    echo "== UEFI on arm64: SKIPPED — no fresh stub (kernel/uefi-stub/build.sh aarch64 after the kernel build) =="
+  fi
   # ── the network (docs/ARM64-PLAN.md §10.3 step 1): virtio-net over the tree's virtio-mmio
   # windows. The guest and its clients share a tap, so the block runs INSIDE the stand image
   # (`kernel/test-aarch64-net.sh`), which needs NET_ADMIN and /dev/net/tun; its PASS/FAIL

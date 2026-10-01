@@ -61,39 +61,136 @@ fn tree_at(dtb: u64) -> Option<&'static [u8]> {
     Some(unsafe { core::slice::from_raw_parts(dtb as *const u8, total) })
 }
 
-/// The device tree -> `hvm_start_info`: RAM ranges become `memmap` entries of type 1,
-/// `bootargs` becomes the command line. The tree itself is NOT reserved in the map
-/// here: the allocator starts above the kernel and the loader puts the tree well
-/// above it too (`virt`: at RAM base + 128 MiB), and the ranges the kernel keeps
-/// point INTO the tree only until the copy below is made.
-fn start_info_from(tree: &[u8], s: &dtb::Summary) -> u64 {
+/// What the UEFI stub (`kernel/uefi-stub`, the arm64 half) leaves in `x0` instead of a
+/// device tree: the firmware's facts the kernel cannot ask for after `ExitBootServices`.
+/// The layout is the stub's `BootBlock` — change them together.
+#[repr(C)]
+pub struct BootBlock {
+    /// `BOOT_MAGIC`.
+    pub magic: u64,
+    /// The ACPI RSDP (0 — the firmware gave none).
+    pub rsdp: u64,
+    /// The device tree the firmware published as a configuration table (0 — none; a server has none).
+    pub dtb: u64,
+    /// The command line, NUL-terminated.
+    pub cmdline: u64,
+    /// The memory map in the PVH format (`MemEntry`), and how many entries.
+    pub memmap: u64,
+    pub memmap_entries: u64,
+    /// The firmware's clock at the stub's start, seconds since the epoch (0 — unknown).
+    pub epoch_s: u64,
+}
+/// "TALBOOT1", little-endian.
+pub const BOOT_MAGIC: u64 = 0x3154_4F4F_424C_4154;
+
+/// The stub's block at `x0`, if that is what `x0` points at.
+fn boot_block_at(x0: u64) -> Option<&'static BootBlock> {
+    if x0 == 0 || x0 & 7 != 0 { return None; }
+    // SAFETY: the loader's contract puts either a tree or the block at `x0`, in memory the
+    // identity addresses cover; the magic is read first (an aligned 8-byte load).
+    let b = unsafe { &*(x0 as *const BootBlock) };
+    if b.magic == BOOT_MAGIC { Some(b) } else { None }
+}
+/// The stub's memory map as a slice (at most `BB_MAX` entries are used).
+fn boot_map(b: &BootBlock) -> &'static [MemEntry] {
+    if b.memmap == 0 { return &[]; }
+    // SAFETY: the stub's array, `memmap_entries` long, in memory it allocated for us.
+    unsafe { core::slice::from_raw_parts(b.memmap as *const MemEntry, (b.memmap_entries as usize).min(BB_MAX)) }
+}
+/// A firmware's map is in dozens of pieces (the device tree's is one or two ranges).
+const BB_MAX: usize = 256;
+static mut BBMAP: [MemEntry; BB_MAX] = [MemEntry { addr: 0, size: 0, typ: 0, _r: 0 }; BB_MAX];
+
+/// The machine's description -> `hvm_start_info`. From a device tree: its RAM ranges become
+/// `memmap` entries of type 1 and `bootargs` the command line. From the UEFI stub's block:
+/// its memory map (already in the PVH format), its command line and the RSDP. Everything
+/// is COPIED into the kernel's statics: the tree and the block live in memory the frame
+/// allocator will hand out.
+fn start_info_from(tree: Option<&[u8]>, s: &dtb::Summary, bb: Option<&BootBlock>) -> u64 {
     unsafe {
-        let mm = &mut *core::ptr::addr_of_mut!(MEMMAP);
-        for i in 0..s.nmem { mm[i] = MemEntry { addr: s.mem[i].base, size: s.mem[i].size, typ: 1, _r: 0 }; }
         let si = &mut *core::ptr::addr_of_mut!(SI);
-        si.memmap_paddr = core::ptr::addr_of!(MEMMAP) as u64;
-        si.memmap_entries = s.nmem as u32;
-        if let Some(ba) = s.bootargs {
-            let cl = &mut *core::ptr::addr_of_mut!(CMDLINE);
+        let cl = &mut *core::ptr::addr_of_mut!(CMDLINE);
+        let mut have_cmdline = false;
+        if let Some(b) = bb {
+            let src = boot_map(b);
+            let mm = &mut *core::ptr::addr_of_mut!(BBMAP);
+            mm[..src.len()].copy_from_slice(src);
+            si.memmap_paddr = core::ptr::addr_of!(BBMAP) as u64;
+            si.memmap_entries = src.len() as u32;
+            si.rsdp_paddr = b.rsdp;
+            if b.cmdline != 0 {
+                let mut n = 0;
+                while n < CMDLINE_MAX - 1 {
+                    let c = core::ptr::read_volatile((b.cmdline + n as u64) as *const u8);
+                    if c == 0 { break; }
+                    cl[n] = c; n += 1;
+                }
+                cl[n] = 0;
+                have_cmdline = n > 0;
+            }
+        } else {
+            let mm = &mut *core::ptr::addr_of_mut!(MEMMAP);
+            for i in 0..s.nmem { mm[i] = MemEntry { addr: s.mem[i].base, size: s.mem[i].size, typ: 1, _r: 0 }; }
+            si.memmap_paddr = core::ptr::addr_of!(MEMMAP) as u64;
+            si.memmap_entries = s.nmem as u32;
+        }
+        if let (false, Some(tree), Some(ba)) = (have_cmdline, tree, s.bootargs) {
             let n = ba.len.min(CMDLINE_MAX - 1);
             cl[..n].copy_from_slice(&tree[ba.off..ba.off + n]);
             cl[n] = 0;
-            si.cmdline_paddr = core::ptr::addr_of!(CMDLINE) as u64;
+            have_cmdline = true;
         }
+        if have_cmdline { si.cmdline_paddr = core::ptr::addr_of!(CMDLINE) as u64; }
         core::ptr::addr_of!(SI) as u64
     }
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
-    // The tree is read BEFORE the MMU is on: the console's address is in it. With the
-    // MMU off every access is Device-typed and must be aligned — the walker reads
-    // 4-byte tokens at 4-byte offsets and bytes, nothing else.
+extern "C" fn rust_main_aarch64(x0: u64) -> ! {
+    // `x0` is a device tree (`-kernel`, any loader that knows a Linux Image) or the UEFI
+    // stub's block. Both are read BEFORE the MMU is on: the console's address is in them.
+    // With the MMU off every access is Device-typed and must be aligned — the walkers
+    // read bytes and aligned words, nothing else.
+    let bb = boot_block_at(x0);
+    let dtb = bb.map(|b| b.dtb).unwrap_or(x0);
     let tree = tree_at(dtb);
-    let summary = tree.and_then(|t| dtb::parse(t).ok());
-    if let Some(u) = summary.as_ref().and_then(|s| s.uart) { uart::set_base(u.base); }
+    let from_tree = tree.and_then(|t| dtb::parse(t).ok());
+    // A firmware that gives an RSDP is described by ACPI — that is all a server gives.
+    // The tree, when the firmware published one too (edk2 under QEMU), adds what the
+    // static tables do not carry: the virtio-mmio windows and the real-time clock.
+    let from_acpi = bb.filter(|b| b.rsdp != 0)
+        .and_then(|b| unsafe { super::acpiboot::summary(b.rsdp) })
+        .filter(|(s, _)| s.gicd.is_some() && s.gicr.is_some() && s.ncpu > 0);
+    let mut acpi_found = None;
+    let summary = match (from_acpi, from_tree) {
+        (Some((mut s, found)), t) => {
+            acpi_found = Some(found);
+            // The RAM: the span of what the firmware's map calls memory (the tables of
+            // ACPI — types 3 and 4 — must stay readable too).
+            let (mut lo, mut hi) = (u64::MAX, 0u64);
+            for e in bb.map(boot_map).unwrap_or(&[]) {
+                if matches!(e.typ, 1 | 3 | 4) && e.size != 0 { lo = lo.min(e.addr); hi = hi.max(e.addr + e.size); }
+            }
+            if lo != u64::MAX { s.mem[0] = dtb::Range { base: lo, size: hi - lo }; s.nmem = 1; s.mem_seen = 1; }
+            if let Some(t) = t {
+                s.virtio = t.virtio; s.nvirtio = t.nvirtio; s.virtio_seen = t.virtio_seen;
+                s.rtc = t.rtc;
+                if s.uart.is_none() { s.uart = t.uart; }
+            }
+            Some(s)
+        }
+        (None, t) => t,
+    };
+    // No console named by anybody: nothing is written (an address guessed on a machine
+    // nobody described is an access to somebody else's register).
+    match summary.as_ref().and_then(|s| s.uart) {
+        Some(u) => uart::set_base(u.base),
+        None if bb.is_some() => uart::set_base(0),
+        None => {}
+    }
+    if let Some(e) = bb.map(|b| b.epoch_s).filter(|&e| e != 0) { super::tsc::BOOT_EPOCH.store(e, Ordering::Relaxed); }
     uart::init();
-    crate::println!("talaria: boot (aarch64), EL{}, dtb={:#x}", cpu::current_el(), dtb);
+    crate::println!("talaria: boot (aarch64), EL{}, {}={:#x}", cpu::current_el(), if bb.is_some() { "the UEFI stub's block" } else { "dtb" }, x0);
     trap::init();
     // The identity map covers exactly the RAM the tree names (block 0 is the devices).
     // Without a tree: `virt`'s 1 GiB base and a generous size, so that the banner can
@@ -117,12 +214,19 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
     // In picoseconds: Graviton3 counts at 1.05 GHz (952 ps), QEMU's TCG at 62.5 MHz (16 000 ps).
     crate::println!("talaria: the counter: {} Hz ({} ps per tick), now {}", hz, if hz > 0 { 1_000_000_000_000 / hz } else { 0 }, cpu::counter());
 
-    let (Some(tree), Some(s)) = (tree, summary) else {
-        crate::println!("talaria: NO DEVICE TREE at x0 — the loader gave {:#x}; without ACPI or a tree the machine cannot be described", dtb);
+    let Some(s) = summary else {
+        crate::println!("talaria: NO DESCRIPTION OF THE MACHINE at x0 ({:#x}): neither a device tree nor the UEFI stub's block with usable ACPI tables", x0);
         cpu::halt_forever();
     };
-    crate::println!("talaria: the device tree: {} bytes at {:#x}; {} RAM range(s){}, {} cpu(s), {} virtio-mmio window(s)",
-        tree.len(), dtb, s.nmem, if s.mem_seen > s.nmem { " (more were dropped)" } else { "" }, s.ncpu, s.nvirtio);
+    match (acpi_found, tree) {
+        (Some(f), t) => crate::println!("talaria: ACPI (the RSDP {:#x}): MADT {}, GTDT {}, SPCR {}, FADT {}{}; {} cpu(s){}",
+            bb.map(|b| b.rsdp).unwrap_or(0), f.madt, f.gtdt, f.spcr, f.fadt,
+            match f.uart_other { Some(t) => if t == 0x12 || t <= 1 { " (the console is a 16550: no driver yet)" } else { " (the console is of a type with no driver)" }, None => "" },
+            s.ncpu, if t.is_some() { "; the firmware's device tree adds the virtio-mmio windows and the clock" } else { "" }),
+        (None, Some(t)) => crate::println!("talaria: the device tree: {} bytes at {:#x}; {} RAM range(s){}, {} cpu(s), {} virtio-mmio window(s)",
+            t.len(), dtb, s.nmem, if s.mem_seen > s.nmem { " (more were dropped)" } else { "" }, s.ncpu, s.nvirtio),
+        (None, None) => {}
+    }
     for r in &s.mem[..s.nmem] { crate::println!("    RAM {:#012x}..{:#012x} ({} MiB)", r.base, r.base + r.size, r.size >> 20); }
     if let Some(u) = s.uart { crate::println!("    uart pl011 at {:#x}", u.base); }
     match (s.gicd, s.gicr, s.its) {
@@ -142,8 +246,8 @@ extern "C" fn rust_main_aarch64(dtb: u64) -> ! {
         crate::acpi::set_ecam(e.base, 0);
         if let Some(w) = s.pci_mem32 { crate::pci::set_mmio_window(w.base); }
     }
-    let si = start_info_from(tree, &s);
-    crate::println!("talaria: start_info at {:#x} ({} memmap entries)", si, s.nmem);
+    let si = start_info_from(tree, &s, bb);
+    crate::println!("talaria: start_info at {:#x} ({} memmap entries)", si, unsafe { (*core::ptr::addr_of!(SI)).memmap_entries });
 
     // ── the first shared modules: the command line, the frame allocator, the page tables ──
     let cmdline = crate::read_cmdline(si);

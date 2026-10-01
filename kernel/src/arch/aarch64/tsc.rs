@@ -24,16 +24,25 @@ pub fn rdrand64() -> Option<u64> { None }
 
 /// The PL031's window (0 = the tree named none); `kmain` records it from the device tree.
 pub static RTC_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The firmware's clock as the UEFI stub read it (seconds since the epoch; 0 — not given).
+pub static BOOT_EPOCH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// The wall clock's base from the machine's real-time clock: (unix ns, the counter at the
-/// read). The PL031's data register counts whole seconds since the epoch; a value before
-/// 2020 is a clock nobody set and is refused.
+/// read). The PL031's data register counts whole seconds since the epoch; without one (a
+/// machine described by ACPI) it is the time the UEFI stub asked the firmware for — taken
+/// at the counter's zero, the stub ran a moment after it. A value before 2020 is a clock
+/// nobody set and is refused.
 pub fn rtc_read() -> Option<(u64, u64)> {
     let b = RTC_BASE.load(core::sync::atomic::Ordering::Relaxed);
-    if b == 0 { return None; }
-    // SAFETY: the window is the device tree's, in the device gigabyte every table maps.
-    let s = unsafe { core::ptr::read_volatile(b as *const u32) } as u64;
-    if s < 1_577_836_800 { return None; }
-    Some((s * 1_000_000_000, rdtsc()))
+    if b != 0 {
+        // SAFETY: the window is the device tree's, in the device gigabyte every table maps.
+        let s = unsafe { core::ptr::read_volatile(b as *const u32) } as u64;
+        if s >= 1_577_836_800 { return Some((s * 1_000_000_000, rdtsc())); }
+    }
+    let e = BOOT_EPOCH.load(core::sync::atomic::Ordering::Relaxed);
+    if e >= 1_577_836_800 { return Some((e * 1_000_000_000, 0)); }
+    None
 }
-/// What `rtc_read` reads, for the boot line.
-pub const RTC_NAME: &str = "the RTC (pl031)";
+/// What `rtc_read` read, for the boot line.
+pub fn rtc_name() -> &'static str {
+    if RTC_BASE.load(core::sync::atomic::Ordering::Relaxed) != 0 { "the RTC (pl031)" } else { "the firmware's clock (UEFI GetTime)" }
+}
