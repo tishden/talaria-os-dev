@@ -88,11 +88,20 @@ MUSLA64 ?= docker run --rm -v $(CURDIR):/w -w /w talaria-musl-aarch64
 LDFA64 := -static -no-pie -Wl,-Ttext-segment=0x50000000
 # Every C source builds for arm64 except the three that are x86 machine code by design
 # (fastapp/fastflood poll the cell's rings with `pause`/`rdtsc` and a hand-laid layout,
-# sysbench times with `rdtsc`); `launcher`, the `.s` files (but hello), libtsync's fibers
-# and the C++ set (it needs a libstdc++ built against the cross musl) are not ported yet.
+# sysbench times with `rdtsc`); `launcher`, the `.s` files (but hello) and libtsync's fibers
+# are not ported yet.
 A64CBINS := $(filter-out fastapp fastflood sysbench,$(CBINS))
 A64 := $(addprefix aarch64/,$(A64CBINS) mhello mprintf hello.elf crashme profdeep)
-aarch64: $(A64)
+# The C++ set needs a g++ whose libstdc++ was built against musl for aarch64: the
+# `aarch64-linux-musl-cross` toolchain (musl.cc; unpack it and put its bin/ on the PATH, or
+# name the compiler: `make aarch64 CXXA64=/path/aarch64-linux-musl-g++`). Without it the
+# four binaries are not built and the gate skips them by name.
+CXXA64 ?= aarch64-linux-musl-g++
+A64CPP := $(if $(shell command -v $(CXXA64) 2>/dev/null),$(addprefix aarch64/,$(CPPBINS)))
+aarch64: $(A64) $(A64CPP)
+$(addprefix aarch64/,$(CPPBINS)): aarch64/%: %.cpp
+	@mkdir -p aarch64
+	$(CXXA64) -O2 -pthread $(LDFA64) -o $@ $< && $(dir $(shell command -v $(CXXA64)))aarch64-linux-musl-strip $@
 aarch64/crashme: crashme.c
 	@mkdir -p aarch64
 	$(MUSLA64) musl-gcc -O2 -g -fno-omit-frame-pointer $(LDFA64) -o $@ $<
