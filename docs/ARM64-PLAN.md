@@ -1309,7 +1309,11 @@ two tools were copied in from the x86 image of the same Fedora); a `socat` clien
 
 Phase 4 is closed under TCG; what is next is the stand and EC2 itself. In order:
 
-1. **The KVM stand on the new gate** (`infra/aws/kvm-stand-aarch64.sh` — it builds the
+1. **The KVM stand on the new gate — NOT RUN YET.** Two launches on 2026-10-02 were lost
+   to the dev box's network (an ssh broken a minute into the kernel build, then one timed
+   out in provisioning; the instance was destroyed both times, nothing was measured). The
+   script's long steps now run detached on the stand and are polled for (`rrun`), so a
+   lost connection no longer costs the run. What it must do (`infra/aws/kvm-stand-aarch64.sh` — it builds the
    stub and loads `tun`/`vhost_net` now): `TAL_KVM=1 test-aarch64.sh` (the timing lines
    of the network block and of UEFI's `smp4` are judged only there), the network numbers
    (`kernel/netnum-aarch64.sh`: `udp_ping` against `userver` in three configurations,
