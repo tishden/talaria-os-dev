@@ -34,7 +34,27 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 STAMP=$(date +%Y%m%d-%H%M%S)
 LOGD="$HERE/logs/aarch64-$STAMP"; mkdir -p "$LOGD"
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -i $HERE/talaria-stand.pem"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR -i $HERE/talaria-stand.pem"
+
+# rrun NAME SECS CMD: a LONG step runs on the stand DETACHED and is polled for. An ssh that
+# carries a ten-minute build dies with "Broken pipe" when the dev box's network blinks
+# (2026-10-02: the kernel build, a minute in — and the exit trap destroyed a stand that was
+# doing fine). The command goes into /tmp/NAME.sh, runs under nohup, leaves its exit code
+# in /tmp/NAME.rc; the output comes home into $LOGD/NAME.log whatever happened to any one
+# connection. Returns the command's exit code (124: SECS ran out).
+rrun() {
+  name=$1; secs=$2; cmd=$3
+  n=0; until printf '%s\n' "$cmd" | ssh $SSH_OPTS ec2-user@"$IP" "cat > /tmp/$name.sh && rm -f /tmp/$name.rc && (nohup sh -c 'sh /tmp/$name.sh > /tmp/$name.log 2>&1; echo \$? > /tmp/$name.rc' >/dev/null 2>&1 &)"; do
+    n=$((n+1)); [ $n -gt 5 ] && { echo "rrun $name: could not start it"; return 125; }; sleep 5
+  done
+  t=0; rc=""
+  while [ $t -lt "$secs" ]; do
+    rc=$(ssh $SSH_OPTS ec2-user@"$IP" "cat /tmp/$name.rc 2>/dev/null" 2>/dev/null) && [ -n "$rc" ] && break
+    rc=""; sleep 10; t=$((t+10))
+  done
+  n=0; until ssh $SSH_OPTS ec2-user@"$IP" "cat /tmp/$name.log" > "$LOGD/$name.log" 2>/dev/null; do n=$((n+1)); [ $n -gt 5 ] && break; sleep 5; done
+  return "${rc:-124}"
+}
 T0=$(date +%s)
 
 cleanup() {
@@ -98,15 +118,15 @@ else
 fi
 
 echo "== the arm64 stand image, built natively (fedora:40 pulls its arm64 variant) =="
-ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && docker build -t talaria-qemu-aarch64 -f services/docker/Dockerfile.qemu-aarch64 services/docker' >"$LOGD/image.log" 2>&1 || { echo "the image did not build — $LOGD/image.log"; tail -5 "$LOGD/image.log"; exit 1; }
+rrun image 1200 'cd talaria && docker build -t talaria-qemu-aarch64 -f services/docker/Dockerfile.qemu-aarch64 services/docker' || { echo "the image did not build — $LOGD/image.log"; tail -5 "$LOGD/image.log"; exit 1; }
 
 echo "== the kernel and the raw Image (native objcopy) =="
-ssh $SSH_OPTS ec2-user@"$IP" '. $HOME/.cargo/env && cd talaria && AARCH64_OBJCOPY=objcopy VDSO_CC_AARCH64=gcc kernel/build-aarch64.sh' >"$LOGD/build.log" 2>&1 || { echo "the kernel did not build — $LOGD/build.log"; tail -8 "$LOGD/build.log"; exit 1; }
+rrun build 1800 '. $HOME/.cargo/env && cd talaria && AARCH64_OBJCOPY=objcopy VDSO_CC_AARCH64=gcc kernel/build-aarch64.sh' || { echo "the kernel did not build — $LOGD/build.log"; tail -8 "$LOGD/build.log"; exit 1; }
 T3=$(date +%s); echo "built after $((T3-T2)) s" | tee -a "$LOGD/timing.log"
 
 # The UEFI stub carries the kernel inside: after the kernel, before the gate (its UEFI block
 # is skipped without a fresh stub).
-ssh $SSH_OPTS ec2-user@"$IP" '. $HOME/.cargo/env && cd talaria && kernel/uefi-stub/build.sh aarch64' >"$LOGD/stub.log" 2>&1 || { echo "the UEFI stub did not build — $LOGD/stub.log (the gate will skip its UEFI block)"; tail -5 "$LOGD/stub.log"; }
+rrun stub 900 '. $HOME/.cargo/env && cd talaria && kernel/uefi-stub/build.sh aarch64' || { echo "the UEFI stub did not build — $LOGD/stub.log (the gate will skip its UEFI block)"; tail -5 "$LOGD/stub.log"; }
 
 if [ "${UPONLY:-0}" = 1 ]; then
   KEEP=1
@@ -114,14 +134,17 @@ if [ "${UPONLY:-0}" = 1 ]; then
   exit 0
 fi
 
-echo "== the bring-up gate under KVM (TAL_KVM=1: the timing lines are judged too) =="
-ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && TAL_KVM=1 kernel/test-aarch64.sh' 2>&1 | tee "$LOGD/gate.log" | grep -E 'FAIL|TOTAL|SKIP'
+echo "== the gate under KVM (TAL_KVM=1: the timing lines are judged too) =="
+rrun gate 2400 'cd talaria && TAL_KVM=1 kernel/test-aarch64.sh' || true
+grep -E 'FAIL|TOTAL|SKIP' "$LOGD/gate.log" || true
+# The consoles of the boots that failed a check come home too.
+ssh $SSH_OPTS ec2-user@"$IP" 'tar -C talaria/kernel/target -c a64-fail 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || true
 
 # The network numbers: the guest on a tap with vhost, the meters (the arm64 builds of
 # udp_ping/tcp_bench) next to it in the stand image.
 echo "== the network numbers (kernel/netnum-aarch64.sh: udp_ping against userver, tcp_bench against diskserver) =="
-ssh $SSH_OPTS ec2-user@"$IP" 'cd talaria && docker run --rm --device /dev/kvm --device /dev/net/tun $( [ -c /dev/vhost-net ] && echo --device /dev/vhost-net ) --cap-add NET_ADMIN \
-  -v "$PWD:/w" -w /w -e TAL_ACCEL="-enable-kvm -cpu host" talaria-qemu-aarch64 bash kernel/netnum-aarch64.sh' 2>&1 | tee "$LOGD/netnum.log" | grep -E "netnum|udp \[|tcp \[" | cut -c1-200
+rrun netnum 900 'cd talaria && docker run --rm --device /dev/kvm --device /dev/net/tun $( [ -c /dev/vhost-net ] && echo --device /dev/vhost-net ) --cap-add NET_ADMIN -v "$PWD:/w" -w /w -e TAL_ACCEL="-enable-kvm -cpu host" talaria-qemu-aarch64 bash kernel/netnum-aarch64.sh' || true
+grep -E "netnum|udp \[|tcp \[" "$LOGD/netnum.log" | cut -c1-200 || true
 
 # The numbers of the set (docs/MEASUREMENTS.md): the whole console of each, three boots —
 # `mbench` is the twin of the x86 scoreboard's primitives, `futexlat` the wakeup latency,
@@ -148,11 +171,13 @@ done
 # The soak BEFORE anything can destroy the instance: the modes whose verdict depends on what
 # two cores see of each other's writes, SOAKN boots each; the failing consoles come home.
 echo "== the soak (kernel/soak-aarch64.sh: ${SOAKN:-50} boots of each mode under KVM) =="
-ssh $SSH_OPTS ec2-user@"$IP" "cd talaria && kernel/soak-aarch64.sh ${SOAKN:-50} /tmp/soak" 2>&1 | tee "$LOGD/soak.log" || true
+rrun soak 5400 "cd talaria && kernel/soak-aarch64.sh ${SOAKN:-50} /tmp/soak" || true
+tail -15 "$LOGD/soak.log" || true
 ssh $SSH_OPTS ec2-user@"$IP" 'tar -C /tmp -c soak 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || echo "the soak's consoles did not come home (the verdict lines above are what is left)"
 
 LOOPN=${LOOPN:-10}
 echo "== $LOOPN runs of the whole gate in a loop (the SMP paths under a real weak machine) =="
-ssh $SSH_OPTS ec2-user@"$IP" "cd talaria && fails=0; for i in \$(seq 1 $LOOPN); do TAL_KVM=1 kernel/test-aarch64.sh > /tmp/g.log 2>&1 || { fails=\$((fails+1)); cp /tmp/g.log /tmp/g-fail-\$i.log; }; done; echo \"loop: \$fails of $LOOPN gate runs failed\"; grep -h FAIL /tmp/g-fail-*.log 2>/dev/null | sort | uniq -c | head -20" 2>&1 | tee "$LOGD/loop.log"
+rrun loop 7200 "cd talaria && fails=0; for i in \$(seq 1 $LOOPN); do TAL_KVM=1 kernel/test-aarch64.sh > /tmp/g.log 2>&1 || { fails=\$((fails+1)); cp /tmp/g.log /tmp/g-fail-\$i.log; }; done; echo \"loop: \$fails of $LOOPN gate runs failed\"; grep -h FAIL /tmp/g-fail-*.log 2>/dev/null | sort | uniq -c | head -20" || true
+cat "$LOGD/loop.log" || true
 T4=$(date +%s); echo "all done after $((T4-T0)) s; the stand ran $((T4-T1)) s" | tee -a "$LOGD/timing.log"
 echo "logs: $LOGD"
