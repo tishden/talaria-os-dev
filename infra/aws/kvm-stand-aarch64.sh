@@ -100,12 +100,14 @@ ssh $SSH_OPTS ec2-user@"$IP" 'test "$(uname -m)" = aarch64 && test -c /dev/kvm' 
 
 echo "== provisioning (docker, git, binutils, python3, the pinned nightly + aarch64-unknown-none) =="
 PIN=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$REPO/kernel/rust-toolchain.toml")
-ssh $SSH_OPTS ec2-user@"$IP" "sudo dnf install -y -q docker git gcc binutils python3 tar e2fsprogs gdb && \
+# Provisioning is idempotent, so it goes detached too (the second stand of 2026-10-02 lost
+# its ssh here, "timed out during banner exchange", and was destroyed for it).
+rrun provision 1200 "sudo dnf install -y -q docker git gcc binutils python3 tar e2fsprogs gdb && \
   sudo systemctl enable --now docker && sudo usermod -aG docker ec2-user && sudo chmod 666 /dev/kvm && \
   curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none -q && . \$HOME/.cargo/env && \
   rustup toolchain install $PIN --profile minimal -c rust-src -c clippy >/dev/null && \
   rustup target add aarch64-unknown-none aarch64-unknown-uefi --toolchain $PIN && \
-  (sudo modprobe tun; sudo modprobe vhost_net; sudo chmod 666 /dev/vhost-net 2>/dev/null; true)" >"$LOGD/provision.log" 2>&1 || { echo "provisioning failed — $LOGD/provision.log"; tail -5 "$LOGD/provision.log"; exit 1; }
+  (sudo modprobe tun; sudo modprobe vhost_net; sudo chmod 666 /dev/vhost-net 2>/dev/null; true)" || { echo "provisioning failed — $LOGD/provision.log"; tail -5 "$LOGD/provision.log"; exit 1; }
 T2=$(date +%s); echo "provisioned after $((T2-T1)) s" | tee -a "$LOGD/timing.log"
 
 echo "== uploading the tree (git archive HEAD of the checked-out branch) =="
