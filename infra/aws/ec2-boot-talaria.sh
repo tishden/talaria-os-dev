@@ -8,9 +8,13 @@
 #
 # Usage: ec2-boot-talaria.sh "<cmdline>" [instance-type] [data.img]
 #   env: ENVF (a file with BUILDER/BUILDER_IP/SG/SUBNET), PEM, KEEP=1 (do not terminate)
+#        ARCH=arm64 — the aarch64 stub (BOOTAA64.EFI), the AMI registered for arm64, a
+#        c7g.large by default; the builder stays whatever lab-up.sh made (it only dd's).
 set -euo pipefail
 CMDLINE=${1:?usage: ec2-boot-talaria.sh "<cmdline>" [type] [data.img]}
-TYPE=${2:-c6i.large}
+ARCH=${ARCH:-x86_64}
+case "$ARCH" in arm64|aarch64) ARCH=arm64; DEFTYPE=c7g.large;; *) DEFTYPE=c6i.large;; esac
+TYPE=${2:-$DEFTYPE}
 DATA=${3:-kernel/disk.img}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 ENVF=${ENVF:?no ENVF}
@@ -39,7 +43,7 @@ elif [ "${HYBRID:-0}" = bios ]; then
   # a plain MBR image (no GPT and no ESP) — for BOOTMODE=legacy-bios
   HYBRID=0 "$REPO/tools/mk-bios.sh" "$W/talaria-ec2.img" "$DATA_PATH" "$CMDLINE" | grep -a 'mk-bios: /'
 else
-  "$REPO/tools/mk-ami.sh" "$W/talaria-ec2.img" "$DATA_PATH" "$CMDLINE" | grep -a 'mk-ami: /'
+  ARCH=$ARCH "$REPO/tools/mk-ami.sh" "$W/talaria-ec2.img" "$DATA_PATH" "$CMDLINE" | grep -a 'mk-ami: /'
 fi
 [ -f "$W/talaria-ec2.img" ] || { echo "the image was not built"; exit 1; }
 # FULLDISK=<size> — stretch the image to EXACTLY the size of the volume it will
@@ -82,7 +86,7 @@ aws ec2 wait snapshot-completed --snapshot-ids "$SNAP"
 # UEFI, *.metal via BIOS), legacy-bios (BIOS only).
 BOOTMODE=${BOOTMODE:-uefi}
 echo "== register-image (boot-mode $BOOTMODE + ena-support)"
-AMI=$(aws ec2 register-image --name "talaria-v11-$TS" --architecture x86_64 \
+AMI=$(aws ec2 register-image --name "talaria-v11-$ARCH-$TS" --architecture "$ARCH" \
   --root-device-name /dev/xvda --boot-mode "$BOOTMODE" --ena-support --virtualization-type hvm \
   --block-device-mappings "[{\"DeviceName\":\"/dev/xvda\",\"Ebs\":{\"SnapshotId\":\"$SNAP\",\"DeleteOnTermination\":true,\"VolumeType\":\"gp3\"}}]" \
   --query ImageId --output text)
