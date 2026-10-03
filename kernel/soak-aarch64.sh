@@ -7,6 +7,10 @@
 #
 #   kernel/soak-aarch64.sh [N=50] [outdir]      # the modes below, N boots each
 #   MODES="shmrace memrace" kernel/soak-aarch64.sh 200
+#   PAR=24 MODES=forkap kernel/soak-aarch64.sh 96     # 24 copies of one boot AT ONCE: more vCPUs
+#                                                     # than the host has cores is the cheapest
+#                                                     # race detector the port has (§10.5 found
+#                                                     # three races of the shared code that way)
 #
 # It needs what the gate needs: the image (kernel/build-aarch64.sh), the binaries
 # (make -C kernel/user aarch64) and the ext2 images the gate leaves in
@@ -24,21 +28,22 @@ ACCEL="-cpu max"
 [ "$(uname -m)" = "aarch64" ] && [ -c /dev/kvm ] && ACCEL="-enable-kvm -cpu host"
 KVMDEV=""; [ -c /dev/kvm ] && KVMDEV="--device /dev/kvm"
 SMP=${TAL_SMP:-4}
-# one SECS APPEND [DISK] -> the console in $LOG
+PAR=${PAR:-1}
+# one SECS APPEND [DISK] [SLOT] -> the console in $LOG.SLOT (slot 0 when run one at a time)
 LOG=$(mktemp)
-trap 'rm -f "${LOG:?}"' EXIT
+trap 'rm -f "${LOG:?}" "${LOG:?}".*' EXIT
 one() {
-  D=""
+  D=""; slot=${4:-0}
   if [ -n "${3:-}" ]; then
-    cp "$REPO/$TD/$3.img" "$REPO/$TD/soak.img"
-    D="-drive id=d0,file=/w/$TD/soak.img,format=raw,if=none -device virtio-blk-device,drive=d0"
+    cp "$REPO/$TD/$3.img" "$REPO/$TD/soak-$slot.img"
+    D="-drive id=d0,file=/w/$TD/soak-$slot.img,format=raw,if=none -device virtio-blk-device,drive=d0"
   fi
   QEMU="timeout $1 qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp $SMP -m 1024 -nographic \
     -kernel /w/$IMG -append \"console=ttyAMA0 $2 talaria.smp=$SMP talaria.poweroff=1\" $D"
   if command -v qemu-system-aarch64 >/dev/null 2>&1; then
-    sh -c "$(echo "$QEMU" | sed "s|/w/|$REPO/|g")" > "$LOG" 2>&1
+    sh -c "$(echo "$QEMU" | sed "s|/w/|$REPO/|g")" > "$LOG.$slot" 2>&1
   else
-    docker run --rm $KVMDEV -v "$REPO:/w" -w /w talaria-qemu-aarch64 sh -c "$QEMU" > "$LOG" 2>&1
+    docker run --rm $KVMDEV -v "$REPO:/w" -w /w talaria-qemu-aarch64 sh -c "$QEMU" > "$LOG.$slot" 2>&1
   fi
 }
 # The table: name | the command line | the disk ("" — none) | the verdict that must be there.
@@ -54,17 +59,27 @@ forkap|talaria.mode=proc|forkap|crashme: forkap ALL OK
 schedapi|talaria.test=schedapi|ext2|schedapi: ALL OK'
 BAD='\[trap\]|PANIC|is spoilt|\[futex\] IT HAS HUNG|AN UNEXPECTED SIGSEGV|an unknown number'
 : > "$OUT/summary.txt"
-echo "== the arm64 soak: $N boots of each mode, $SMP cores, $ACCEL =="
+echo "== the arm64 soak: $N boots of each mode, $SMP cores, $ACCEL, $PAR at a time ($(nproc) host cores) =="
 echo "$TABLE" | while IFS='|' read -r name append disk want; do
   case " ${MODES:-$(echo "$TABLE" | cut -d'|' -f1 | tr '\n' ' ')} " in *" $name "*) ;; *) continue;; esac
   fails=0; i=1; t0=$(date +%s)
   while [ $i -le "$N" ]; do
-    one 300 "$append" "$disk"
-    if grep -aqE "$want" "$LOG" && ! grep -aqE "$BAD" "$LOG"; then :; else
-      fails=$((fails+1)); cp "$LOG" "$OUT/$name-fail-$i.log"
-    fi
-    [ $i = 1 ] && cp "$LOG" "$OUT/$name-first.log"
-    i=$((i+1))
+    # a batch of PAR boots at once, each on its own copy of the disk; then each is judged
+    k=0
+    while [ $k -lt "$PAR" ] && [ $((i+k)) -le "$N" ]; do
+      one 300 "$append" "$disk" $k &
+      k=$((k+1))
+    done
+    wait
+    j=0
+    while [ $j -lt $k ]; do
+      if grep -aqE "$want" "$LOG.$j" && ! grep -aqE "$BAD" "$LOG.$j"; then :; else
+        fails=$((fails+1)); cp "$LOG.$j" "$OUT/$name-fail-$((i+j)).log"
+      fi
+      [ $((i+j)) = 1 ] && cp "$LOG.$j" "$OUT/$name-first.log"
+      j=$((j+1))
+    done
+    i=$((i+k))
   done
   echo "  soak: $name — $fails of $N boots failed ($(( $(date +%s) - t0 )) s)"
   echo "$name $fails $N" >> "$OUT/summary.txt"
