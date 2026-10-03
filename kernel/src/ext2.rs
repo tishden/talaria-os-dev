@@ -3027,7 +3027,7 @@ unsafe fn dx_grow(dir: u32, dinb: &mut [u8; 128], fr: &[DxFrame; DXLVL], nf: usi
 unsafe fn dx_make(dir: u32, dinb: &mut [u8; 128]) -> bool {
     if rd32(&*core::ptr::addr_of!(SB), 92) & COMPAT_DIR_INDEX == 0 || BS < 1024 { return false; }
     if rd32(dinb, 32) & INDEX_FL != 0 || i_size(dinb) != BS as u64 { return false; }
-    let hv = match dx_hash_ver() { Some(v) => v, None => return false };
+    if dx_hash_ver().is_none() { return false; }        // a hash this code does not implement
     let mut add = 0;
     let root = bmap(dir, dinb, 0, false, &mut add);
     if root == 0 { return false; }
@@ -3049,7 +3049,10 @@ unsafe fn dx_make(dir: u32, dinb: &mut [u8; 128]) -> bool {
     if leaf == 0 { return false; }
     crate::ext2dx::sort(&mut map[..n]);              // by the hash, as after a split
     dx_pack(leaf, src, &map[..n]);
-    crate::ext2dx::root_write(blk(root), BS, dir, dot_ft, dd_ino, dd_ft, hv, 1);
+    // The root carries the superblock's RAW version (0..2), not the effective one the hashing
+    // uses (`dx_hash_ver`: the unsigned-char volumes of arm64 hosts add 3 to it).
+    let raw_hv = (*core::ptr::addr_of!(SB))[252] as u32;
+    crate::ext2dx::root_write(blk(root), BS, dir, dot_ft, dd_ino, dd_ft, raw_hv, 1);
     cflush(root);
     let fl = rd32(dinb, 32) | INDEX_FL;
     wr32(dinb, 32, fl);
