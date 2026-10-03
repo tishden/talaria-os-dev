@@ -269,7 +269,13 @@ pub fn node_write(d: &mut [u8], bs: usize, ents: &[u8]) {
 /// Lay out a `dx_root` in the directory's block 0: the records `.` and `..`
 /// (the second one stretches to the block's end — that is what hides the index
 /// from a linear reader), the `dx_root_info` and an array of one entry leading
-/// to the leaf `leaf`.
+/// to the leaf `leaf`. `hash_ver` is the superblock's `s_def_hash_version` AS IT IS
+/// (0 legacy, 1 half_md4, 2 tea): the signedness of the hash is the superblock's flag,
+/// not the root's business — Linux writes the raw byte here and e2fsck rejects 3..5
+/// ("unsupported hash version"). Until the first arm64 stand this was given the
+/// EFFECTIVE version: on a volume made where `char` is unsigned (every arm64 host) the
+/// kernel's own index carried a 4, which Linux would have read as half_md4 and hashed
+/// signed — every name the kernel indexed on such a volume unfindable from Linux.
 pub fn root_write(d: &mut [u8], bs: usize, dir: u32, dot_ft: u8, dd_ino: u32, dd_ft: u8, hash_ver: u32, leaf: u32) {
     for x in d[..bs].iter_mut() { *x = 0; }
     wr32(d, 0, dir); wr16(d, 4, 12); d[6] = 1; d[7] = dot_ft; d[8] = b'.';

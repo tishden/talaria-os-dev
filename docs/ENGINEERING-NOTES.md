@@ -579,6 +579,19 @@ task every core believed it ran, and the last decisions of every core's schedule
 under load on purpose** (`N` copies of one boot in parallel, more vCPUs than host
 cores): a host that steals a vCPU for 10 ms is the cheapest race detector there is.
 
+26. **"A derived value written where the source belongs."** ext2's directory hash has
+    a version (`s_def_hash_version`: legacy, half_md4, tea) and a signedness (the
+    superblock flag `UNSIGNED_HASH`, set by `mkfs` on a machine whose `char` is
+    unsigned); the hashing code folds the two into one number (+3 when unsigned). The
+    kernel wrote THAT number into the `dx_root` of every index it built itself, where
+    the format wants the raw version. On every volume made on an x86 host the two
+    coincide and three gates said "clean" for a year. The first arm64 host — `mkfs`
+    there flags the hash unsigned — put a 4 into the root; e2fsck refused the tree,
+    and Linux would have hashed those directories as signed half_md4 and found no
+    name in them. The gate now builds the unsigned volume on purpose on both
+    machines (`mkext2.sh HASHU=1`): a check whose verdict depends on the host it
+    runs on is not a check.
+
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
 * **The gate's image is part of the gate.** The dev box's `talaria-qemu-aarch64` was

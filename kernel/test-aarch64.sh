@@ -406,6 +406,16 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
         assertnot "$BAD"                                                     'htree: no trap, no unknown syscall'
         if e2fsck -fn "$REPO/$TD/dx.img" >/dev/null 2>&1; then echo "  PASS  htree (host): e2fsck -fn is clean — the tree after the kernel's splits is correct"; PASS=$((PASS+1)); else echo "  FAIL  htree (host): e2fsck -fn found errors in the directory"; FAIL=$((FAIL+1)); fi
       else echo "  SKIP  htree: the indexed image was not built"; fi
+      # The same on a volume whose hash is UNSIGNED (mkfs's default on an arm64 host; forced
+      # here so that the verdict does not depend on the host): the kernel hashes with the
+      # version +3 and must write the superblock's raw version into its own dx_root — the
+      # first KVM stand (an arm64 host) found a 4 there and e2fsck refused the tree.
+      if HASHU=1 DIRIDX=1 "$REPO/kernel/mkext2.sh" "$DXD" "$REPO/$TD/dxu.img" 64M >/dev/null 2>&1; then
+        bootp 400 "talaria.test=htree talaria.ext2=dxcheck" "$TD/dxu.img" virtio
+        assert 'htree: ALL OK'                                                'htree (unsigned hash): 3000 names found by the index, 3000 added'
+        assert 'has been indexed \(an htree was built from scratch'           'htree (unsigned hash): the kernel builds an index on the unsigned volume'
+        if e2fsck -fn "$REPO/$TD/dxu.img" >/dev/null 2>&1; then echo "  PASS  htree (unsigned hash, host): e2fsck -fn is clean — the kernel's dx_root carries the raw hash version"; PASS=$((PASS+1)); else echo "  FAIL  htree (unsigned hash, host): e2fsck -fn found errors (the dx_root's hash version?)"; FAIL=$((FAIL+1)); fi
+      else echo "  SKIP  htree (unsigned hash): the image was not built"; fi
       rm -rf "${DXD:?}"
     else echo "  SKIP  htree: no e2fsck on the host"; fi
     echo "== MSI-X on arm64: the ITS (talaria.test=its|msix) =="
