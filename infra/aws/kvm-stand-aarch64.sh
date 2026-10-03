@@ -13,7 +13,11 @@
 #                                                       # refused, then 1a refused naming 1c and 1d)
 #   RINGN=5000000 ...                                   # slots for the ring probe (default 2M)
 #   SOAKN=200 ...                                       # boots per mode of the soak (default 50)
-#   LOOPN=10 ...                                        # runs of the whole gate in a loop (default 10)
+#   LOOPN=10 ...                                        # runs of the whole gate in a loop (default 3:
+#                                                       # the 229-check gate is ~40 min under KVM)
+#   PARN=96 PAR=24 ...                                  # the parallel race detector: PARN boots of
+#                                                       # forkap/shmrace/memrace, PAR at once (96 vCPUs
+#                                                       # on 64 cores — §10.5's recipe, default 96/24)
 #   UPONLY=1 ...                                        # stop after the build, keep the instance: hand work
 #
 # The ring-3 set travels as BINARIES: kernel/user/aarch64/ (`make -C kernel/user aarch64` on the
@@ -137,7 +141,7 @@ if [ "${UPONLY:-0}" = 1 ]; then
 fi
 
 echo "== the gate under KVM (TAL_KVM=1: the timing lines are judged too) =="
-rrun gate 2400 'cd talaria && TAL_KVM=1 kernel/test-aarch64.sh' || true
+rrun gate 3600 'cd talaria && TAL_KVM=1 kernel/test-aarch64.sh' || true
 grep -E 'FAIL|TOTAL|SKIP' "$LOGD/gate.log" || true
 # The consoles of the boots that failed a check come home too.
 ssh $SSH_OPTS ec2-user@"$IP" 'tar -C talaria/kernel/target -c a64-fail 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || true
@@ -177,7 +181,15 @@ rrun soak 5400 "cd talaria && kernel/soak-aarch64.sh ${SOAKN:-50} /tmp/soak" || 
 tail -15 "$LOGD/soak.log" || true
 ssh $SSH_OPTS ec2-user@"$IP" 'tar -C /tmp -c soak 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || echo "the soak's consoles did not come home (the verdict lines above are what is left)"
 
-LOOPN=${LOOPN:-10}
+# The parallel race detector of §10.5: PAR copies of one boot at once, more vCPUs than the
+# host has cores — the three races of the shared code that session found never showed on a
+# quiet host and did in 1 of 60-160 boots this way.
+echo "== the parallel race detector: ${PARN:-96} boots of forkap/shmrace/memrace, ${PAR:-24} at a time =="
+rrun par 1800 "cd talaria && PAR=${PAR:-24} MODES='forkap shmrace memrace' kernel/soak-aarch64.sh ${PARN:-96} /tmp/par" || true
+grep -E 'soak:' "$LOGD/par.log" || true
+ssh $SSH_OPTS ec2-user@"$IP" 'tar -C /tmp -c par 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || true
+
+LOOPN=${LOOPN:-3}
 echo "== $LOOPN runs of the whole gate in a loop (the SMP paths under a real weak machine) =="
 rrun loop 7200 "cd talaria && fails=0; for i in \$(seq 1 $LOOPN); do TAL_KVM=1 kernel/test-aarch64.sh > /tmp/g.log 2>&1 || { fails=\$((fails+1)); cp /tmp/g.log /tmp/g-fail-\$i.log; }; done; echo \"loop: \$fails of $LOOPN gate runs failed\"; grep -h FAIL /tmp/g-fail-*.log 2>/dev/null | sort | uniq -c | head -20" || true
 cat "$LOGD/loop.log" || true
