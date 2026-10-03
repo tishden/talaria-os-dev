@@ -1335,6 +1335,56 @@ Phase 4 is closed under TCG; what is next is the stand and EC2 itself. In order:
    (bus numbers are nobody's there), the guard page of a FORKED task's kernel stack (it
    is installed in the parent's space — §6.1 item 25 fixed the leak, not the coverage).
 
+### 10.7. The KVM stand run and EC2's first facts (2026-10-03/04)
+
+**The stand ran, at last, end to end on a `c7g.metal`** (`infra/aws/kvm-stand-aarch64.sh`,
+~52 min, self-destructed). The gate under KVM: **229/1** — the one FAIL was `htree (host)`,
+and it was the gate lying about the host, not the kernel (below). Everything the stand
+alone can judge came out clean: `mbench` (alu 0.77 ns/step, syscall 153 ns, chase-64m 94 ns),
+`futexlat` (same- and cross-core futex p50 ~512 ns, cond ~1900 ns), `smp2`/`smp4` speedup
+2.00/4.00, the four probes TCG cannot judge (`ring` 0 corrupted at 9.25 M slots/s, `icache`,
+`bbm`, `svccost` all "as expected"), the soak **0 of 50** on all nine modes, and the
+parallel race detector **0 of 96** on `forkap`/`shmrace`/`memrace` 24-at-once on 64 cores —
+the three shared-code races of §10.5 stay fixed under a real weakly-ordered machine.
+
+**The htree defect (ENGINEERING-NOTES §6.1 item 26), found because the host was finally
+an arm64 one.** ext2's directory hash has a version (`s_def_hash_version`) and a signedness
+(the superblock flag set by `mkfs` where `char` is unsigned — every arm64 host); the
+kernel folded the two into the effective version (+3 when unsigned) and wrote THAT into the
+`dx_root` of every index it built. On an x86-made volume the two coincide and three gates
+said "clean" for a year; the arm64 stand's `mkfs` flagged the hash unsigned, the kernel put
+a 4 in the root, and e2fsck refused the tree (Linux would have read those directories as
+signed half_md4 and found no name). `ext2.rs` now writes the raw version; the gate builds
+the unsigned volume on purpose on both machines (`mkext2.sh HASHU=1`, the arm64 gate's new
+`htree (unsigned hash)` block) — a check whose verdict depends on its host is not a check.
+
+**EC2's own facts, read off a live `c7g.metal` and a `c7g.large`** (both terminated;
+`infra/aws/logs/aarch64-{graviton,nitro}-acpi-*.log`). A Nitro guest (`c7g.large`) is an
+`edk2` machine: the console its SPCR names is a **16550, MMIO at `0x8000_0000`, `mmio32`**
+(byte registers a word apart) — so `uart.rs` grew a 16550 register set beside the PL011,
+chosen by the SPCR's interface type and access size (`UartKind`), and the kernel now talks
+on EC2's console instead of going silent. The memory map starts at `0x4000_0000` (the
+kernel's `0x4008_0000` load address is RAM), the GIC's redistributors and ITS sit at
+`0x1000_0000` (GB0, with the ECAM at `0x2000_0000`), PSCI is `SMC`, the ENA/NVMe are
+`1d0f:ec20`/`1d0f:8061` on bus 0, and the counter runs at 1.05 GHz. The bare `c7g.metal`
+is different again — its 16550 is at `0xE2F0_0000` (GB3, a gigabyte with no RAM) and its
+GIC is above 512 GiB — which is why `mmu::early_enable` now maps a Device block for every
+GICD/GICR/ITS/UART/ECAM the description names that falls in a gigabyte with no RAM, and
+`gb_kind` asks the firmware's memory map which gigabytes are RAM instead of assuming
+"below the kernel is devices". `tools/mk-ami.sh ARCH=arm64` writes the aarch64 stub as
+`BOOTAA64.EFI`; `ec2-boot-talaria.sh ARCH=arm64` registers the AMI `--architecture arm64`
+on a `c7g.large` — the next step is that first boot to the mode prompt.
+
+**Still open — `talaria.netirq=1` on `diskserver` faults under KVM** (3 of 4 on the stand;
+the `tcp [netirq=1]` line of `netnum` is blank). A data abort at EL1 during the EL0-sync
+return (`RESTORE_FRAME` in `vec_8`) on a page in the middle of the parked task's kernel
+stack — i.e. a kstack page that is mapped when the syscall parks is not mapped in the
+address space the wake switches back to. `udp [netirq=1]` (userver, also a single parked
+waiter) is clean and `tcp [polling]` is clean, so the trigger is the park/wake + address-
+space switch on the TCP+disk path, not the line itself. `netirq` is a non-default knob
+(polling is the default and passes); the crash wants its own session with the stand or a
+TCG repro harness that drives the guest from the host.
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its
