@@ -1,14 +1,17 @@
-//! The PL011 UART, polled: the console of QEMU `virt` (at `0x0900_0000`) and of every
-//! arm64 board whose ACPI SPCR names a PL011. Phase 1 hard-codes the `virt` base;
-//! the DTB (`/chosen/stdout-path`) and the SPCR take over when they are parsed
-//! (docs/ARM64-PLAN.md §4.2). Debug channel only — never on the datapath, as COM1
-//! on x86.
+//! The console UART, polled — one of two: the PL011 of QEMU `virt` (at `0x0900_0000`) and
+//! of every arm64 board whose ACPI SPCR names one, or the 16550 a Nitro guest's SPCR names
+//! (memory-mapped, its byte registers a word apart — `mmio32`). Phase 1 hard-codes the
+//! `virt` base; the DTB (`/chosen/stdout-path`) and the SPCR take over when they are parsed
+//! (docs/ARM64-PLAN.md §4.2). Debug channel only — never on the datapath, as COM1 on x86.
 //!
-//! The registers used: DR (data), FR (flags: TXFF bit 5 = the FIFO is full), IBRD/FBRD
-//! (the baud divisor), LCR_H (the line control), CR (enable), ICR (clear interrupts).
+//! The PL011 registers used: DR (data), FR (flags: TXFF bit 5 = the FIFO is full), IBRD/FBRD
+//! (the baud divisor), LCR_H (the line control), CR (enable), ICR (clear interrupts). The
+//! 16550's: THR/RBR (0), IER (1), LSR (5: DR bit 0, THRE bit 5) — the line itself (the
+//! divisor, the format) is left as the firmware set it: the reference clock behind a
+//! platform's 16550 is nobody's to guess, and the SPCR describes a console that works.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 /// One line at a time from ANY core. The wait is bounded (as every wait on this
 /// console): a core that faults while holding the lock must still get its diagnosis
@@ -29,6 +32,10 @@ pub fn lock() -> Guard {
 impl Drop for Guard { fn drop(&mut self) { LOCK.store(false, Ordering::Release); } }
 
 static BASE: AtomicU64 = AtomicU64::new(0x0900_0000);
+/// 0 — a PL011; 1 — a 16550 whose registers are `1 << SHIFT` bytes apart and `WIDTH` bytes wide.
+static KIND: AtomicU8 = AtomicU8::new(0);
+static SHIFT: AtomicU8 = AtomicU8::new(0);
+static WIDTH: AtomicU8 = AtomicU8::new(1);
 
 const DR: u64 = 0x00;
 const FR: u64 = 0x18;
@@ -42,13 +49,41 @@ const FR_TXFF: u32 = 1 << 5;
 #[inline] unsafe fn w(off: u64, v: u32) { core::ptr::write_volatile((BASE.load(Ordering::Relaxed) + off) as *mut u32, v) }
 #[inline] unsafe fn r(off: u64) -> u32 { core::ptr::read_volatile((BASE.load(Ordering::Relaxed) + off) as *const u32) }
 
+// The 16550's registers, by index; the stride and the width come from the SPCR.
+const NS_THR: u64 = 0; const NS_IER: u64 = 1; const NS_LSR: u64 = 5;
+const NS_LSR_DR: u32 = 1; const NS_LSR_THRE: u32 = 1 << 5;
+#[inline] unsafe fn nsw(idx: u64, v: u32) {
+    let a = BASE.load(Ordering::Relaxed) + (idx << SHIFT.load(Ordering::Relaxed));
+    match WIDTH.load(Ordering::Relaxed) { 4 => core::ptr::write_volatile(a as *mut u32, v), 2 => core::ptr::write_volatile(a as *mut u16, v as u16), _ => core::ptr::write_volatile(a as *mut u8, v as u8) }
+}
+#[inline] unsafe fn nsr(idx: u64) -> u32 {
+    let a = BASE.load(Ordering::Relaxed) + (idx << SHIFT.load(Ordering::Relaxed));
+    match WIDTH.load(Ordering::Relaxed) { 4 => core::ptr::read_volatile(a as *const u32), 2 => core::ptr::read_volatile(a as *const u16) as u32, _ => core::ptr::read_volatile(a as *const u8) as u32 }
+}
+#[inline] fn is_16550() -> bool { KIND.load(Ordering::Relaxed) == 1 }
+
+// The four questions every path below asks, answered for whichever UART this is.
+#[inline] fn tx_full() -> bool { unsafe { if is_16550() { nsr(NS_LSR) & NS_LSR_THRE == 0 } else { r(FR) & FR_TXFF != 0 } } }
+#[inline] fn tx_put(b: u8) { unsafe { if is_16550() { nsw(NS_THR, b as u32) } else { w(DR, b as u32) } } }
+#[inline] fn rx_empty() -> bool { unsafe { if is_16550() { nsr(NS_LSR) & NS_LSR_DR == 0 } else { r(FR) & FR_RXFE != 0 } } }
+#[inline] fn rx_get() -> u8 { unsafe { (if is_16550() { nsr(NS_THR) } else { r(DR) } & 0xFF) as u8 } }
+
 /// Where the UART is (a DTB/SPCR parse calls this before the first line, when it can).
-pub fn set_base(b: u64) { BASE.store(b, Ordering::Relaxed); }
+pub fn set_base(b: u64) { BASE.store(b, Ordering::Relaxed); KIND.store(0, Ordering::Relaxed); }
+/// A 16550 at `b`: registers `1 << shift` bytes apart, `width` (1, 2 or 4) bytes each.
+pub fn set_16550(b: u64, shift: u8, width: u8) {
+    BASE.store(b, Ordering::Relaxed);
+    SHIFT.store(shift, Ordering::Relaxed);
+    WIDTH.store(width, Ordering::Relaxed);
+    KIND.store(1, Ordering::Relaxed);
+}
 
 /// 8N1, the FIFO on, 115200 against the 24 MHz reference clock QEMU models (QEMU
 /// ignores the divisor; a board does not).
 pub fn init() {
     if BASE.load(Ordering::Relaxed) == 0 { return; }
+    // A 16550: polled, so its interrupts off; the line stays as the firmware set it.
+    if is_16550() { unsafe { nsw(NS_IER, 0); } return; }
     unsafe {
         w(CR, 0);
         w(ICR, 0x7FF);
@@ -66,15 +101,13 @@ const TX_SPINS: u32 = 200_000;
 pub fn write_byte(b: u8) {
     // No console (a machine described by ACPI whose SPCR names none we can drive).
     if BASE.load(Ordering::Relaxed) == 0 { return; }
-    unsafe {
-        let mut n = 0u32;
-        while r(FR) & FR_TXFF != 0 {
-            n += 1;
-            if n >= TX_SPINS { return; }
-            core::hint::spin_loop();
-        }
-        w(DR, b as u32);
+    let mut n = 0u32;
+    while tx_full() {
+        n += 1;
+        if n >= TX_SPINS { return; }
+        core::hint::spin_loop();
     }
+    tx_put(b);
 }
 
 /// A formatted line; `\n` becomes `\r\n` for a terminal.
@@ -120,10 +153,10 @@ pub fn puts_locked(s: &[u8]) { let _g = lock(); for &b in s { putb(b); } }
 const FR_RXFE: u32 = 1 << 4;
 /// A byte from the receive FIFO, if there is one.
 pub fn getc() -> Option<u8> {
-    if BASE.load(Ordering::Relaxed) == 0 { return None; }
-    unsafe { if r(FR) & FR_RXFE != 0 { None } else { Some((r(DR) & 0xFF) as u8) } }
+    if BASE.load(Ordering::Relaxed) == 0 || rx_empty() { return None; }
+    Some(rx_get())
 }
-pub fn port_has_data(_port: u16) -> bool { BASE.load(Ordering::Relaxed) != 0 && unsafe { r(FR) & FR_RXFE == 0 } }
+pub fn port_has_data(_port: u16) -> bool { BASE.load(Ordering::Relaxed) != 0 && !rx_empty() }
 /// # Safety
 /// There is no port I/O on arm64; the x86 self-test that pokes COM ports reads zero here.
 pub unsafe fn inb(_port: u16) -> u8 { 0 }
@@ -208,8 +241,8 @@ pub fn capture_flush(budget_ns: u64, max_bytes: usize) -> usize {
     if i >= len { LOCK.store(false, Ordering::Release); return 0; }
     let start = i;
     while i < len && i - start < max_bytes {
-        if unsafe { r(FR) } & FR_TXFF != 0 { break; }       // the FIFO is full — until the next time
-        unsafe { w(DR, CAP_BUF[i] as u32); }
+        if tx_full() { break; }                              // the FIFO is full — until the next time
+        tx_put(unsafe { CAP_BUF[i] });
         i += 1;
         if hz != 0 && crate::tsc::rdtsc().wrapping_sub(t0) >= limit { break; }
     }

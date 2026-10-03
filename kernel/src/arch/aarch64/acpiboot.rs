@@ -19,7 +19,7 @@
 //! The parsers take the table's BYTES, so a host test feeds them a table built in the test;
 //! `summary` is the one function that turns physical addresses into slices.
 
-use super::dtb::{Psci, Range, Summary, MAX_CPU};
+use super::dtb::{Psci, Range, Summary, UartKind, MAX_CPU};
 
 fn le32(b: &[u8], o: usize) -> Option<u32> { Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?)) }
 fn le64(b: &[u8], o: usize) -> Option<u64> { Some(u64::from_le_bytes(b.get(o..o + 8)?.try_into().ok()?)) }
@@ -28,7 +28,8 @@ fn le64(b: &[u8], o: usize) -> Option<u64> { Some(u64::from_le_bytes(b.get(o..o 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Found {
     pub madt: bool, pub gtdt: bool, pub spcr: bool, pub fadt: bool,
-    /// The SPCR's interface type when it is not a PL011 (0x03) or an SBSA UART (0x0E).
+    /// The SPCR's interface type when it is not a PL011 (0x03), an SBSA UART (0x0E) or a
+    /// 16550 (0x00, 0x01, 0x12) — a console the kernel has no driver for.
     pub uart_other: Option<u8>,
 }
 
@@ -78,13 +79,21 @@ pub fn gtdt(t: &[u8], out: &mut Summary) {
 }
 
 /// The SPCR: the console. The type at 36, the address in the generic address structure at
-/// 40 (the address itself at 44). Returns the type when the kernel has no driver for it.
+/// 40 (the access size at 43, the address itself at 44). Returns the type when the kernel
+/// has no driver for it. A 16550's register stride follows the access size (1 byte, or a
+/// 32-bit word — the `mmio32` of a Nitro guest); 0 ("undefined") means bytes.
 pub fn spcr(t: &[u8], out: &mut Summary) -> Option<u8> {
     let typ = *t.get(36)?;
     let base = le64(t, 44)?;
     if base == 0 { return None; }
     match typ {
-        0x03 | 0x0E => { out.uart = Some(Range { base, size: 0x1000 }); None }
+        0x03 | 0x0E => { out.uart = Some(Range { base, size: 0x1000 }); out.uart_kind = UartKind::Pl011; None }
+        0x00 | 0x01 | 0x12 => {
+            let (shift, width) = match t.get(43).copied().unwrap_or(0) { 2 => (1, 2), 3 => (2, 4), _ => (0, 1) };
+            out.uart = Some(Range { base, size: 0x1000 });
+            out.uart_kind = UartKind::Ns16550 { shift, width };
+            None
+        }
         other => Some(other),
     }
 }
@@ -227,10 +236,19 @@ mod tests {
         assert_eq!(spcr(t.bytes(), &mut s), None);
         assert_eq!(s.uart, Some(Range { base: 0x0900_0000, size: 0x1000 }));
         b[0] = 0x12;                                // a 16550 described by its address structure
+        b[7] = 3;                                   // ... accessed as 32-bit words (mmio32)
         let t = header(b"SPCR", &b);
         let mut s2 = Summary::default();
-        assert_eq!(spcr(t.bytes(), &mut s2), Some(0x12));
-        assert_eq!(s2.uart, None);
+        assert_eq!(spcr(t.bytes(), &mut s2), None);
+        assert_eq!(s2.uart, Some(Range { base: 0x0900_0000, size: 0x1000 }));
+        assert_eq!(s2.uart_kind, UartKind::Ns16550 { shift: 2, width: 4 });
+        b[0] = 0x00; b[7] = 0;                      // a plain 16550, byte registers
+        let t = header(b"SPCR", &b);
+        assert_eq!(spcr(t.bytes(), &mut s2), None);
+        assert_eq!(s2.uart_kind, UartKind::Ns16550 { shift: 0, width: 1 });
+        b[0] = 0x08;                                // a type nobody drives
+        let t = header(b"SPCR", &b);
+        assert_eq!(spcr(t.bytes(), &mut s2), Some(0x08));
 
         let mut b = [0u8; 120];
         b[129 - 36] = 0b11;

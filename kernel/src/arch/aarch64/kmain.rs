@@ -183,8 +183,9 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
     };
     // No console named by anybody: nothing is written (an address guessed on a machine
     // nobody described is an access to somebody else's register).
-    match summary.as_ref().and_then(|s| s.uart) {
-        Some(u) => uart::set_base(u.base),
+    match summary.as_ref().and_then(|s| s.uart.map(|u| (u, s.uart_kind))) {
+        Some((u, dtb::UartKind::Pl011)) => uart::set_base(u.base),
+        Some((u, dtb::UartKind::Ns16550 { shift, width })) => uart::set_16550(u.base, shift, width),
         None if bb.is_some() => uart::set_base(0),
         None => {}
     }
@@ -192,18 +193,27 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
     uart::init();
     crate::println!("talaria: boot (aarch64), EL{}, {}={:#x}", cpu::current_el(), if bb.is_some() { "the UEFI stub's block" } else { "dtb" }, x0);
     trap::init();
-    // The identity map covers exactly the RAM the tree names (block 0 is the devices).
-    // Without a tree: `virt`'s 1 GiB base and a generous size, so that the banner can
-    // still say what went wrong.
-    let (ram_base, ram_size) = match summary.as_ref() {
-        Some(s) if s.nmem > 0 => {
-            let lo = s.mem[..s.nmem].iter().map(|r| r.base).min().unwrap_or(0x4000_0000);
-            let hi = s.mem[..s.nmem].iter().map(|r| r.base + r.size).max().unwrap_or(lo + (1 << 30));
-            (lo, hi - lo)
-        }
-        _ => (0x4000_0000, 4 << 30),
+    // The identity map covers exactly the RAM the description names, range by range (block 0
+    // is the devices; a block with no RAM in it that holds a named device — the console, the
+    // GIC, the ECAM — is a Device block: on `virt` everything of that kind sits below 1 GiB,
+    // on a Graviton the 16550 is at 0xE2F0_0000 and the GIC above 512 GiB). Without a
+    // description: `virt`'s 1 GiB base and a generous size, so that the banner can still
+    // say what went wrong.
+    let mut rams = [(0u64, 0u64); dtb::MAX_MEM];
+    let nram = match summary.as_ref() {
+        Some(s) if s.nmem > 0 => { for (i, r) in s.mem[..s.nmem].iter().enumerate() { rams[i] = (r.base, r.size); } s.nmem }
+        _ => { rams[0] = (0x4000_0000, 4 << 30); 1 }
     };
-    unsafe { mmu::early_enable(ram_base, ram_size); }
+    let (ram_base, ram_size) = {
+        let lo = rams[..nram].iter().map(|r| r.0).min().unwrap_or(0);
+        let hi = rams[..nram].iter().map(|r| r.0 + r.1).max().unwrap_or(0);
+        (lo, hi - lo)
+    };
+    let devs: [u64; 5] = match summary.as_ref() {
+        Some(s) => [s.uart, s.gicd, s.gicr, s.its, s.ecam].map(|r| r.map(|r| r.base).unwrap_or(0)),
+        None => [0; 5],
+    };
+    unsafe { mmu::early_enable(&rams[..nram], &devs); }
     crate::println!("talaria: the MMU is on: sctlr={:#x} ttbr0={:#x}, RAM {:#x}..{:#x} in 1 GiB blocks",
         cpu::sctlr_el1(), cpu::ttbr0_el1(), ram_base, ram_base + ram_size);
 
@@ -221,7 +231,12 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
     match (acpi_found, tree) {
         (Some(f), t) => crate::println!("talaria: ACPI (the RSDP {:#x}): MADT {}, GTDT {}, SPCR {}, FADT {}{}; {} cpu(s){}",
             bb.map(|b| b.rsdp).unwrap_or(0), f.madt, f.gtdt, f.spcr, f.fadt,
-            match f.uart_other { Some(t) => if t == 0x12 || t <= 1 { " (the console is a 16550: no driver yet)" } else { " (the console is of a type with no driver)" }, None => "" },
+            match (f.uart_other, s.uart_kind) {
+                (Some(_), _) => " (the console is of a type with no driver)",
+                (None, dtb::UartKind::Ns16550 { width: 4, .. }) => " (the console is a 16550, mmio32)",
+                (None, dtb::UartKind::Ns16550 { .. }) => " (the console is a 16550)",
+                _ => "",
+            },
             s.ncpu, if t.is_some() { "; the firmware's device tree adds the virtio-mmio windows and the clock" } else { "" }),
         (None, Some(t)) => crate::println!("talaria: the device tree: {} bytes at {:#x}; {} RAM range(s){}, {} cpu(s), {} virtio-mmio window(s)",
             t.len(), dtb, s.nmem, if s.mem_seen > s.nmem { " (more were dropped)" } else { "" }, s.ncpu, s.nvirtio),

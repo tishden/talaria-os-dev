@@ -56,6 +56,13 @@ pub struct Span { pub off: usize, pub len: usize }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Psci { Hvc, Smc }
 
+/// Which UART `uart` is. A tree names a PL011 (`arm,pl011`); an SPCR names either a PL011
+/// (0x03, 0x0E) or a 16550 (0x00, 0x01, 0x12 — a Nitro guest's console), whose registers
+/// are a `width`-byte access each, `1 << shift` bytes apart (the SPCR's generic address
+/// structure says: access size 3 is `mmio32`, Linux's name for it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UartKind { #[default] Pl011, Ns16550 { shift: u8, width: u8 } }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Summary {
     pub mem: [Range; MAX_MEM],
@@ -65,6 +72,7 @@ pub struct Summary {
     pub bootargs: Option<Span>,
     /// The PL011 named by `/chosen/stdout-path`, else the first PL011 in the tree.
     pub uart: Option<Range>,
+    pub uart_kind: UartKind,
     /// The PL031 real-time clock (`arm,pl031`): the wall clock's base at boot.
     pub rtc: Option<Range>,
     /// The host bridge's 32-bit memory window (`ranges` of `pci-host-ecam-generic`), as CPU
@@ -95,7 +103,7 @@ pub struct Summary {
 impl Default for Summary {
     fn default() -> Self {
         Summary {
-            mem: [Range::default(); MAX_MEM], nmem: 0, mem_seen: 0, bootargs: None, uart: None, rtc: None, pci_mem32: None,
+            mem: [Range::default(); MAX_MEM], nmem: 0, mem_seen: 0, bootargs: None, uart: None, uart_kind: UartKind::Pl011, rtc: None, pci_mem32: None,
             gicd: None, gicr: None, its: None, timer_ppi: [0; 4], psci: None,
             cpus: [0; MAX_CPU], ncpu: 0, cpu_seen: 0, virtio: [(0, 0); MAX_VIRTIO], nvirtio: 0, virtio_seen: 0,
             ecam: None,
