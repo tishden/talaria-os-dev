@@ -177,13 +177,22 @@ pub fn has_1g() -> bool { true }
 /// never executes a user page (x86's SMEP) by construction; `true` says so to the caller.
 pub unsafe fn init_hw() -> bool { true }
 
-/// What each of the four identity gigabytes is (`paging::init`): below the kernel's
-/// gigabyte everything is devices (`virt`: the GIC, the UART, virtio-mmio, the low ECAM),
-/// the kernel's gigabyte is RAM by 2M leaves with the user identity region, above it RAM.
+/// What each of the four identity gigabytes is (`paging::init`): the kernel's gigabyte is
+/// RAM by 2M leaves with the user identity region; any other gigabyte is RAM if the
+/// firmware's map puts RAM in it, devices otherwise. On `virt` that reads as before (GB0
+/// the GIC, the UART, virtio-mmio, the low ECAM; GB1 the kernel; GB2-3 RAM when the guest
+/// has it); on a Graviton GB0 is RAM (from 5 MiB) and GB3 is the PCI window with the
+/// 16550 — a fixed "below the kernel is devices" would have cached the console's registers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GbKind { Device, User2M, Ram1G }
 pub fn gb_kind(gb: usize, kernel_gb: usize) -> GbKind {
-    if gb < kernel_gb { GbKind::Device } else if gb == kernel_gb { GbKind::User2M } else { GbKind::Ram1G }
+    if gb == kernel_gb { return GbKind::User2M; }
+    let (lo, hi) = ((gb as u64) << 30, ((gb as u64) + 1) << 30);
+    for i in 0..crate::mem::ram_regions() {
+        let (b, l) = crate::mem::ram_region(i);
+        if l != 0 && b < hi && b + l > lo { return GbKind::Ram1G; }
+    }
+    GbKind::Device
 }
 
 // ── The early identity map: what the kernel runs on until `paging::init` ─────────────
@@ -200,19 +209,32 @@ const fn normal_block(pa: u64) -> u64 { pa | VALID | (ATTR_NORMAL << ATTR_SHIFT)
 /// A 1 GiB Device block, never executed.
 const fn device_block(pa: u64) -> u64 { pa | VALID | (ATTR_DEVICE << ATTR_SHIFT) | AF | UXN | PXN }
 
-/// Build the early tables and turn the MMU on. Block 0 is the devices; `ram_base`/`ram_size`
-/// (from the device tree) become Normal blocks — mapping RAM that is not there is harmless
-/// while nothing touches it.
+/// Build the early tables and turn the MMU on. Block 0 is the devices; every 1 GiB block a
+/// RAM range of `rams` (base, size) touches becomes a Normal block — mapping RAM that is
+/// not there is harmless while nothing touches it. `devs` are the devices the machine's
+/// description named (the console, the GIC, the ECAM): a block of theirs that holds no RAM
+/// is a Device block — on QEMU `virt` everything sits below 1 GiB, a Graviton's firmware
+/// puts its 16550 at 0xE2F0_0000 in a gigabyte with nothing else, and the first line would
+/// otherwise go through a cacheable mapping (or fault, with no mapping at all). A device in
+/// a gigabyte that also holds RAM is left Normal: 1 GiB is this map's whole resolution. The
+/// first 512 GiB only: a device above that (a Graviton's GIC) is `paging`'s to map.
 ///
 /// # Safety
 /// Once, on the boot core, with the MMU off, from `kmain`, before any other core exists;
 /// running from an identity address (the image is loaded where it is linked).
-pub unsafe fn early_enable(ram_base: u64, ram_size: u64) {
+pub unsafe fn early_enable(rams: &[(u64, u64)], devs: &[u64]) {
     let l1 = &mut *core::ptr::addr_of_mut!(L1);
     l1.0[0] = device_block(0);
-    let first = (ram_base >> 30) as usize;
-    let last = ((ram_base + ram_size - 1) >> 30) as usize;
-    for i in first.max(1)..=last.min(511) { l1.0[i] = normal_block((i as u64) << 30); }
+    for &(base, size) in rams {
+        if size == 0 { continue; }
+        let first = (base >> 30) as usize;
+        let last = ((base + size - 1) >> 30) as usize;
+        for i in first.max(1)..=last.min(511) { l1.0[i] = normal_block((i as u64) << 30); }
+    }
+    for &d in devs {
+        let i = (d >> 30) as usize;
+        if d != 0 && i < 512 && l1.0[i] == 0 { l1.0[i] = device_block((i as u64) << 30); }
+    }
     let l0 = &mut *core::ptr::addr_of_mut!(L0);
     l0.0[0] = (core::ptr::addr_of!(L1) as u64) | VALID | TABLE_OR_PAGE;
     // The intermediate physical address size: what the core supports, capped at 48 bits
