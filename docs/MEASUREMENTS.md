@@ -527,6 +527,32 @@ notes). The whole gate in a loop, 120 checks a run: **0 of 10 runs failed**. The
 `infra/aws/logs/aarch64-20260930-213404/` (the gate, the twelve number consoles, the
 probe, the soak's first consoles and the verdicts).
 
+### 10.2. The stand on the 229-check gate, and the first EC2 facts (2026-10-03/04)
+
+The same `c7g.metal` brought up once more (`infra/aws/kvm-stand-aarch64.sh`, ~52 min, the
+instance self-destructed), the kernel at `f3f06bc` on `arm64-port`. The gate under KVM:
+**229/1** — the one FAIL was the gate's own host check (`htree (host)`: e2fsck refused a
+tree whose `dx_root` carried the effective hash version instead of the raw one, a defect
+that only an arm64 host's unsigned-hash `mkfs` exposes; ENGINEERING-NOTES §6.1 item 26,
+fixed the same session). Everything the stand alone judges was clean:
+
+| what | number |
+| --- | --- |
+| `mbench` | alu 0.77 ns/step (1.30 G steps/s), syscall 153 ns, syscall-ptr16 197 ns, read64 177 ns, chase-64m 94 ns, L1/L2/L3/RAM 15–18 GB/s |
+| `futexlat` | futex same/cross-core p50 ~512 ns; cond same/cross-core p50 ~1900 ns |
+| `smp2` / `smp4` | speedup 2.00 / 4.00 |
+| the probes TCG cannot judge | `ring` 2 M slots in 216 ms, 0 corrupted, 9.25 M slots/s; `icache`, `bbm`, `svccost` all "as expected" |
+| the soak (`soak-aarch64.sh 50`, 9 modes) | **0 of 50** each |
+| the parallel race detector (`PAR=24 … 96`, forkap/shmrace/memrace, 24-at-once on 64 cores) | **0 of 96** each — the three shared-code races of §10.5 hold under a real weak machine |
+| the network, polling | udp RTT p50 11.2 us, p99 11.8; tcp 75 142 req/s (13.3 us/req) |
+| the network, `netirq=1` | udp RTT p50 22.7 us (the line + parking); **tcp `diskserver` FAULTS** — a kstack page unmapped across the park/wake address-space switch (ARM64-PLAN §10.7, still open) |
+
+The EC2 facts off a live Nitro guest (`c7g.large`, `edk2`) and the bare metal: the console
+is a 16550 (`c7g.large`: MMIO `0x8000_0000`, `mmio32`; `c7g.metal`: `0xE2F0_0000`), the map
+starts at `0x4000_0000` (the `0x4008_0000` load address is RAM), PSCI is SMC, the counter
+runs at 1.05 GHz. Logs: `infra/aws/logs/aarch64-20261003-231145/` and
+`infra/aws/logs/aarch64-{graviton,nitro}-acpi-c7g.*.log`.
+
 ## 11. Reproducing any of this
 
 ```sh
