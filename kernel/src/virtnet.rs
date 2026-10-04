@@ -1,4 +1,6 @@
-//! The virtio-net driver (the MMIO transport — QEMU/microvm) as a `NetDev`.
+//! The virtio-net driver as a `NetDev` — over the MMIO transport (QEMU microvm, arm64 `virt`
+//! from the device tree) and over virtio-pci (a machine whose firmware describes only a PCI
+//! bus: arm64 `virt` under edk2, x86 q35/OVMF).
 //!
 //! Here too lives the bookkeeping that used to lie in the common `NicQ` and had
 //! nothing to do with it: virtio gives out a TOKEN for every laid-out buffer, and the inverse
@@ -8,14 +10,16 @@
 use core::ptr::NonNull;
 use virtio_drivers::device::net::VirtIONetRaw;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
-use virtio_drivers::transport::{DeviceType, Transport};
+use virtio_drivers::transport::pci::bus::{ConfigurationAccess, DeviceFunction, PciRoot};
+use virtio_drivers::transport::pci::PciTransport;
+use virtio_drivers::transport::{DeviceType, SomeTransport, Transport};
 
 use crate::hal::TalariaHal;
 use crate::netdev::{Bind, Driver, NetDev, FRAME, MAXTX};
 use crate::pci::PciDev;
 use crate::QS;
 
-pub type Net = VirtIONetRaw<TalariaHal, MmioTransport<'static>, QS>;
+pub type Net = VirtIONetRaw<TalariaHal, SomeTransport<'static>, QS>;
 
 /// The virtio-mmio window: the address and the size. It is filled in at the parsing of the cmdline or
 /// by a scan of the microvm window (`virtnet::scan_mmio_window`) BEFORE the driver is bound.
@@ -31,7 +35,8 @@ pub struct VirtioNic {
     tx_addr: [u64; QS],
     tx_free: [bool; MAXTX],
     notify: bool,
-    /// The window's address (`intr_regs`).
+    /// The MMIO window's address (`intr_regs`); 0 on virtio-pci, whose status register reads
+    /// clear and has no acknowledge register beside it — that card is polled only.
     mmio: usize,
 }
 
@@ -105,7 +110,10 @@ impl NetDev for VirtioNic {
     /// InterruptStatus (0x60) and InterruptACK (0x64) of the window: the two registers have
     /// nothing to do with the queues, so the line's handler may clear the status while the
     /// interrupted code is in the middle of a queue operation.
-    fn intr_regs(&self) -> Option<(usize, usize)> { Some((self.mmio + 0x60, self.mmio + 0x64)) }
+    fn intr_regs(&self) -> Option<(usize, usize)> {
+        if self.mmio == 0 { return None; }
+        Some((self.mmio + 0x60, self.mmio + 0x64))
+    }
 
     /// The word (flags,idx) of the receive used ring: the device writes there when completing
     /// a buffer, and that DMA write wakes an MWAIT without an interrupt and without a vmexit.
@@ -165,15 +173,18 @@ fn probe(_: Option<&PciDev>, inst: usize) -> Option<&'static mut dyn NetDev> {
     crate::println!("virtio-net: the instance {} — the window {:#x} ({} B)", inst, a, sz);
     let header = NonNull::new(a as *mut VirtIOHeader)?;
     let transport = unsafe { MmioTransport::new(header, sz) }.ok()?;
-    let dev: Net = VirtIONetRaw::new(transport).ok()?;
+    let dev: Net = VirtIONetRaw::new(SomeTransport::from(transport)).ok()?;
+    install(unsafe { core::ptr::addr_of_mut!(SLOT[inst]) }, dev, a)
+}
+
+fn install(p: *mut Option<VirtioNic>, dev: Net, mmio: usize) -> Option<&'static mut dyn NetDev> {
     let nic = VirtioNic {
         dev,
         rx_slot: [0; QS], rx_addr: [0; QS],
         tx_slot: [0; QS], tx_len: [0; QS], tx_addr: [0; QS],
-        tx_free: [true; MAXTX], notify: false, mmio: a,
+        tx_free: [true; MAXTX], notify: false, mmio,
     };
     unsafe {
-        let p = core::ptr::addr_of_mut!(SLOT[inst]);
         core::ptr::write(p, Some(nic));
         Some((*p).as_mut().unwrap() as &mut dyn NetDev)
     }
@@ -185,6 +196,50 @@ pub static DRIVER: Driver = Driver {
     // or from a scan (`virtnet::scan_mmio_window`).
     bind: &[Bind::Platform],
     probe,
+};
+
+// ── virtio-pci ──────────────────────────────────────────────────────────────
+/// The config space as the vendored transport asks for it: through `pci`'s own access (the
+/// ECAM window or the legacy ports — whichever the enumeration settled on).
+struct Cam;
+
+impl ConfigurationAccess for Cam {
+    fn read_word(&self, f: DeviceFunction, off: u8) -> u32 { crate::pci::cfg_read(f.bus, f.device, f.function, off as u16) }
+    fn write_word(&mut self, f: DeviceFunction, off: u8, v: u32) { crate::pci::cfg_write(f.bus, f.device, f.function, off as u16, v) }
+    unsafe fn unsafe_clone(&self) -> Self { Cam }
+}
+
+/// The slots of the PCI cards: their own row, so that an MMIO card and a PCI one on the same
+/// machine do not take each other's place.
+static mut PSLOT: [Option<VirtioNic>; NSLOT] = [None, None, None, None];
+
+fn probe_pci(d: Option<&PciDev>, inst: usize) -> Option<&'static mut dyn NetDev> {
+    let d = d?;
+    if inst >= NSLOT { return None; }
+    // The transport finds its registers through the vendor capabilities, each in some BAR:
+    // all of them must decode first (under edk2 the firmware assigned them; on a machine with
+    // no firmware nobody did).
+    crate::pci::assign_mem_bars(d);
+    let mut root = PciRoot::new(Cam);
+    let f = DeviceFunction { bus: d.bus, device: d.dev, function: d.func };
+    let t = match PciTransport::new::<TalariaHal, _>(&mut root, f) {
+        Ok(t) => t,
+        Err(e) => { crate::println!("virtio-net: {:02x}:{:02x}.{} — not a modern virtio-pci function ({})", d.bus, d.dev, d.func, e); return None; }
+    };
+    if t.device_type() != DeviceType::Network { return None; }
+    crate::println!("virtio-net: the instance {} — PCI {:02x}:{:02x}.{} {:04x}:{:04x} (the virtio-pci transport, polled)",
+        inst, d.bus, d.dev, d.func, d.vendor, d.device);
+    let dev: Net = VirtIONetRaw::new(SomeTransport::from(t)).ok()?;
+    install(unsafe { core::ptr::addr_of_mut!(PSLOT[inst]) }, dev, 0)
+}
+
+/// virtio-net on the PCI bus: the transitional id (1af4:1000) and the modern one (1af4:1041).
+/// A driver of its own beside the MMIO one: `netdev` counts instances per driver, and one
+/// count over two kinds of binding would skip the first PCI card behind an MMIO one.
+pub static PCI_DRIVER: Driver = Driver {
+    name: "virtio-pci",
+    bind: &[Bind::Pci(0x1af4, 0x1000), Bind::Pci(0x1af4, 0x1041)],
+    probe: probe_pci,
 };
 
 // ── The search for the virtio-mmio window ─────────────────────────────────

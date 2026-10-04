@@ -35,6 +35,10 @@ static void tier1_calibrate(void);
 static uint32_t g_tier1_cost;  // the measured cost of a cycle of the tier 1 (ns) if it is switched off
 static long futex(volatile uint32_t *a, int op, uint32_t val, const struct timespec *to);
 
+// The machine's three lines: the counter, the spin hint, the feature query. On arm64 there
+// is no user-mode monitor wait like umwait/mwaitx, so the tier 1 stays off and a waiter goes
+// from the spin straight to the kernel (whose wait on the word IS the monitor there).
+#if defined(__x86_64__)
 static inline uint64_t rdtsc(void) {
     unsigned lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -44,6 +48,16 @@ static inline void cpuid2(uint32_t leaf, uint32_t sub, uint32_t *c, uint32_t *d)
     uint32_t a, b;
     __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(*c), "=d"(*d) : "a"(leaf), "c"(sub));
 }
+#define TS_RELAX() __asm__ volatile("pause")
+#elif defined(__aarch64__)
+static inline uint64_t rdtsc(void) {
+    uint64_t v;
+    __asm__ volatile("isb\n mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+}
+static inline void cpuid2(uint32_t leaf, uint32_t sub, uint32_t *c, uint32_t *d) { (void)leaf; (void)sub; *c = 0; *d = 0; }
+#define TS_RELAX() __asm__ volatile("yield")
+#endif
 
 void tsync_init(void) {
     uint32_t c, d;
@@ -86,6 +100,7 @@ static void tier1_calibrate(void) {
     for (int i = 0; i < N; i++) {
         uint64_t want = 100000;                    // the ticks (~30-50 us)
         uint64_t t0 = rdtsc(), dl = t0 + want;
+#if defined(__x86_64__)
         if (g_tier1 == 1) {
             __asm__ volatile("umonitor %0" :: "r"(&probe));
             __asm__ volatile("umwait %0" :: "r"(g_umwait_state),
@@ -94,6 +109,9 @@ static void tier1_calibrate(void) {
             __asm__ volatile("monitorx" :: "a"(&probe), "c"(0), "d"(0));
             __asm__ volatile("mwaitx" :: "a"(0xF0u), "c"(0x2u), "b"((uint32_t)want));
         }
+#else
+        (void)dl;
+#endif
         uint64_t el = rdtsc() - t0;
         if (el * 3 >= want) slept++;               // we slept at least a third of the quantum
     }
@@ -118,7 +136,7 @@ long tsync_upark_until(volatile uint32_t *addr, uint32_t target, volatile uint32
     // the sawtooth "one sleeps, the other works"; when it is idle we go to sleep quickly.
     for (int i = 0; i < 1200; i++) {
         if ((int32_t)(*addr - target) >= 0) return 0;
-        __asm__ volatile("pause");
+        TS_RELAX();
     }
     if (g_tier1) {
         while ((int32_t)(*addr - target) < 0) tier1_wait(addr, *addr);
@@ -138,7 +156,7 @@ static long tsync_upark_door(volatile uint32_t *door, volatile uint32_t *idx,
                              uint32_t target, uint64_t *pair, volatile uint32_t *state) {
     for (int i = 0; i < 1200; i++) {
         if ((int32_t)(*idx - target) >= 0) return 0;
-        __asm__ volatile("pause");
+        TS_RELAX();
     }
     if (g_tier1) { // the tier 1: a monitor on the index (ring 3, without the kernel)
         while ((int32_t)(*idx - target) < 0) tier1_wait(idx, *idx);
@@ -152,6 +170,9 @@ static long tsync_upark_door(volatile uint32_t *door, volatile uint32_t *idx,
 // The tier 1: arm the monitor -> recheck -> fall asleep until a write into the line.
 // The arm/check race is closed by the order (a write between them raises the armed flag).
 static void tier1_wait(volatile uint32_t *a, uint32_t v) {
+#if !defined(__x86_64__)
+    (void)a; (void)v; // never chosen: `tsync_init` leaves the tier 1 off on this machine
+#else
     if (g_tier1 == 1) {
         __asm__ volatile("umonitor %0" :: "r"(a));
         if (*a != v) return;
@@ -164,13 +185,14 @@ static void tier1_wait(volatile uint32_t *a, uint32_t v) {
         if (*a != v) return;
         __asm__ volatile("mwaitx" :: "a"(0xF0u), "c"(0x2u), "b"((uint32_t)(g_slice_ns * 3))); // C1, with the EBX timeout
     }
+#endif
 }
 
 void tsync_wait(volatile uint32_t *addr, uint32_t expected) {
     if (!g_inited) tsync_init();
     for (int i = 0; i < TIER0_SPINS; i++) {         // the tier 0
         if (*addr != expected) return;
-        __asm__ volatile("pause");
+        TS_RELAX();
     }
     while (*addr == expected) {
         if (g_tier1) tier1_wait(addr, expected);    // the tier 1 (ring 3, without a syscall)
@@ -185,7 +207,7 @@ int tsync_wait_ns(volatile uint32_t *addr, uint32_t expected, uint64_t timeout_n
     uint64_t dl = (uint64_t)t0.tv_sec * 1000000000ull + t0.tv_nsec + timeout_ns;
     for (int i = 0; i < TIER0_SPINS; i++) {
         if (*addr != expected) return 0;
-        __asm__ volatile("pause");
+        TS_RELAX();
     }
     while (*addr == expected) {
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -236,7 +258,7 @@ void tsync_mcs_lock(tsync_mcs *m, tsync_mcs_node *me) {
     atomic_store_explicit(&prev->next, me, memory_order_release);
     for (int i = 0; i < TIER0_SPINS; i++) {
         if (atomic_load_explicit(&me->locked, memory_order_acquire) == 0) return;
-        __asm__ volatile("pause");
+        TS_RELAX();
     }
     uint32_t one = 1;
     while (atomic_load_explicit(&me->locked, memory_order_acquire) != 0) {
@@ -250,7 +272,7 @@ void tsync_mcs_unlock(tsync_mcs *m, tsync_mcs_node *me) {
     if (!nx) {
         tsync_mcs_node *exp = me;
         if (atomic_compare_exchange_strong_explicit(&m->tail, &exp, 0, memory_order_release, memory_order_relaxed)) return;
-        while (!(nx = atomic_load_explicit(&me->next, memory_order_acquire))) __asm__ volatile("pause");
+        while (!(nx = atomic_load_explicit(&me->next, memory_order_acquire))) TS_RELAX();
     }
     if (atomic_exchange_explicit(&nx->locked, 0, memory_order_release) == 2)
         tsync_wake((volatile uint32_t *)&nx->locked, 1);
@@ -435,7 +457,7 @@ uint64_t tsync_mpsc_pop(tsync_mpsc *q) {
         for (int i = 0; i < 1200; i++) {
             if ((int32_t)(atomic_load_explicit(&s->seq, memory_order_acquire) - want) >= 0)
                 goto got;
-            __asm__ volatile("pause");
+            TS_RELAX();
         }
         if (q->kfast) {
             atomic_store_explicit(&q->c_waitpos, h, memory_order_release);
@@ -446,7 +468,7 @@ uint64_t tsync_mpsc_pop(tsync_mpsc *q) {
                 int spun = 0;
                 for (int i = 0; i < 1200; i++) {
                     if ((int32_t)(atomic_load_explicit(&s->seq, memory_order_acquire) - want) >= 0) { spun = 1; break; }
-                    __asm__ volatile("pause");
+                    TS_RELAX();
                 }
                 if (!spun)
                     syscall(4602, &s->seq, want, 0, 1 | 4, &q->c_state);

@@ -228,6 +228,8 @@ pub fn run(cmdline: &str, tsc_hz: u64) -> ! {
     }
     println!("talaria: bringing an AP up (APIC ID 1) for the datapath cell...");
     if let Some((d, m)) = open_nic() { nic_handoff_put(d, m); } // the NIC is opened on the BSP
+    // Not for `talaria.test=ipi`: that core is the IPIs' target, counting them in its idle loop.
+    CELL_AP.store(!TEST_IPI.load(Ordering::SeqCst), Ordering::SeqCst);
     if crate::smp::start_cpu(1) {
         println!("talaria: the AP is up — the datapath on core 1, the BSP = the control plane");
         if FAST.load(Ordering::SeqCst) {
@@ -438,6 +440,12 @@ pub fn open_nic() -> Option<(&'static mut dyn crate::netdev::NetDev, [u8; 6])> {
     crate::netdev::probe_all()
 }
 
+
+/// The core about to be started is the cell's (`run_datapath`): x86's AP entry goes there
+/// for every role it does not know; arm64's default role is the bring-up's job loop, so it
+/// asks this flag (`arch::aarch64::kmain::rust_ap_main`).
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+pub static CELL_AP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Handing the NIC from the BSP to an AP: ENA is initialised on the BSP (PCIe
 /// enumeration + the admin queue), while the cell/kernel modes live on an AP. We put it here

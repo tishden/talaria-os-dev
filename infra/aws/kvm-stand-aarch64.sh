@@ -16,7 +16,7 @@
 #   LOOPN=10 ...                                        # runs of the whole gate in a loop (default 3:
 #                                                       # the 229-check gate is ~40 min under KVM)
 #   PARN=96 PAR=24 ...                                  # the parallel race detector: PARN boots of
-#                                                       # forkap/shmrace/memrace, PAR at once (96 vCPUs
+#                                                       # forkap/shmrace/memrace/piperace, PAR at once (96 vCPUs
 #                                                       # on 64 cores — §10.5's recipe, default 96/24)
 #   UPONLY=1 ...                                        # stop after the build, keep the instance: hand work
 #
@@ -184,8 +184,8 @@ ssh $SSH_OPTS ec2-user@"$IP" 'tar -C /tmp -c soak 2>/dev/null' | tar -x -C "$LOG
 # The parallel race detector of §10.5: PAR copies of one boot at once, more vCPUs than the
 # host has cores — the three races of the shared code that session found never showed on a
 # quiet host and did in 1 of 60-160 boots this way.
-echo "== the parallel race detector: ${PARN:-96} boots of forkap/shmrace/memrace, ${PAR:-24} at a time =="
-rrun par 1800 "cd talaria && PAR=${PAR:-24} MODES='forkap shmrace memrace' kernel/soak-aarch64.sh ${PARN:-96} /tmp/par" || true
+echo "== the parallel race detector: ${PARN:-96} boots of forkap/shmrace/memrace/piperace, ${PAR:-24} at a time =="
+rrun par 2400 "cd talaria && PAR=${PAR:-24} MODES='forkap shmrace memrace piperace' kernel/soak-aarch64.sh ${PARN:-96} /tmp/par" || true
 grep -E 'soak:' "$LOGD/par.log" || true
 ssh $SSH_OPTS ec2-user@"$IP" 'tar -C /tmp -c par 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || true
 

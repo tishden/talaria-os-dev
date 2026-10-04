@@ -16,7 +16,15 @@ static MMIO_NEXT: AtomicU64 = AtomicU64::new(MMIO_ALLOC_START);
 /// firmware before it, and `0xC000_0000` there is RAM). Call it before `init`.
 // The caller is the arm64 bring-up (a device tree, an ITS); the x86 build has none.
 #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
-pub fn set_mmio_window(base: u64) { MMIO_NEXT.store(base, Ordering::Relaxed); }
+pub fn set_mmio_window(base: u64) { MMIO_NEXT.store(base, Ordering::Relaxed); NO_FW.store(true, Ordering::Relaxed); }
+/// The machine came with no firmware to configure the bus (the device tree named the host
+/// bridge's window, `set_mmio_window`): the bridges' bus numbers and windows are ours to set.
+static NO_FW: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The next bus number to give a bridge nobody numbered (`number_bridge`).
+static NEXT_BUS: AtomicUsize = AtomicUsize::new(1);
+/// Inside a bridge we are numbering: its devices' BARs are assigned AT ONCE, so that the
+/// window the bridge forwards can be set around them when its scan ends.
+static NUMBERING: AtomicUsize = AtomicUsize::new(0);
 /// The next free address INSIDE the bridge's window (A11): when assigning a BAR ourselves, we
 /// are bound to land in the window that the bridge forwards, otherwise the device does not answer.
 static BRIDGE_NEXT: AtomicU64 = AtomicU64::new(0);
@@ -234,6 +242,32 @@ pub fn bar(bus: u8, dev: u8, func: u8, idx: u16) -> (u64, u64) {
     (base, size)
 }
 
+/// A config dword for a driver that walks the space itself (virtio-pci's vendor capabilities).
+pub fn cfg_read(bus: u8, dev: u8, func: u8, off: u16) -> u32 { rd(bus, dev, func, off & !3) }
+pub fn cfg_write(bus: u8, dev: u8, func: u8, off: u16, v: u32) { wr(bus, dev, func, off & !3, v) }
+
+/// Every memory BAR of the function assigned (`bar`: the firmware's address respected, an
+/// empty one given one out of the window, decoding and bus mastering on); the upper half of a
+/// 64-bit BAR is not a BAR of its own. A driver whose BARs are found through capabilities
+/// (virtio-pci) does not know in advance which of the six it needs.
+pub fn assign_mem_bars(d: &PciDev) {
+    let mut i = 0u16;
+    while i < 6 {
+        let off = 0x10 + i * 4;
+        let mut lo = rd(d.bus, d.dev, d.func, off);
+        // An unassigned BAR reads 0 but shows its type bits under the all-ones probe; an
+        // unimplemented one keeps 0 — not a BAR.
+        if lo == 0 {
+            wr(d.bus, d.dev, d.func, off, 0xFFFF_FFFF);
+            lo = rd(d.bus, d.dev, d.func, off);
+            wr(d.bus, d.dev, d.func, off, 0);
+            if lo == 0 { i += 1; continue; }
+        }
+        if lo & 1 == 0 { bar(d.bus, d.dev, d.func, i); }
+        i += if lo & 1 == 0 && lo & 0x6 == 0x4 { 2 } else { 1 };
+    }
+}
+
 /// The offset of a capability by its id (a walk over the list; 0 — there is none).
 fn find_cap(bus: u8, dev: u8, func: u8, id: u8) -> u16 {
     if rd(bus, dev, func, 4) >> 16 & 0x10 == 0 { return 0; } // status.cap-list
@@ -278,10 +312,13 @@ fn probe_func(bus: u8, dev: u8, func: u8) {
         crate::println!("pci: {:02x}:{:02x}.{} {:04x}:{:04x} class={:#08x}{}",
             bus, dev, func, vendor, device, class, if msix != 0 { " msi-x" } else { "" });
     }
+    // A device behind a bridge we are numbering: its BARs now (see `NUMBERING`).
+    if !bridge && NUMBERING.load(Ordering::Relaxed) > 0 { assign_mem_bars(&PciDev { bus, dev, func, vendor, device, class, msix_cap: msix, msi_cap: msi }); }
     // A PCI-PCI bridge (class 0x0604xx): recursively the secondary bus
     if bridge {
         let sec = (rd(bus, dev, func, 0x18) >> 8) as u8;
         if sec != 0 && sec != bus { scan_bus(sec); }
+        else if sec == 0 && NO_FW.load(Ordering::Relaxed) { number_bridge(bus, dev, func); }
     }
     if vendor == 0x1af4 && device == 0x1110 {
         let (b, s) = bar(bus, dev, func, 2);
@@ -290,6 +327,47 @@ fn probe_func(bus: u8, dev: u8, func: u8) {
             crate::println!("pci: ivshmem BAR2 -> {:#x} ({} KB) — the host's shared memory", b, s / 1024);
         }
     }
+}
+
+/// A bridge on a machine with no firmware: its secondary bus is 0 and its windows are
+/// closed, so nothing behind it answers — the root ports of an arm64 `virt` booted with
+/// `-kernel` (docs/ARM64-PLAN.md §10.6 item 4). Depth first, as firmware does: the next free
+/// bus number is its secondary, the subordinate is opened to 0xFF while the buses below are
+/// numbered and closed down to the last one after; the devices behind take their BARs from
+/// the host bridge's window during the scan (`NUMBERING`), and the bridge's memory window
+/// is set to the megabytes they took. The I/O and prefetchable windows stay closed: our
+/// BARs are all in the 32-bit memory window, prefetchable or not, which a bridge forwards.
+fn number_bridge(bus: u8, dev: u8, func: u8) {
+    let sec = NEXT_BUS.fetch_add(1, Ordering::Relaxed);
+    let last = if ecam() != 0 { ECAM_BUSN.load(Ordering::Relaxed) } else { 255 };
+    if sec > last { crate::println!("pci: the bridge {:02x}:{:02x}.{}: no bus number left (the ECAM ends at {})", bus, dev, func, last); return; }
+    let sec = sec as u8;
+    let r18 = rd(bus, dev, func, 0x18) & 0xFF00_0000;
+    wr(bus, dev, func, 0x18, r18 | 0xFF << 16 | (sec as u32) << 8 | bus as u32);
+    const MB: u64 = 1 << 20;
+    let start = (MMIO_NEXT.load(Ordering::Relaxed) + MB - 1) & !(MB - 1);
+    MMIO_NEXT.store(start, Ordering::Relaxed);
+    // Closed while the scan runs: the reset value (base 0, limit 0) reads as a window
+    // 0..1 MB, and `bar` would take an address for a device behind out of it.
+    wr(bus, dev, func, 0x20, 0x0000_FFF0);
+    NUMBERING.fetch_add(1, Ordering::Relaxed);
+    scan_bus(sec);
+    NUMBERING.fetch_sub(1, Ordering::Relaxed);
+    let sub = (NEXT_BUS.load(Ordering::Relaxed) - 1).min(last) as u8;
+    wr(bus, dev, func, 0x18, r18 | (sub as u32) << 16 | (sec as u32) << 8 | bus as u32);
+    let end = (MMIO_NEXT.load(Ordering::Relaxed) + MB - 1) & !(MB - 1);
+    MMIO_NEXT.store(end, Ordering::Relaxed);
+    // Memory Base/Limit (0x20): bits 31:20 of the first and the last megabyte.
+    if end > start { wr(bus, dev, func, 0x20, (((end - 1) >> 16) as u32 & 0xFFF0) << 16 | ((start >> 16) as u32 & 0xFFF0)); }
+    else { wr(bus, dev, func, 0x20, 0x0000_FFF0); }
+    wr(bus, dev, func, 0x24, 0x0000_FFF0);                    // the prefetchable window: closed
+    wr(bus, dev, func, 0x28, 0); wr(bus, dev, func, 0x2C, 0);
+    let io = rd(bus, dev, func, 0x1C) & 0xFFFF_0000;
+    wr(bus, dev, func, 0x1C, io | 0x00F0);                    // the I/O window: closed
+    let cmd = rd(bus, dev, func, 4);
+    wr(bus, dev, func, 4, cmd | 0x6);                         // forward memory, master behind
+    crate::println!("pci: the bridge {:02x}:{:02x}.{} numbered (no firmware): buses {}..{}, the window {:#x}..{:#x}",
+        bus, dev, func, sec, sub, start, end);
 }
 
 // §4.8: which buses have already been walked. One and the same bus is reachable both by a direct walk

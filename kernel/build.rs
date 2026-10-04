@@ -24,8 +24,21 @@ fn main() {
         println!("cargo:rerun-if-changed={}", dir.display());
         let mut arms = String::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
-            let mut names: Vec<String> = rd.filter_map(|e| e.ok()).filter(|e| e.path().is_file())
-                .filter_map(|e| e.file_name().into_string().ok()).collect();
+            // The files, and one level of subdirectories as `sub/name` (`tsync/fiberbench`,
+            // as the x86 tree names them).
+            let mut names: Vec<String> = Vec::new();
+            for e in rd.filter_map(|e| e.ok()) {
+                let Ok(n) = e.file_name().into_string() else { continue };
+                if e.path().is_file() { names.push(n); }
+                else if e.path().is_dir() {
+                    println!("cargo:rerun-if-changed={}", e.path().display());
+                    if let Ok(sub) = std::fs::read_dir(e.path()) {
+                        for f in sub.filter_map(|f| f.ok()).filter(|f| f.path().is_file()) {
+                            if let Ok(m) = f.file_name().into_string() { names.push(format!("{n}/{m}")); }
+                        }
+                    }
+                }
+            }
             names.sort();
             for n in names {
                 println!("cargo:rerun-if-changed={}", dir.join(&n).display());

@@ -159,15 +159,26 @@ pub unsafe fn set_root(root: u64) {
         in(reg) root & ADDR_MASK, options(nostack));
 }
 
-/// Drop every translation this core has cached.
+/// Drop every translation this core has cached. The `dsb` first: the entry changed before
+/// the call is a store, and a walk after the invalidation must not find the old one in a
+/// store buffer the `tlbi` overtook (the Arm ARM's break-before-make sequence).
 #[inline(always)]
-pub unsafe fn flush_all() { core::arch::asm!("tlbi vmalle1", "dsb nsh", "isb", options(nostack)); }
+pub unsafe fn flush_all() { core::arch::asm!("dsb nshst", "tlbi vmalle1", "dsb nsh", "isb", options(nostack)); }
+
+/// Drop every translation on EVERY core (`IS`): what a flush too large to go page by page
+/// is on a machine where the hardware broadcasts (`paging::shootdown_impl`). Before it the
+/// large range and the "everything" flush were `flush_all` — this core only — and the
+/// others kept the old entries of a large `munmap` over frames already back in the list.
+#[inline(always)]
+pub unsafe fn flush_all_is() { core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack)); }
 
 /// Drop the translation of one page — on EVERY core: `IS` broadcasts to the
 /// inner-shareable domain, which is what makes `paging::shootdown_impl` a plain flush here.
+/// `dsb ishst` first, so that another core's walker cannot refill the old entry after the
+/// invalidation from a store not yet visible.
 #[inline(always)]
 pub unsafe fn flush_page(vaddr: u64) {
-    core::arch::asm!("tlbi vaae1is, {}", "dsb ish", "isb", in(reg) vaddr >> 12, options(nostack));
+    core::arch::asm!("dsb ishst", "tlbi vaae1is, {}", "dsb ish", "isb", in(reg) vaddr >> 12, options(nostack));
 }
 
 /// 1 GiB blocks exist at level 1 with the 4K granule on every AArch64 core.

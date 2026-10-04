@@ -3,6 +3,7 @@
 // (swtchto) between the BSP's threads.
 // The build: musl-gcc -O2 -static -no-pie -Wl,-Ttext-segment=0x10000000 -o fiberbench fiberbench.c fiber.c tsync.c
 #define _GNU_SOURCE
+#include "../tal_arch.h"
 #include "fiber.h"
 #include "tsync.h"
 #include <pthread.h>
@@ -12,7 +13,7 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
-static inline uint64_t rdtsc(void) { unsigned lo, hi; __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi)); return (uint64_t)hi << 32 | lo; }
+static inline uint64_t rdtsc(void) { return tal_ticks(); } /* the TSC / CNTVCT_EL0 (tal_arch.h) */
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 static double tsc_ns;
 static void calibrate(void) { uint64_t n0 = now_ns(), t0 = rdtsc(); for (volatile int i = 0; i < 30000000; i++) ; tsc_ns = (double)(now_ns() - n0) / (double)(rdtsc() - t0); }

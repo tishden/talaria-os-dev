@@ -239,7 +239,11 @@ core::arch::global_asm!(r#"
     b.eq 3f
     adrp x11, STACK_BUSY
     add x11, x11, :lo12:STACK_BUSY
-    strb wzr, [x11, x10]
+    add x11, x11, x10
+    /* a store-RELEASE: the handler's last spills went onto the stack being freed, and a
+       plain strb may become visible before them — the core that takes the stack would
+       then have its own pushes overwritten (x86 is TSO; here it is the ordering) */
+    stlrb wzr, [x11]
     mov x10, #-1
     str x10, [x9, #56]
 3:
@@ -729,6 +733,17 @@ extern "C" fn irq_entry(_kind: u64, f: &mut Frame) -> u64 {
         } else if id >= super::its::LPI_BASE {
             // A message-signalled interrupt: the ITS translated a device's event into this LPI.
             super::its::on_lpi(id, cpu);
+        } else if id as usize == super::idt::WAKE_VECTOR {
+            // The wake-up SGI, and `sync::membarrier`'s acknowledgement: the sender waits
+            // until every other core has passed a full barrier, so that the store the
+            // interrupted code made before is visible (x86's `wake_stub` gets that from the
+            // `iretq`; an exception on arm64 orders nothing by itself — the `dmb ish` here
+            // does, as Linux's IPI handlers for membarrier). Before this branch the SGI was
+            // only counted, and every membarrier with a second core online timed out at 1 ms.
+            core::sync::atomic::fence(Ordering::SeqCst);
+            crate::sync::WAKE_ACKS.fetch_add(1, Ordering::SeqCst);
+            SGIS[cpu.min(63)].fetch_add(1, Ordering::Relaxed);
+            super::idt::IPI_COUNT.fetch_add(1, Ordering::Relaxed);
         } else if let Some(h) = super::idt::handler_of(id) {
             h();
         } else if id < 16 {

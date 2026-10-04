@@ -42,6 +42,21 @@ static inline unsigned long tal_tp(void) {
     return v;
 }
 
+/* Talaria's `fastmap` (private call 1000, the same number on both machines): the address of
+ * the cell's shared rings (`fastpath.rs`). */
+static inline uint64_t tal_fastmap(void) {
+    uint64_t ret;
+#if defined(__x86_64__)
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(1000UL) : "rcx", "r11", "memory");
+#elif defined(__aarch64__)
+    register uint64_t x8 __asm__("x8") = 1000;
+    register uint64_t x0 __asm__("x0");
+    __asm__ volatile("svc #0" : "=r"(x0) : "r"(x8) : "memory");
+    ret = x0;
+#endif
+    return ret;
+}
+
 /* The interrupted pc in a signal handler's ucontext. */
 #if defined(__x86_64__)
 #define TAL_UC_PC(uc) ((unsigned long)((ucontext_t *)(uc))->uc_mcontext.gregs[REG_RIP])

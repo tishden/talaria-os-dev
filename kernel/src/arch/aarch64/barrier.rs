@@ -11,7 +11,7 @@
 #[inline(always)]
 pub fn dma_wmb() {
     // SAFETY: a barrier instruction; no memory, no stack, no flags.
-    unsafe { core::arch::asm!("dmb oshst", options(nomem, nostack, preserves_flags)); }
+    unsafe { core::arch::asm!("dmb oshst", options(nostack, preserves_flags)); }
 }
 
 /// What the device wrote BEFORE the completion just read is what the loads after this see
@@ -20,5 +20,5 @@ pub fn dma_wmb() {
 #[inline(always)]
 pub fn dma_rmb() {
     // SAFETY: a barrier instruction; no memory, no stack, no flags.
-    unsafe { core::arch::asm!("dmb oshld", options(nomem, nostack, preserves_flags)); }
+    unsafe { core::arch::asm!("dmb oshld", options(nostack, preserves_flags)); }
 }

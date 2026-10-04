@@ -135,6 +135,7 @@ pub struct Driver {
 /// THE TABLE OF DRIVERS. The order = the priority of binding.
 pub static DRIVERS: &[&Driver] = &[
     &crate::virtnet::DRIVER,
+    &crate::virtnet::PCI_DRIVER,
     &crate::ena::DRIVER,
     &crate::nicloop::DRIVER,
 ];

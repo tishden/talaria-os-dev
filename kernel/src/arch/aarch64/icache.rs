@@ -6,6 +6,21 @@
 //! x86 needs none of this, which is exactly why it is easy to forget: the failure is
 //! silent, intermittent and invisible under TCG (QEMU keeps the caches coherent).
 
+/// Clean and invalidate [addr, addr+len) to the point of coherency: what a core with its
+/// caches OFF will read (or write past the caches) must be in memory, not in a line of
+/// this core's cache — the secondary's boot data (`kmain::start_secondary`).
+pub fn clean_inval_poc(addr: u64, len: u64) {
+    if len == 0 { return; }
+    let ctr: u64;
+    unsafe { core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)); }
+    let dline = 4u64 << ((ctr >> 16) & 0xF);
+    let mut a = addr & !(dline - 1);
+    unsafe {
+        while a < addr + len { core::arch::asm!("dc civac, {}", in(reg) a, options(nostack)); a += dline; }
+        core::arch::asm!("dsb sy", options(nostack));
+    }
+}
+
 /// Make the bytes at `[addr, addr + len)` visible to instruction fetch on every core.
 /// `addr` is the address the KERNEL wrote through (the frame's identity address for a
 /// loader, the process's own for an `mprotect`): the clean is by address and reaches the

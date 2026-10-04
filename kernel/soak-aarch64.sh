@@ -56,7 +56,8 @@ futexlat|talaria.test=futexlat talaria.futexhang=3||FUTEXLAT: ALL OK
 pthreads|talaria.test=pthreads||PTHREADS: counter=200000 .we expected 200000. -> OK
 sigtest|talaria.test=sigtest|ext2|sigtest: ALL OK
 forkap|talaria.mode=proc|forkap|crashme: forkap ALL OK
-schedapi|talaria.test=schedapi|ext2|schedapi: ALL OK'
+schedapi|talaria.test=schedapi|ext2|schedapi: ALL OK
+piperace|talaria.test=piperace||piperace: ALL OK'
 BAD='\[trap\]|PANIC|is spoilt|\[futex\] IT HAS HUNG|AN UNEXPECTED SIGSEGV|an unknown number'
 : > "$OUT/summary.txt"
 echo "== the arm64 soak: $N boots of each mode, $SMP cores, $ACCEL, $PAR at a time ($(nproc) host cores) =="

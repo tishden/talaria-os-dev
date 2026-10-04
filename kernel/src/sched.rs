@@ -50,7 +50,7 @@
 //! hundreds of lines to say what the signature already says. The invariants above and the
 //! line at every site are what a reviewer needs; `sync.rs` — where the operations are few
 //! and their ORDER is the contract — has the lint on.
-use core::sync::atomic::{AtomicUsize, AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicUsize, AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 pub const NTASKS: usize = 192; // it was 64: ClickHouse's thread pool ran into the limit and the process fell by an abort
 pub const MAXCPU: usize = crate::percpu::MAXCPU;
@@ -112,15 +112,23 @@ static mut FPU_VALID: [bool; NTASKS] = [false; NTASKS];
 
 // The address spaces of finished processes: they are freed by the scheduler when there is
 // another task on the CPU (the tables must not be torn down under the active CR3 / on the dying one's kernel stack).
-static mut DEAD_AS: [u64; NTASKS] = [0; NTASKS];
+/// Address spaces waiting to be freed. Queued from the exit paths of any core with no lock:
+/// a slot is CLAIMED by a CAS (two exits on two cores used to write the same empty slot,
+/// and one space was never freed).
+static DEAD_AS: [AtomicU64; NTASKS] = [const { AtomicU64::new(0) }; NTASKS];
 /// talaria.stop=SECS: at that moment (mono ns) send a SIGTERM to the leader process (pid 1) — a clean stop of the workload.
 pub static STOP_AT_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static STOP_SENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// Put a process's AS into the queue for freeing (all its tasks are already DEAD).
 // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it touches,
 // and what crosses cores is atomic (see the module's note).
-pub fn queue_dead_space(cr3: u64) { if cr3 == 0 { return; } unsafe { for i in 0..NTASKS { if DEAD_AS[i] == cr3 { return; } } for i in 0..NTASKS {
-    if DEAD_AS[i] == 0 { DEAD_AS[i] = cr3; return; } } } }
+pub fn queue_dead_space(cr3: u64) {
+    if cr3 == 0 { return; }
+    if DEAD_AS.iter().any(|d| d.load(Ordering::Acquire) == cr3) { return; }
+    for d in DEAD_AS.iter() {
+        if d.compare_exchange(0, cr3, Ordering::AcqRel, Ordering::Relaxed).is_ok() { return; }
+    }
+}
 /// The CR3 loaded on an AP — as the core itself publishes it. The second value is
 /// the former CR3 while the switch has not certainly finished (the stub changes CR3
 /// AFTER the scheduler has chosen the target): it is removed at the next entry into
@@ -146,8 +154,7 @@ fn is_dead_as(cr3: u64) -> bool {
     if cr3 == 0 { return false; }
     // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
     // touches, and what crosses cores is atomic (see the module's note).
-    unsafe { for i in 0..NTASKS { let d = core::ptr::read_volatile(core::ptr::addr_of!(DEAD_AS[i])); if d != 0 && d & !0xFFF == cr3 { return true; } } }
-    false
+    DEAD_AS.iter().any(|d| { let d = d.load(Ordering::Acquire); d != 0 && d & !0xFFF == cr3 })
 }
 /// # Safety
 /// C1 + C3: the queue of address spaces to free is a task-indexed table; a space is
@@ -155,7 +162,7 @@ fn is_dead_as(cr3: u64) -> bool {
 /// and the APs have been moved to the kernel's CR3 by the caller.
 unsafe fn reap_dead_spaces(active_cr3: u64) {
     for i in 0..NTASKS {
-        let cr3 = DEAD_AS[i];
+        let cr3 = DEAD_AS[i].load(Ordering::Acquire);
         if cr3 == 0 || cr3 == active_cr3 { continue; }
         // Not a single AP must be executing on these tables — even while idling.
         let mut on_ap = false;
@@ -182,7 +189,7 @@ unsafe fn reap_dead_spaces(active_cr3: u64) {
         // on a core: the interrupts work under its CR3 until the first switch.
         for t in 0..n { if CR3[t] == cr3 && (!DEAD[t] || task_on_cpu(t) || dying(t)) { busy = true; break; } }
         if busy { continue; }
-        DEAD_AS[i] = 0;
+        if DEAD_AS[i].compare_exchange(cr3, 0, Ordering::AcqRel, Ordering::Relaxed).is_err() { continue; }
         for t in 0..n { if CR3[t] == cr3 { CR3[t] = 0; } } // the dead tasks no longer point at the torn-down tables
         crate::paging::free_address_space(cr3);
     }
@@ -541,13 +548,13 @@ pub fn set_exit_uregs(t: usize, r: [u64; 10]) {
     if t >= NTASKS { return; }
     // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
     // touches, and what crosses cores is atomic (see the module's note).
-    unsafe { EXITREG[t] = r; core::ptr::write_volatile(core::ptr::addr_of_mut!(EXITREG_OK[t]), true); }
+    unsafe { EXITREG[t] = r; fence(Ordering::Release); core::ptr::write_volatile(core::ptr::addr_of_mut!(EXITREG_OK[t]), true); }
 }
 pub fn exit_uregs(t: usize) -> Option<[u64; 10]> {
     if t >= NTASKS { return None; }
     // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row it
     // touches, and what crosses cores is atomic (see the module's note).
-    unsafe { if core::ptr::read_volatile(core::ptr::addr_of!(EXITREG_OK[t])) { Some(EXITREG[t]) } else { None } }
+    unsafe { if core::ptr::read_volatile(core::ptr::addr_of!(EXITREG_OK[t])) { fence(Ordering::Acquire); Some(EXITREG[t]) } else { None } }
 }
 
 /// The task is assembled — hand it to the scheduler (and ring its core's doorbell).
@@ -1935,6 +1942,10 @@ pub fn reap(want: i64) -> Option<(usize, i32)> {
                 && !dying(i)
                 && (proc_of(i) != i || crate::proc::exit_notified(i)) {
                 core::ptr::write_volatile(core::ptr::addr_of_mut!(REAPED[i]), true);
+                // The marks were read; the code is read after them, as it was written before
+                // them (a plain load could be satisfied first on arm64 and give the slot's
+                // previous tenant's status).
+                fence(Ordering::Acquire);
                 return Some((i, core::ptr::read_volatile(core::ptr::addr_of!(EXITCODE[i]))));
             }
         }
@@ -2006,6 +2017,18 @@ pub fn warn_no_tasks() {
         n, NTASKS, live, dead, TASKS_NONE.load(Ordering::Relaxed));
 }
 
+/// The claim of a task slot: `reuse_slot`'s check-then-take and the fallback's
+/// read-then-grow of `NREADY` are two steps each, and a fork on one core and a clone on
+/// another took the SAME slot between them (two tasks in one row). The lock covers the claim
+/// only; the row is filled after it, behind `PENDING`.
+static SLOT_LOCK: AtomicBool = AtomicBool::new(false);
+struct SlotGuard;
+impl Drop for SlotGuard { fn drop(&mut self) { SLOT_LOCK.store(false, Ordering::Release); } }
+fn slot_lock() -> SlotGuard {
+    while SLOT_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() { core::hint::spin_loop(); }
+    SlotGuard
+}
+
 /// # Safety
 /// C1: it hands out a task slot whose previous occupant has been reaped (its stack and
 /// address space already returned); the caller fills the row before anybody can choose
@@ -2016,6 +2039,10 @@ unsafe fn reuse_slot() -> Option<usize> {
     let my_proc = proc_of(cur); // by the PROC leader rather than by CR3: the CR3 of a freed AS may coincide with a new one
     for i in 0..n {
         if i == cur || !DEAD[i] || task_on_cpu(i) || dying(i) { continue; } // it still stands on its own stack (or is being run to the end)
+        // A core that has just switched away from it may still be on its stack: the BSP
+        // names the next task before its stub leaves the old stack (`STACK_BUSY` is
+        // cleared by the stub, with a release, once it is off).
+        if STACK_BUSY[i].load(Ordering::Acquire) { continue; }
         if REAPED[i] || proc_of(i) == my_proc {
             if KSTACK[i] != 0 && KSZ[i] != 0 { free_kstack(KSTACK[i] - KSZ[i] * 4096, KSZ[i]); }
             PENDING[i].store(true, Ordering::SeqCst); // the slot is occupied, but the task is not assembled yet
@@ -2122,11 +2149,13 @@ pub fn release_kstack(top: u64) {
 /// `kstack_top` must be the top of a kernel stack allocated for this slot, and `rip`/`rsp`
 /// must be user addresses mapped in the target address space.
 pub unsafe fn spawn_user_ctx(rip: u64, rsp: u64, rflags: u64, fsbase: u64, kstack_top: u64, gp: crate::arch::switch::Gp) -> usize {
+    let slot = slot_lock();
     let i = match reuse_slot() { Some(i) => i, None => {
         if NREADY.load(Ordering::SeqCst) >= NTASKS { return usize::MAX; } // the task limit -> an EAGAIN at the caller
         let i = NREADY.load(Ordering::SeqCst);
         PENDING[i].store(true, Ordering::SeqCst); // BEFORE NREADY grows: otherwise the slot is visible with an empty RSP
         NREADY.fetch_add(1, Ordering::SeqCst); i } };
+    drop(slot);
     let sp = crate::arch::switch::build_user_ctx(kstack_top, rip, rsp, crate::arch::switch::user_flags(rflags), &gp);
     RSP[i] = sp; KSTACK[i] = kstack_top; FSBASE[i] = fsbase; DEAD[i] = false; GONE[i] = false; EXITREG_OK[i] = false; ctx_saved(i);
     PROC[i] = PROC[current_id()]; // a thread: the same process
@@ -2243,6 +2272,7 @@ pub fn exit_current_code(code: i32) -> ! {
         let ct = CTID[cur];
         if ct != 0 { clear_ctid(ct, proc_of(cur)); CTID[cur] = 0; } // clear tid -> a join will wake up
         core::ptr::write_volatile(core::ptr::addr_of_mut!(EXITCODE[cur]), code);
+        fence(Ordering::Release); // the code before the marks (`reap` reads them in that order)
         DEAD[cur] = true;
         core::ptr::write_volatile(core::ptr::addr_of_mut!(GONE[cur]), true);
     }
@@ -2266,6 +2296,7 @@ pub fn exit_all(code: i32) {
             if proc_of(i) != my_proc { continue; } // another process — we do not touch it
             let ct = CTID[i]; if ct != 0 { clear_ctid(ct, proc_of(i)); CTID[i] = 0; }
             core::ptr::write_volatile(core::ptr::addr_of_mut!(EXITCODE[i]), code);
+            fence(Ordering::Release); // the code before the mark (`reap` reads them in that order)
             DEAD[i] = true;
             crate::affinity::release(i);
         }
@@ -2305,6 +2336,7 @@ pub fn kill_siblings(code: i32) -> usize {
             if i == cur || proc_of(i) != my_proc || DEAD[i] { continue; }
             let ct = CTID[i]; if ct != 0 { clear_ctid(ct, proc_of(i)); CTID[i] = 0; }
             core::ptr::write_volatile(core::ptr::addr_of_mut!(EXITCODE[i]), code);
+            fence(Ordering::Release); // the code before the mark (`reap` reads them in that order)
             DEAD[i] = true;
             crate::affinity::release(i);
             marked += 1;
@@ -2399,6 +2431,7 @@ pub fn kill_all(code: i32) {
         for i in 0..n {
             if DEAD[i] { continue; }
             core::ptr::write_volatile(core::ptr::addr_of_mut!(EXITCODE[i]), code);
+            fence(Ordering::Release); // the code before the mark (`reap` reads them in that order)
             DEAD[i] = true;
             crate::affinity::release(i);
         }
@@ -2447,7 +2480,7 @@ pub fn reset() {
             // reset is called by the supervisor after a longjmp, a cli, the timer is stopped)
             if KSTACK[i] != 0 && KSZ[i] != 0 { free_kstack(KSTACK[i] - KSZ[i] * 4096, KSZ[i]); }
             DEAD[i] = false; GONE[i] = false; EXITREG_OK[i] = false; REAPED[i] = false; CTID[i] = 0; CR3[i] = 0; HEAP_B[i] = 0; HEAP_BR[i] = 0; HEAP_TP[i] = 0;
-                EXITCODE[i] = 0; KSTACK[i] = 0; KSZ[i] = 0; FSBASE[i] = 0; PROC[i] = i as u8; PPID[i] = -1; FPU_VALID[i] = false; DEAD_AS[i] = 0;
+                EXITCODE[i] = 0; KSTACK[i] = 0; KSZ[i] = 0; FSBASE[i] = 0; PROC[i] = i as u8; PPID[i] = -1; FPU_VALID[i] = false; DEAD_AS[i].store(0, Ordering::Relaxed);
                 CPU_OF[i].store(0, Ordering::SeqCst); AP_TAKEN[i].store(false, Ordering::SeqCst); COMM[i] = [0; 16]; }
     }
     crate::percpu::set_sched_cr3(0);
@@ -2647,6 +2680,7 @@ pub unsafe fn spawn_process(entry: u64, ustack_top: u64, kstack_top: u64, cr3: u
 /// C1 + C3, as `spawn_process`; the registers are the forking thread's frame, and the
 /// child's rax is set to 0 by the caller.
 pub unsafe fn spawn_process_regs(entry: u64, ustack_top: u64, rflags: u64, kstack_top: u64, cr3: u64, gp: crate::arch::switch::Gp) -> usize {
+    let slot = slot_lock();
     let i = match reuse_slot() { Some(i) => i, None => {
         // THE TASK CEILING IS A REFUSAL RATHER THAN A WRITE PAST THE BOUNDARY.
         //
@@ -2661,6 +2695,7 @@ pub unsafe fn spawn_process_regs(entry: u64, ustack_top: u64, rflags: u64, kstac
         let i = NREADY.load(Ordering::SeqCst);
         PENDING[i].store(true, Ordering::SeqCst); // BEFORE NREADY grows (see PENDING)
         NREADY.fetch_add(1, Ordering::SeqCst); i } };
+    drop(slot);
     let sp = crate::arch::switch::build_user_ctx(kstack_top, entry, ustack_top, crate::arch::switch::user_flags(rflags), &gp);
     RSP[i] = sp; KSTACK[i] = kstack_top; FSBASE[i] = 0; DEAD[i] = false; GONE[i] = false; EXITREG_OK[i] = false; CR3[i] = cr3; ctx_saved(i);
     PROC[i] = i as u8; PPID[i] = -1;
@@ -2672,9 +2707,11 @@ pub unsafe fn spawn_process_regs(entry: u64, ustack_top: u64, rflags: u64, kstac
 /// # Safety
 /// C1 + C3, as `spawn_process_regs`, with the full saved context.
 pub unsafe fn spawn_process_ctx(entry: u64, ustack_top: u64, rflags: u64, kstack_top: u64, cr3: u64, rax: u64) -> usize {
+    let slot = slot_lock();
     let i = match reuse_slot() { Some(i) => i, None => {
         if NREADY.load(Ordering::SeqCst) >= NTASKS { warn_no_tasks(); return usize::MAX; } // see spawn_process_regs
         NREADY.fetch_add(1, Ordering::SeqCst) } };
+    drop(slot);
     let sp = crate::arch::switch::build_user_ctx(kstack_top, entry, ustack_top, crate::arch::switch::user_flags(rflags), &crate::arch::switch::gp_with_ret(rax));
     RSP[i] = sp; KSTACK[i] = kstack_top; FSBASE[i] = 0; DEAD[i] = false; GONE[i] = false; EXITREG_OK[i] = false; CR3[i] = cr3; ctx_saved(i);
     PROC[i] = i as u8; PPID[i] = -1; // a new process: the leader is itself; the parent is set by fork

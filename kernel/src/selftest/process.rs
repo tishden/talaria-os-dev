@@ -205,6 +205,15 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             println!("talaria: the shmrace test, {} bytes (shm_open/shmget from four threads at once)", SR.len());
             unsafe { crate::user::run_threaded(SR); }
         }
+        // A pipe and an eventfd with their ends on two cores at once: the bytes of the pipe
+        // checked one by one at the reader, the eventfd's increments summed exactly. Both used
+        // to be one counter that each end read, changed and wrote back with plain stores.
+        "piperace" => {
+            crate::smp::start_from_cmdline(cmdline);
+            static PR: &[u8] = user_elf!("piperace");
+            println!("talaria: the piperace test, {} bytes (a pipe and an eventfd across cores)", PR.len());
+            unsafe { crate::user::run_threaded(PR); }
+        }
         "threads" => {
             unsafe {
                 let kmain = crate::mem::alloc_contig(4).unwrap() + 4 * 4096;

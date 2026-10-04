@@ -18,7 +18,7 @@ const MAX_AP: usize = probes::MAX_AP;
 #[repr(C, align(16))]
 struct ApStack([u8; AP_STACK]);
 static mut AP_STACKS: [ApStack; MAX_AP] = [const { ApStack([0; AP_STACK]) }; MAX_AP];
-static AP_UP: [AtomicU64; MAX_AP] = [const { AtomicU64::new(0) }; MAX_AP];
+pub(super) static AP_UP: [AtomicU64; MAX_AP] = [const { AtomicU64::new(0) }; MAX_AP];
 
 /// Spin for `ns` of counter time (the bring-up has no scheduler to sleep in).
 fn spin_ns(ns: u64) {
@@ -278,9 +278,9 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
         crate::println!("    pcie ecam at {:#x} (+{:#x}); the 32-bit memory window {:#x} (+{:#x})", e.base, e.size,
             s.pci_mem32.map(|r| r.base).unwrap_or(0), s.pci_mem32.map(|r| r.size).unwrap_or(0));
         // What the MCFG says on x86: the config window (1 MiB per bus) — and, since no firmware
-        // ran before us, the window the BARs are assigned from. Bus 0 only: nobody numbered
-        // the buses behind the bridges either.
-        crate::acpi::set_ecam(e.base, 0);
+        // ran before us, the window the BARs are assigned from. As many buses as the window
+        // holds: nobody numbered the buses behind the bridges, `pci::number_bridge` does.
+        crate::acpi::set_ecam(e.base, ((e.size >> 20).clamp(1, 256) - 1) as u8);
         if let Some(w) = s.pci_mem32 { crate::pci::set_mmio_window(w.base); }
     }
     let si = start_info_from(tree, &s, bb);
@@ -404,6 +404,14 @@ pub static VIRTIO_INTIDS: [core::sync::atomic::AtomicU64; dtb::MAX_VIRTIO] = [co
 pub fn start_secondary(i: usize, mpidr: u64) -> i64 {
     if i >= MAX_AP { return psci::INVALID_PARAMS; }
     unsafe extern "C" { fn ap_start(); }
+    // The core starts with its MMU and data cache off: its reads of the kernel's root
+    // (`mmu::root_for_new_core`) and its first stack frames go to memory past every cache.
+    // A root still dirty in THIS core's cache would read as the stale value, and a line of
+    // the stack cached here would later shadow what the secondary wrote past it. Under KVM
+    // on a Graviton (S2FWB forces the guest cacheable) neither shows; on bare metal both
+    // can — Linux cleans its `secondary_data` the same way.
+    super::icache::clean_inval_poc(crate::paging::kernel_cr3_word(), 8);
+    super::icache::clean_inval_poc(ap_stack_top(i) - 16384, 16384);
     psci::cpu_on(mpidr, ap_start as *const () as usize as u64, ap_stack_top(i))
 }
 /// The top of the boot stack of the secondary in slot `i` — also the stack its pickup loop
@@ -453,6 +461,12 @@ extern "C" fn rust_ap_main(ctx: u64) -> ! {
                 f(me);
             }
             probes::ap_idle_loop(me)
+        }
+        // The cell's core (the datapath, `talaria.mode=cell|fast|fastflood`): as on x86 it
+        // stays out of ONLINE — nobody schedules it or kicks it — and polls the card.
+        _ if crate::runmode::CELL_AP.swap(false, Ordering::SeqCst) => {
+            percpu::init_tpidr(me);
+            crate::runmode::run_datapath()
         }
         _ => {
             percpu::init(me);

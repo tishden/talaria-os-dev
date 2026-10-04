@@ -62,6 +62,8 @@ pub mod acpiboot;
 #[path = "../../kernel/src/arch/aarch64/abi.rs"]
 pub mod abi;
 
+#[path = "../../kernel/src/memspan.rs"]
+pub mod memspan;
 #[path = "../../kernel/src/placement.rs"]
 pub mod placement;
 #[path = "../../kernel/src/routes.rs"]

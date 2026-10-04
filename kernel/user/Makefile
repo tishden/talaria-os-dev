@@ -14,7 +14,7 @@ LDF  := -static -no-pie -Wl,-Ttext-segment=0x10000000
 # C (musl-gcc), the binary's name = the name of the .c
 CBINS := connect_test efault epsrv execmt fastapp fastflood forksrv fputest fsbig fsinfo fsread fsyncconc futexlat \
          forktls idleshoot mapshared mbench memhog memrace memtest mtsrv netshoot pthreads schedapi schedbal schedpin schedspread \
-         rqwait shmrace sigtest smp2 smp4 srv stealbal sysbench tcp_bench tickcmd udp_ping userver wvsock
+         piperace rqwait shmrace sigtest smp2 smp4 srv stealbal sysbench tcp_bench tickcmd udp_ping userver wvsock
 # C with a source name that does not match
 mhello_SRC  := mh.c
 mprintf_SRC := mp.c
@@ -86,12 +86,11 @@ MUSLA64 ?= docker run --rm -v $(CURDIR):/w -w /w talaria-musl-aarch64
 # 0x4000_0000, and 0x1000_0000 — x86's choice — is a PCIe window there, which reads as zeros
 # (the first arm64 `hello` faulted on `udf #0` at its own entry). 0x5000_0000 is 256 MiB in.
 LDFA64 := -static -no-pie -Wl,-Ttext-segment=0x50000000
-# Every C source builds for arm64 except the three that are x86 machine code by design
-# (fastapp/fastflood poll the cell's rings with `pause`/`rdtsc` and a hand-laid layout,
-# sysbench times with `rdtsc`); `launcher`, the `.s` files (but hello) and libtsync's fibers
-# are not ported yet.
-A64CBINS := $(filter-out fastapp fastflood sysbench,$(CBINS))
-A64 := $(addprefix aarch64/,$(A64CBINS) mhello mprintf hello.elf crashme profdeep)
+# Every C source builds for arm64 except sysbench (it times with `rdtsc` in its own
+# assembler); fastapp/fastflood take the machine's call and spin hint from tal_arch.h.
+# The `.s` files (but hello) and libtsync's fibers are not ported yet.
+A64CBINS := $(filter-out sysbench,$(CBINS))
+A64 := $(addprefix aarch64/,$(A64CBINS) mhello mprintf hello.elf crashme profdeep launcher)
 # The C++ set needs a g++ whose libstdc++ was built against musl for aarch64: the
 # `aarch64-linux-musl-cross` toolchain (musl.cc; unpack it and put its bin/ on the PATH, or
 # name the compiler: `make aarch64 CXXA64=/path/aarch64-linux-musl-g++`). Without it the
@@ -108,6 +107,9 @@ aarch64/crashme: crashme.c
 aarch64/profdeep: profdeep.c
 	@mkdir -p aarch64
 	$(MUSLA64) musl-gcc -O2 -fno-omit-frame-pointer $(LDFA64) -o $@ $<
+aarch64/launcher: launcher.c
+	@mkdir -p aarch64
+	$(MUSLA64) musl-gcc -O2 -static -no-pie -nostartfiles $(LDFA64) -o $@ $<
 aarch64/%: %.c tal_arch.h
 	@mkdir -p aarch64
 	$(MUSLA64) sh -c 'musl-gcc -O2 $(LDFA64) -o $@ $< && aarch64-linux-gnu-strip $@'
