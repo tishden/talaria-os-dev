@@ -101,7 +101,8 @@ syscall_entry:
     fxsave (%rsp)       /* the user's SSE/x87 state: the kernel is built with SSE and clobbers xmm */
     mov %rsp, %r12
     call rust_syscall
-    fxrstor (%r12)      /* restore (or the state substituted by sigreturn/the signal delivery) */
+    cli                 /* a parked syscall returns with IF=1: an interrupt after `pop %rsp` would land on the user stack */
+    fxrstor (%r12)     /* restore (or the state substituted by sigreturn/the signal delivery) */
     mov %rbx, %rsp      /* restore the frame; rax = the return value */
     add $8, %rsp        /* discard the nr */
     pop %rdi
