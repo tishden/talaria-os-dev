@@ -609,6 +609,18 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     into another device and says nothing. When a table offers a structured locator
     (a PCI function), that is the authority, and the address beside it is checked
     against it — or ignored.
+29. **"A limit that was the machine's shape, not the kernel's."** The frame allocator
+    stopped at 4 GB (the identity window), and on an x86 `c6i.xlarge` that cost five
+    of eight gigabytes — a "known" line for months. A `c7g.large` puts three quarters
+    of its RAM at 16-18.9 GiB: above the window AND above the COW refcount table's
+    16 GB, so a workload got 850 MB of 3995. The fix (session 58, `mem::high_init`)
+    hands the RAM above 4 GB to the workload's own pages — the consumers that touch a
+    frame only at its identity address and never guard it — and grows the refcount
+    table to the top of RAM. Doing it named two holes the old limit had hidden: a
+    `MAP_FIXED` over a gigabyte mapped by a 1 GB identity leaf (the NUMA areas, the
+    MMIO windows) turned the kernel's next write to a frame there into a write into the
+    process's page, and a NUMA node's area could cross the gigabyte of the process
+    heap (`PROC_HEAP_BASE`, 192 GB) on a 256 GB machine. Both are refused now.
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
