@@ -308,6 +308,9 @@ pub fn boot_shared(start_info: u64, mut cmdline: &'static str, tsc_hz: u64, earl
     // The per-node memory areas are built HERE: the RAM map arrived from the loader
     // before ACPI, while the nodes are known only after SRAT — before this point there is nothing
     // to split the memory by nodes on. Without SRAT it does nothing.
+    // talaria.lowmem=<MB>: the low allocator cut down to MB — a gate reproduces a `c7g.large`
+    // (850 MB below 4 GB, 2.9 GB above) on a QEMU whose RAM is mostly low.
+    if let Some(mb) = cmdline::num(cmdline, "talaria.lowmem") { mem::cap_low_mb(mb); }
     mem::numa_init();
     trace::mark("acpi");
     netsys::configure_from_cmdline(cmdline); // talaria.ip=/gw=/dns= (tap 10.0.0.x by default, slirp 10.0.2.x)

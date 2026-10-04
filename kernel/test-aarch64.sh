@@ -121,6 +121,10 @@ echo "== the shared kernel on arm64: boot_shared, the scheduler, the tick (docs/
 boot 40 "talaria.test=slice"
 assert 'slice-test: ALL OK'                                              'slice: the shared timer self-test through the whole boot'
 assertnot '\[trap\]|PANIC|BOOT REFUSED'                                  'slice: no trap, no panic, no refusal'
+# The guard of a forked task's kernel stack goes into the CHILD's space (and the kernel's
+# reference one): it went into the parent's, and the child ran on the stack unguarded.
+boot 30 "talaria.test=kstackguard"
+assert 'kstackguard: ALL OK'                                              'kstackguard: a stack for another space is guarded there and in the kernel space, inherited by later spaces, released with no hole'
 boot 30 "talaria.test=ipi"
 assert 'the AP is up — the datapath on core 1, the BSP = the control plane' 'ipi: a secondary came up through PSCI under the scheduler'
 assert 'sched: the first entry'                                           'ipi: the tick entered the shared scheduler'
@@ -273,6 +277,12 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     assert 'mem: the COW refcount table: [0-9]+ KB at 0x[0-9a-f]+, it covers up to 0x480000000' 'highmem: RAM past 16 GB grows the refcount table to the top'
     assert 'highmem: ALL OK'                                                  'highmem: the same on 17 GB (the area 14 GB, the grown table)'
     assertnot "$BAD|\[fault\]"                                              'highmem: no trap'
+    # A c7g.large's shape: 850 MB below 4 GB, the rest above. forktls's 1.5 GB went into
+    # 2 MB pages from the LOW memory and the next page table found no frame — a panic one
+    # syscall in, on the real machine; reproduced here by cutting the low allocator.
+    run 400 "talaria.test=forktls talaria.lowmem=850" ext2 5120
+    assert 'forktls: ALL OK'                                                  'forktls on a c7g.large shape (850 MB low): the huge pages come from the high area, the kernel keeps its tables'
+    assertnot "$BAD|\[fault\]|there is no frame"                          'forktls on a c7g.large shape: no panic for a page table'
     run 150 "talaria.mode=proc" forkap
     assert 'crashme: forkap ALL OK'                                           'forkap: 40 children on the secondaries are born, work and are reaped by waitpid (an ignored SIGCHLD does not interrupt the wait)'
     assert "it has left the tables of the finished process onto the kernel.s CR3" 'forkap: an idling secondary leaves the tables of a dead process'

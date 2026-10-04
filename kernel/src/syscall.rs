@@ -2237,14 +2237,14 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             if !THREADED.load(Ordering::SeqCst) { return (-38i64) as u64; } // only under the scheduler (ENOSYS)
             let child_cr3 = crate::paging::fork_cow_space(crate::paging::current_cr3()); // a COW clone
             let parent_user_rsp = raw.usp; // the user's rsp at the entry
-            let kstack = crate::sched::alloc_kstack().unwrap();
+            let kstack = crate::sched::alloc_kstack_in(child_cr3).unwrap(); // the guard in the CHILD's space
             // SAFETY: S3 — `sched::spawn_process_regs`'s own contract; here it holds: the current
             // task, on its kernel stack, with its CR3 active.
             let idx = unsafe { crate::sched::spawn_process_regs(f.pc, parent_user_rsp, f.flags, kstack, child_cr3, fork_regs(f)) };
             // The task table's ceiling is AN HONEST REFUSAL (as with a clone thread below).
             // Previously fork went past the check and wrote past the boundary of the kernel's arrays.
             if idx == usize::MAX {
-                crate::mem::free_contig(kstack - crate::sched::KSTACK_PAGES * 4096, crate::sched::KSTACK_PAGES);
+                crate::sched::release_kstack(kstack);
                 crate::sched::queue_dead_space(child_cr3); // the COW clone will be cleaned up by the housekeeping
                 return (-11i64) as u64; // EAGAIN
             }
@@ -2272,12 +2272,12 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 if !THREADED.load(Ordering::SeqCst) { return (-38i64) as u64; }
                 let child_cr3 = crate::paging::fork_cow_space(crate::paging::current_cr3());
                 let cstack = if f.a2 != 0 { f.a2 } else { raw.usp }; // child_stack or the parent's rsp
-                let kstack = crate::sched::alloc_kstack().unwrap();
+                let kstack = crate::sched::alloc_kstack_in(child_cr3).unwrap(); // the guard in the CHILD's space
                 // SAFETY: S3 — `sched::spawn_process_regs`'s own contract; here it holds: the
                 // current task, on its kernel stack, with its CR3 active.
                 let idx = unsafe { crate::sched::spawn_process_regs(f.pc, cstack, f.flags, kstack, child_cr3, fork_regs(f)) };
                 if idx == usize::MAX {   // the task table's ceiling — an EAGAIN, see fork(57)
-                    crate::mem::free_contig(kstack - crate::sched::KSTACK_PAGES * 4096, crate::sched::KSTACK_PAGES);
+                    crate::sched::release_kstack(kstack);
                     crate::sched::queue_dead_space(child_cr3);
                     return (-11i64) as u64;
                 }
@@ -2316,7 +2316,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             // piece in the middle of a live stack, while the stack itself (16 pages) leaked.
             if idx == usize::MAX {
                 crate::sched::warn_no_tasks();
-                crate::mem::free_contig(kstack - crate::sched::KSTACK_PAGES * 4096, crate::sched::KSTACK_PAGES);
+                crate::sched::release_kstack(kstack);
                 return (-11i64) as u64; // EAGAIN: the task limit
             }
             crate::proc::thread_inherit_sigmask(crate::sched::current_id(), idx); // the new thread inherits the creator's signal mask (Linux)

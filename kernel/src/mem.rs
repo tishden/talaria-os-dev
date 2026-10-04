@@ -376,10 +376,34 @@ pub fn alloc_contig_node(n: u64, node: u8) -> Option<u64> {
     }
 }
 
+/// Cut the low allocator down to `mb` MB from its start (`talaria.lowmem`, a gate's knob):
+/// what a machine whose RAM is mostly above 4 GB leaves the kernel. Called before
+/// `numa_init`; only the bump's end moves, nothing handed out is touched.
+pub fn cap_low_mb(mb: u64) {
+    let end = ALLOC_BASE.load(Ordering::Relaxed) + mb * 1048576;
+    if end < END.load(Ordering::Relaxed) && end > NEXT.load(Ordering::Relaxed) {
+        END.store(end, Ordering::Relaxed);
+        crate::println!("mem: the low allocator is cut to {} MB (talaria.lowmem) — up to {:#x}", mb, end);
+    }
+}
+
 /// The main node's high area as it was built (the gate `highmem`; (0, 0) — there is none).
 pub fn high_area() -> (u64, u64) { (HIGH_BASE.load(Ordering::Relaxed), HIGH_END.load(Ordering::Relaxed)) }
 
-/// The main node's frames for the workload: the high area, then the low allocator.
+/// What the workload may NOT take of the low memory when it has a high area to spend: the
+/// kernel's own structures (the page tables of its processes above all) live there and have
+/// nowhere else to go. Found on a `c7g.large`: `forktls`'s 1.5 GB went into 2 MB pages from
+/// the low memory (~600 MB after the FS cache), and the next page table found no frame —
+/// a kernel panic one syscall into the workload.
+const LOW_RESERVE_FRAMES: u64 = 64 * 256; // 64 MB
+
+/// May the workload's allocation of `n` frames fall back to the low allocator.
+fn low_for_workload(n: u64) -> bool {
+    HIGH_BASE.load(Ordering::Relaxed) == 0 || free_low_frames() >= n + LOW_RESERVE_FRAMES
+}
+
+/// The main node's frames for the workload: the high area, then the low allocator (above
+/// its reserve, when a high area exists).
 fn alloc_main(n: u64) -> Option<u64> {
     if n == 0 { return None; }
     let (hb, he) = (HIGH_BASE.load(Ordering::Relaxed), HIGH_END.load(Ordering::Relaxed));
@@ -394,7 +418,32 @@ fn alloc_main(n: u64) -> Option<u64> {
             return Some(base);
         }
     }
+    if !low_for_workload(n) { return None; }
     alloc_contig(n)
+}
+
+/// The workload's ALIGNED frames (a 2 MB page): the high area, then the low allocator above
+/// its reserve. `paging::lazy_fault` takes its huge pages here — `alloc_contig_aligned`
+/// alone took them from the low memory only.
+pub fn alloc_workload_aligned(n: u64, align: u64) -> Option<u64> {
+    if n == 0 { return None; }
+    let (hb, he) = (HIGH_BASE.load(Ordering::Relaxed), HIGH_END.load(Ordering::Relaxed));
+    if hb != 0 {
+        if let Some(a) = fl_node_take_aligned(n, align, hb, he) { crate::metrics::add_frames(n); return Some(a); }
+        loop {
+            let base = HIGH_NEXT.load(Ordering::Relaxed);
+            let a = (base + align - 1) & !(align - 1);
+            let end = a + n * FRAME;
+            if end > he { break; }
+            if HIGH_NEXT.compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
+            // The alignment's gap goes into the area's free list rather than being lost.
+            if a > base { fl_node_put(base, (a - base) / FRAME); }
+            crate::metrics::add_frames(n);
+            return Some(a);
+        }
+    }
+    if !low_for_workload(n) { return None; }
+    alloc_contig_aligned(n, align)
 }
 
 // ── the free list of released contiguous blocks (real reclaim, not only a bump) ──
@@ -453,6 +502,30 @@ fn fl_node_take(n: u64, lo: u64, hi: u64) -> Option<u64> {
             if FLN_PAGES[i] == 0 { FLN_N -= 1; FLN_ADDR[i] = FLN_ADDR[FLN_N]; FLN_PAGES[i] = FLN_PAGES[FLN_N]; }
             fl_unlock();
             return Some(addr);
+        }
+    }
+    fl_unlock();
+    None
+}
+
+/// As `fl_node_take`, an aligned piece of n frames inside a block within [lo, hi); the
+/// block's head before the piece stays a block of its own, the tail goes back.
+fn fl_node_take_aligned(n: u64, align: u64, lo: u64, hi: u64) -> Option<u64> {
+    if lo == 0 || n == 0 { return None; }
+    fl_lock();
+    unsafe {
+        for i in 0..FLN_N {
+            let base = FLN_ADDR[i];
+            let a = (base + align - 1) & !(align - 1);
+            let pad = (a - base) / FRAME;
+            if FLN_PAGES[i] < pad + n || base < lo || a + n * FRAME > hi { continue; }
+            let tail_pages = FLN_PAGES[i] - pad - n;
+            if pad > 0 { FLN_PAGES[i] = pad; } else {
+                FLN_N -= 1; FLN_ADDR[i] = FLN_ADDR[FLN_N]; FLN_PAGES[i] = FLN_PAGES[FLN_N];
+            }
+            if tail_pages > 0 && FLN_N < FLN_MAX { FLN_ADDR[FLN_N] = a + n * FRAME; FLN_PAGES[FLN_N] = tail_pages; FLN_N += 1; }
+            fl_unlock();
+            return Some(a);
         }
     }
     fl_unlock();

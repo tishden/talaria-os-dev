@@ -130,6 +130,38 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             else { println!("sharedpd: FAILED"); }
             crate::suite::park()
         }
+        "kstackguard" => {
+            // THE GUARD OF A FORKED TASK'S KERNEL STACK. `fork` allocated the child's stack while
+            // the PARENT's space was active, and the guard went into the parent's private
+            // directory of the kernel's gigabyte — the child, the only one running on the
+            // stack, had none. `alloc_kstack_in` lays it in the child's space and the kernel's
+            // reference one (which later spaces copy); a refused fork gives the stack back with
+            // the guard taken off (`release_kstack`).
+            println!("talaria: kstackguard — the guard of a kernel stack allocated for another space");
+            fn check(ok: &mut bool, what: &str, good: bool) {
+                println!("kstackguard: {}: {}", what, if good { "OK" } else { "FAILED" });
+                *ok &= good;
+            }
+            let mut ok = true;
+            let k = crate::paging::kernel_cr3();
+            let parent = crate::paging::new_process_space();
+            let child = crate::paging::new_process_space();
+            let top = crate::sched::alloc_kstack_in(child).expect("kstackguard: stack");
+            let base = top - crate::sched::KSTACK_PAGES * 4096;
+            check(&mut ok, "the guard is in the child's space", crate::paging::is_guard_in(child, base));
+            check(&mut ok, "the guard is in the kernel's reference space", crate::paging::is_guard_in(k, base));
+            check(&mut ok, "only the bottom page is a guard", !crate::paging::is_guard_in(child, base + 4096));
+            let later = crate::paging::new_process_space();
+            check(&mut ok, "a space built later inherits it", crate::paging::is_guard_in(later, base));
+            check(&mut ok, "the space that was not named stays untouched", !crate::paging::is_guard_in(parent, base));
+            crate::paging::free_address_space(parent);
+            crate::paging::free_address_space(child);
+            crate::paging::free_address_space(later);
+            crate::sched::release_kstack(top);
+            check(&mut ok, "a released stack leaves no hole in the kernel's space", !crate::paging::is_guard_in(k, base));
+            println!("kstackguard: {}", if ok { "ALL OK" } else { "FAILED" });
+            crate::suite::park()
+        }
         "highmem" => {
             // THE MAIN NODE'S MEMORY ABOVE 4 GB (`mem::high_init`). The workload's frames come
             // from there first; the gate checks what that rests on: the frames are in the area
@@ -158,9 +190,17 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 }
             }
             check(&mut ok, "a pattern written at the identity address reads back", same);
+            // A 2 MB page for the workload comes from the area too (it came from the low
+            // memory only, and a c7g.large's 1.5 GB workload ate the kernel's page tables).
+            let h = crate::mem::alloc_workload_aligned(512, 0x20_0000).unwrap_or(0);
+            check(&mut ok, "a workload's 2 MB page comes from the high area, aligned",
+                h >= hb && h + 0x20_0000 <= he && h & 0x1F_FFFF == 0);
+            if h != 0 { crate::mem::free_contig(h, 512); }
             crate::mem::free_contig(a, 16);
+            let fl0 = crate::mem::free_list_pages();
             let b = crate::mem::alloc_contig_node(16, 255).unwrap_or(0);
-            check(&mut ok, "a returned block is handed out again from the area's free list", b == a);
+            check(&mut ok, "a returned block is handed out again from the area's free list",
+                b >= hb && b + 16 * 4096 <= he && crate::mem::free_list_pages() + 16 == fl0);
             check(&mut ok, "the low allocator was not touched", crate::mem::free_low_frames() == low0);
             let top = he - 4096;
             let out0 = crate::mem::RC_OUTSIDE.load(core::sync::atomic::Ordering::Relaxed);
