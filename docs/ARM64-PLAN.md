@@ -1469,9 +1469,34 @@ refusal) on x86 `microvm` 4 GB and on arm64 `virt` 4 and 17 GB (the second grows
 table); `forktls` on both runs its 1.5 GB over the high area; the NUMA block checks that
 node 0's area is not node 1's memory. arm64 **237/0** under TCG; x86 `test.sh` **489/0** + host 22/0; clippy clean on both.
 
+**On the live `c7g.large`** the area is `0x4_0000_0000..0x4_ba00_0000` (2976 MB), the
+refcount table grew to cover it, and `highmem` passed — and `forktls` PANICKED one syscall
+in: `split_2m_lazy: there is no frame`. Its 1.5 GB mapping takes 2 MB pages (on by default
+from 32 MB), and those came from the LOW allocator only — ~600 MB after the FS cache — so
+the workload ate the low memory and the next page table had none. Under QEMU the low
+memory was 3 GB and nothing showed. Now the workload's huge pages come from the high area
+first (`mem::alloc_workload_aligned`), and no workload allocation falls back to the low
+memory below a 64 MB reserve when a high area exists. The machine's shape is a gate now:
+`talaria.lowmem=850` cuts the low allocator, and `forktls` on 5 GB with it reproduced the
+EC2 panic byte for byte on the old code and passes on the new — on both architectures.
+Back on the `c7g.large` with the fix: `forktls` 100 of 100, ALL OK; `sigtest` ALL OK.
+
+**The guard of a forked task's kernel stack** (a phase-4 tail, §10.6 item 4). `fork`
+allocated the child's stack with the PARENT's space active, and the guard went into the
+parent's private directory of the kernel's gigabyte; the child, the only one running on
+the stack, had none. `sched::alloc_kstack_in` lays it in the child's space and in the
+kernel's reference one (which later spaces copy); a refused fork gives the stack back with
+the guard taken off everywhere (`release_kstack` — the bare `free_contig` left the hole of
+ENGINEERING-NOTES item 25). Gate `kstackguard` on both machines; `forkap` 24 of 24 with
+eight and sixteen copies in parallel under TCG.
+
+The gates after both: arm64 **240/0** under TCG; x86 `test.sh` 490/2 + host 22/0, the
+two FAILs the knob registry's order (`talaria.lowmem` out of alphabetical place — the
+`cmdline` self-test caught it), fixed and re-run ALL OK on both machines; clippy clean.
+
 Still open: a single high area (the largest piece — a machine with several holes above
-4 GiB uses one of them); huge pages (`alloc_contig_aligned`) still come from the low
-memory; the real fix of the identity window is a kernel direct map in the higher half.
+4 GiB uses one of them); the real fix of the identity window is a kernel direct map in
+the higher half.
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
