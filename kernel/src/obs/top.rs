@@ -184,7 +184,7 @@ fn header(win: u64) {
 /// The hardware counters' line: IPC, cache and branch-predictor misses OVER THE INTERVAL.
 pub fn pmu_line() {
     if !crate::pmu::available() {
-        crate::println!("PMU    is unavailable (arch-perfmon is off in the hypervisor) — IPC and misses are not counted");
+        crate::println!("PMU    is unavailable (no vPMU from the hypervisor) — IPC and misses are not counted");
         return;
     }
     // Our own core can be taken right here and for free: `rdpmc` reads the counters

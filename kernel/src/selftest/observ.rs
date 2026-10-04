@@ -139,6 +139,10 @@ fn commands() {
 /// The live check: the numbers after a multi-threaded workload has run.
 /// Called from `metrics::dump()` — that is, at the moment "all the tasks have finished".
 pub fn live_report() {
+    // `profdeep` is ONE computing thread: no switches, no frames past its start — the
+    // multi-threaded checks below printed three FAILs under its own ALL OK (both machines).
+    // Its verdict is the stack's, and it is its own.
+    if DEEP.load(core::sync::atomic::Ordering::Relaxed) { deep_report(); return; }
     let mut ok = true;
     let n = crate::sched::task_count().min(crate::sched::max_tasks());
     let (mut run_any, mut sys_any, mut sw_any, mut frames_any) = (false, false, false, false);
@@ -190,7 +194,6 @@ pub fn live_report() {
     // spaces have already been torn down, the walk would show zeroes and would only confuse.
     crate::obs::top::cmd_ps("-t -m");
     println!("obs-live: {}", if ok { "ALL OK" } else { "THERE ARE FAILURES" });
-    if DEEP.load(core::sync::atomic::Ordering::Relaxed) { deep_report(); }
 }
 
 /// Whether to print the live report at the end of the workload (`talaria.test=obslive`).

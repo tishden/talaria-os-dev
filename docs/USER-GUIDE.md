@@ -165,7 +165,7 @@ kernel/soak.sh 1800   # 30 min of a DBMS under load (the mariadb artefacts are n
 | `supervise` | the supervision of a single-threaded workload by a manifest (the historical path; for a new one there is `cell`) |
 | `console` | the operator's console (the files, the editor, the network) — §9.1; it brings up ALL the machine's cards |
 | `filed` | the same plus the service of uploading/downloading files over TCP (§9.3) |
-| `gdb` | the gdb stub (the GDB RSP over COM2; `-M pc` is needed) |
+| `gdb` | the gdb stub (the GDB RSP over COM2, `-M pc` is needed; on arm64 over the console's line) |
 | `procdemo` | the full cycle of a process: `fork`+`execve`+`wait4` (a real busybox) |
 
 ---
@@ -534,7 +534,7 @@ per-packet hardware timestamps the ENA does not give out at all — see `docs/RO
   The flag switches the polling off completely: for a machine where every microsecond matters
   and the console is not needed. The values are listed separated by commas
   (`talaria.console=vga,nopoll`).
-- `talaria.gdb=break` — enter the gdb stub (COM2, `-M pc` is needed) before the workload's first
+- `talaria.gdb=break` — enter the gdb stub (x86: COM2, `-M pc` is needed; arm64: the console's line) before the workload's first
   instruction: the breakpoints are set before anything has been executed.
 - `talaria.core=<path>[,full]` — write **ELF core dumps** (`ET_CORE`, read by
   an ordinary `gdb`): at a fatal signal to the workload it is a dump of the process, at
@@ -1292,6 +1292,15 @@ a breakdown by thread and by core; `folded` gives the input for a flame graph.
   all-stop: while the stub talks to gdb, the other cores are parked, the debug
   registers are armed on all the cores, and a step releases only the stepping core. Stopping in the debugger stops
   **the whole kernel**, including the datapath. An example of a session is in `docs/HANDS-ON-GUIDE.md` §8.
+- **The gdb stub on arm64** shares **the console's line** (a `virt` machine has one PL011, a
+  Graviton guest one serial port): `-serial tcp::1234,server=on,wait=on` and `target remote :1234`
+  to the console's port, as Linux's kgdboc. While the machine runs gdb skips the console's text;
+  while it is stopped the other cores are parked and the line carries packets alone; gdb's ^C
+  reaches the console's poll and stops the machine. The registers are gdb's `aarch64-core` (x0..x30,
+  sp, pc, cpsr; the FP/SIMD set reads as unavailable); `hbreak` and watchpoints use the breakpoint
+  and watchpoint registers and catch the WORKLOAD (the kernel runs with debug exceptions masked);
+  in the kernel use `break` (a `brk` written into the text) and `stepi`. A resume from an `hbreak`
+  or a watchpoint steps over the instruction first (arm64 has no resume flag) — invisible to gdb.
 - **The crash dump** (`talaria.test=fault`): at an exception there is a full dump of the registers,
   of the stack and of the flight recorder.
 - **The flight recorder** (`log`): a ring of the last events (boot/paging/syscall-init/

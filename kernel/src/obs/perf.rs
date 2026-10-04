@@ -38,8 +38,8 @@ const NC: usize = crate::percpu::MAXCPU;
 /// Per-core counter table from the latest snapshots.
 fn counters() {
     if !crate::pmu::available() {
-        crate::println!("perf: PMU unavailable (arch-perfmon disabled). Under QEMU this needs `-cpu host` and");
-        crate::println!("perf: a vPMU enabled in the hypervisor; on EC2 metal the counters are always there.");
+        crate::println!("perf: PMU unavailable (x86 arch-perfmon / arm64 PMUv3 not offered). Under QEMU this needs");
+        crate::println!("perf: `-cpu host` and a vPMU in the hypervisor (TCG's `-cpu max` has PMUv3); on EC2 metal they are there.");
         return;
     }
     crate::pmu::refresh_all(); // including cores WITHOUT a tick — that is where the workload runs

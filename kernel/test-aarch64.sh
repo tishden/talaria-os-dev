@@ -61,6 +61,32 @@ bootx() {
   fi
 }
 
+# bootrsp SECS APPEND DISK PORT CLIENT...: a boot whose console is a TCP line — on arm64 the
+# gdb stub shares the console's UART (`arch/aarch64/gdb.rs`) — and CLIENT (any command; the
+# word PORT in it is replaced by the port) talking to it; the client's output into $LOG.
+# DISK (a path under the repository, or "") goes on virtio-blk.
+bootrsp() {
+  local secs=$1 app=$2 disk=$3 port=$4 drv="" a; shift 4
+  [ -n "$disk" ] && drv="-drive id=d0,file=/w/$disk,format=raw,if=none -device virtio-blk-device,drive=d0"
+  QEMU="exec timeout $secs qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp 4 -m 1024 -display none \
+    -serial tcp:HOST:$port,server=on,wait=on -kernel /w/$IMG -append \"console=ttyAMA0 $app talaria.smp=4\" $drv"
+  if command -v qemu-system-aarch64 >/dev/null 2>&1; then
+    sh -c "$(echo "$QEMU" | sed -e "s|/w/|$REPO/|g" -e 's/HOST/127.0.0.1/')" >/dev/null 2>&1 & QP=$!
+  else
+    docker run --rm --name "tal-rsp-$$" -p "127.0.0.1:$port:$port" $KVMDEV -v "$REPO:/w" -w /w talaria-qemu-aarch64 \
+      sh -c "$(echo "$QEMU" | sed 's/HOST/0.0.0.0/')" >/dev/null 2>&1 & QP=$!
+  fi
+  sleep 3 # the listener up (docker's proxy accepts and RESETS a connection before QEMU listens)
+  a=""; for w in "$@"; do w=$(printf '%s' "$w" | sed "s/PORT/$port/g"); a="$a '$w'"; done
+  eval "timeout $((secs - 5)) $a" > "$LOG" 2>&1
+  docker kill "tal-rsp-$$" >/dev/null 2>&1; kill $QP 2>/dev/null; wait $QP 2>/dev/null
+}
+RSP="python3 $REPO/kernel/tools/rsp-probe.py"
+# A gdb that knows aarch64 (for the core dumps and the live stub).
+GDB=""; for g in gdb-multiarch aarch64-linux-gnu-gdb gdb; do
+  command -v $g >/dev/null 2>&1 && $g --configuration 2>/dev/null | grep -q aarch64 && { GDB=$g; break; }
+done
+
 PASS=0; FAIL=0
 # The console of a boot that failed a check is KEPT (kernel/target/a64-fail/N.log): a trap
 # seen once in thirty runs is diagnosed from its dump, and the next boot overwrites $LOG.
@@ -321,9 +347,6 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
       host '[ -s "$CORE/core.elf" ]'                                                       'core (host): /core.elf is on the volume after the crash'
       host '$RE -h "$CORE/core.elf" 2>/dev/null | grep -q "AArch64"'                        'core (host): an ELF core for AArch64 (e_machine 183)'
       host '$RE -n "$CORE/core.elf" 2>/dev/null | grep -q NT_PRSTATUS'                      'core (host): the note NT_PRSTATUS is in place'
-      GDB=""; for g in gdb-multiarch aarch64-linux-gnu-gdb gdb; do
-        command -v $g >/dev/null 2>&1 && $g --configuration 2>/dev/null | grep -q aarch64 && { GDB=$g; break; }
-      done
       if [ -n "$GDB" ]; then
         host '$GDB -batch -nx -ex bt "$U/crashme" "$CORE/core.elf" 2>/dev/null | grep -qE "main \(.*\) at crashme.c"' 'core (host): gdb opens the dump and prints a bt with names (main () at crashme.c)'
         host '$GDB -batch -nx -ex "info registers pc" "$U/crashme" "$CORE/core.elf" 2>/dev/null | grep -q "^pc "'       'core (host): gdb reads the registers from the dump'
@@ -360,6 +383,34 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
       assert 'the signal 11 to the thread t[0-9]+: the rip 0x[0-9a-f]+, the address 0x48000000' "isolation ($m): a read of the RAM through the identity window from EL0 -> SIGSEGV"
       assertnot 'READ .* the window is OPEN|\[trap\]|PANIC'                  "isolation ($m): the workload did not read the memory of the kernel"
     done
+    # LIVE DEBUGGING ON SMP (x86's gdb-smp, over the console's line here): a stop before the
+    # workload's first instruction, an hbreak on a thread spinning on a secondary, a watchpoint
+    # on the counter it writes — three stops, the value one more each time (the resume steps
+    # over the store with the registers off: arm64 has no resume flag) — ^C, detach, and the
+    # workload goes on.
+    SPIN=$(nm "$U/crashme" 2>/dev/null | awk '$3=="spinner"{print $1}')
+    SPINS=$(nm "$U/crashme" 2>/dev/null | awk '$3=="spins"{print $1}')
+    if command -v python3 >/dev/null 2>&1 && [ -n "$SPIN" ] && [ -n "$SPINS" ] \
+       && mkimg gdbsmp 32M 'binary=/crashme\nargs=crashme live\nrestart=0\n' crashme; then
+      echo "== the gdb stub on SMP (arm64: the console's line) =="
+      cp "$REPO/$TD/gdbsmp.img" "$REPO/$TD/run.img"
+      bootrsp 150 "talaria.mode=proc talaria.gdb=break" "$TD/run.img" 1252 $RSP PORT '?' \
+        "Z1,$SPIN,4" c "z1,$SPIN,4" "Z2,$SPINS,8" c "m$SPINS,8" c "m$SPINS,8" c "m$SPINS,8" "z2,$SPINS,8" \
+        'c!' INTR qfThreadInfo D SLEEP INTR "m$SPINS,8" 'c!' INTR "m$SPINS,8" D
+      assert '^first: T05thread:1;core:0;'                                      'gdb-smp: talaria.gdb=break stops before the workload'"'"'s first instruction'
+      assert "^Z1,$SPIN,4 -> OK"                                                'gdb-smp: an hbreak (the breakpoint registers) is set on the workload'"'"'s code'
+      assert '^c -> T05thread:[2-9];core:[123];'                                'gdb-smp: it catches the spinning thread ON A SECONDARY (the registers are every core'"'"'s)'
+      assert "^m$SPINS,8 -> 0000000000000000"                                   'gdb-smp: a write watchpoint stops before the first store'
+      assert "^m$SPINS,8 -> 0100000000000000"                                   'gdb-smp: the resume steps over the store and the next one stops (no resume flag on arm64)'
+      assert "^m$SPINS,8 -> 0200000000000000"                                   'gdb-smp: and again — one stop per store'
+      assert '^INTR -> T05thread:'                                              'gdb-smp: ^C from gdb stops the running machine (the console'"'"'s poll)'
+      assert '^qfThreadInfo -> m1,2,3'                                          'gdb-smp: the threads of the workload are listed'
+      assert '^D -> OK'                                                         'gdb-smp: detach answers'
+      # After the detach: ^C again, the counter read, a second of running, ^C, read — it moved.
+      V1=$(grep "^m$SPINS,8 -> " "$LOG" | sed -n 4p); V2=$(grep "^m$SPINS,8 -> " "$LOG" | sed -n 5p)
+      if [ -n "$V1" ] && [ -n "$V2" ] && [ "$V1" != "$V2" ]; then echo "  PASS  gdb-smp: after the detach the workload goes on (the counter moved under a re-attach)"; PASS=$((PASS+1))
+      else echo "  FAIL  gdb-smp: after the detach the counter did not move ('$V1' / '$V2')"; FAIL=$((FAIL+1)); keepfail; fi
+    else echo "  SKIP  gdb-smp: no python3, no crashme symbols or no image"; fi
   else
     echo "== the ext2 disk on arm64: SKIPPED — no mkfs.ext2 (e2fsprogs) on the host =="
   fi
@@ -542,6 +593,56 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
 else
   echo "== ring 3 on arm64: SKIPPED — no kernel/user/aarch64 binaries here (make -C kernel/user aarch64) =="
 fi
+
+echo "== observability on arm64: PMUv3, the profile with stacks, the gdb stub =="
+# Under TCG the instructions counter is modelled only with -icount; with it every
+# instruction is one cycle, so the IPC is exactly 1.00 — a deterministic judge of the
+# counters and of the 32-bit widening across a wrap (talaria.pmunarrow=1).
+A0=$ACCEL; IC=0; [ "$ACCEL" = "-cpu max" ] && { ACCEL="$ACCEL -icount shift=0"; IC=1; }
+boot 120 "talaria.test=pmu"
+assert 'talaria: the PMU is on \(PMUv3'                                    'pmu: PMUv3 found and programmed (cycles + event counters)'
+assert 'pmu: [0-9]+ iterations \(rdpmc\): cycles=[0-9]+ instrs=[1-9][0-9]* IPC=' 'pmu: cycles AND retired instructions counted'
+[ $IC = 1 ] && assert 'IPC=1\.00'                                          'pmu: under -icount the IPC is exactly 1.00'
+assert 'pmu: OK'                                                           'pmu: the verdict'
+boot 120 "talaria.test=pmu talaria.pmunarrow=1"
+assert 'the width: 32-bit, widened by the reader'                          'pmu (narrow): the no-CHAIN path is taken on request'
+assert 'pmu: across the 32-bit wrap: instrs=[0-9]+ cycles=[0-9]+ — the widening holds' 'pmu (narrow): a counter set below 2^32 is read correctly across its wrap'
+ACCEL=$A0
+boot 90 "talaria.test=obs"
+assert 'unwind: the unwinding checks all passed'                           'obs: the unwinder on a synthetic chain'
+assert 'kstat cache: the PMU — [0-9]+ GP \+ 1 fixed counters'              'obs: kstat names the counters'
+assert 'obs: ALL OK'                                                       'obs: every observability command runs to the end'
+assert 'kstat sync: the wait primitive is wfe'                             'obs: kstat names the arm64 wait tier'
+boot 90 "talaria.test=console"
+assert 'perf: SUMMARY  IPC '                                               'console: perf computes the IPC from the counters'
+if [ -f "$REPO/kernel/user/aarch64/profdeep" ]; then
+  boot 120 "talaria.test=profdeep"
+  assert 'profdeep: ALL OK'                                                'profdeep: the workload'"'"'s stack unwinds on a live workload (five levels, x29 chain)'
+  assert 'SAMPLE 3 [0-9]+ [0-9]+ [^ ]+ 0x[0-9a-f]+ 0x[0-9a-f]+ 0x[0-9a-f]+'  'profdeep: perf record dumps STACKS of ring 3 (the frame'"'"'s x29 and its EL0 mode read right)'
+  assert 'perf: WORKLOAD .ring 3. — [0-9]+ samples, average depth [3-8]'   'profdeep: perf top shows the stack depth'
+  assertnot 'obs: FAIL|THERE ARE FAILURES|\[trap\]|PANIC'                  'profdeep: no failed check, no trap'
+  boot 120 "talaria.test=obslive"
+  assert 'obs-live: ALL OK'                                                'obslive: time, syscalls by thread, switches and the profile on a live workload'
+fi
+if command -v python3 >/dev/null 2>&1; then
+  # The stub on the console's line: the registers (gdb's aarch64-core: 268 bytes = 536 hex),
+  # the threads, two software steps, an hbreak set and cleared, detach.
+  bootrsp 60 "talaria.mode=gdb" "" 1251 $RSP PORT '?' qSupported g qfThreadInfo s s 'Z1,40080000,4' 'z1,40080000,4' D
+  assert '^first: T05thread:1;core:0;'                                      'gdb-stub: the machine stops in the stub and says so over the console'"'"'s line'
+  assert '^qSupported -> PacketSize=400'                                    'gdb-stub: qSupported'
+  assert '^g -> [0-9a-f]{536}$'                                             'gdb-stub: g gives x0..x30, sp, pc, cpsr'
+  assert '^qfThreadInfo -> m1'                                              'gdb-stub: the thread list'
+  assertcount '^s -> T05thread:1;core:0;' 2                                 'gdb-stub: the software step stops after one instruction (twice)'
+  assertcount ' -> OK$' 3                                                   'gdb-stub: hbreak (Z1/z1) and detach (D) answer OK'
+  if [ -n "$GDB" ]; then
+    bootrsp 60 "talaria.mode=gdb" "" 1253 $GDB -batch -nx -ex 'set remotetimeout 20' -ex 'target remote :PORT' -ex 'bt 3' \
+      -ex 'info registers pc cpsr' -ex stepi -ex 'info threads' -ex detach "$REPO/${IMG%.img}"
+    assert '#0 .* in talaria::runmode::run'                                 'gdb-stub (host gdb): attaches over the console'"'"'s line and names the stopped function'
+    assert '^cpsr +0x[0-9a-f]+ +\[ .*EL=1'                                  'gdb-stub (host gdb): the registers, cpsr decoded'
+    assert '^\* 1 +Thread 1'                                                'gdb-stub (host gdb): the threads'
+    assert 'Inferior 1 \(Remote target\) detached'                          'gdb-stub (host gdb): detach'
+  else echo "  SKIP  gdb-stub (host gdb): no gdb that knows aarch64"; fi
+else echo "  SKIP  gdb-stub: no python3"; fi
 
 echo "== the probes (talaria.test=ring|icache|bbm|svccost) =="
 boot 90 "talaria.test=ring talaria.ringn=${TAL_RINGN:-100000}"

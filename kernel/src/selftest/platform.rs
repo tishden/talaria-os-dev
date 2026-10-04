@@ -375,6 +375,11 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             let (bm, brt) = crate::pmu::read_branch();
             println!("pmu: branches={} predictor misses={} (GP counters {}, fixed {})",
                 brt, bm, crate::pmu::ngp(), crate::pmu::nfixed());
+            if let Some((ins, cyc)) = crate::pmu::selftest_wrap() {
+                let ok = ins > 1_000_000 && ins < 1 << 31;
+                println!("pmu: across the 32-bit wrap: instrs={} cycles={} — {}", ins, cyc,
+                    if ok { "the widening holds" } else { "FAIL (the widening missed the wrap)" });
+            }
             if cycles > 0 { println!("pmu: OK (cycles={} source={})", cycles, source); }
             else { println!("pmu: FAIL (a zero counter)"); }
             crate::suite::park()

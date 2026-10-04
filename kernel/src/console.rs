@@ -669,6 +669,9 @@ fn poll_tick_inner() {
     while let Some(ch) = serial::getc() {
         budget -= 1;
         if budget == 0 { break; }
+        // gdb's interrupt (^C) on a line the stub shares with the console (arm64): stop
+        // the machine in the debugger, as `gdb break` would.
+        if ch == 0x03 && crate::gdb::on_console() { crate::gdb::interrupt(); continue; }
         if feed(ch) {
             exec_from_tick(line());
             line_taken();

@@ -327,6 +327,7 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.nowakebal", Kind::Flag, "switch placement on wakeup off"),
     once("talaria.pci", Kind::Flag, "bring PCI up (ECAM/ivshmem)"),
     many("talaria.pin", Kind::Text, "a thread placement rule"),
+    once("talaria.pmunarrow", Kind::Flag, "arm64: the PMU's counters at 32 bits, widened by the reader (a test of the no-CHAIN path)"),
     once("talaria.pmutick", Kind::Num, "taking the PMU counters in the tick, ms (0 — off)"),
     once("talaria.pollgap", Kind::Num, "an idle stack pass no more often than every N ns"),
     once("talaria.pollhard", Kind::Num, "a hard polling ceiling, ns"),

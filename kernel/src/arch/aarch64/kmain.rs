@@ -348,6 +348,7 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
     if !probes::is_arch_test(cmdline) {
         percpu::init(me);
         unsafe { gic::enable_local(ppi); for sgi in 0..16u32 { gic::enable_local(sgi); } }
+        super::pmu::NARROW.store(crate::cmdline::flag(cmdline, "talaria.pmunarrow"), Ordering::Relaxed);
         crate::boot_shared(si, cmdline, cpu::counter_hz(), None);
     }
     // The bring-up's EL0 probes call the vDSO through the KERNEL's tables, so the image is
@@ -435,6 +436,9 @@ extern "C" fn rust_ap_main(ctx: u64) -> ! {
         timer::arm(trap::TICK_NS.load(Ordering::Relaxed));
     }
     crate::println!("talaria: cpu{} up (mpidr {:#x}, stack top {:#x}, redistributor {})", me, cpu::mpidr(), ctx, if ok { "found" } else { "NOT FOUND" });
+    // The counters are per core (x86 programs them in `ap_entry` the same way): without this
+    // a secondary's `perf` read the reset state, zeros, exactly where the workload runs.
+    crate::pmu::init_cpu();
     let slot = me.min(MAX_AP - 1);
     AP_UP[slot].store(1, Ordering::Release);
     // The role, as x86's `ap_entry` reads it: 1 = the sync self-test, 2 = a core of the

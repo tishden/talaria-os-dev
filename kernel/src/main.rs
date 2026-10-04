@@ -124,6 +124,7 @@ mod clock;    // the servo's arithmetic (host-tested)
 mod wallclock; // the wall and monotonic clocks over the counter, the discipline by a reference
 mod slice;     // the tick's policy: the slice, the short and the long tick
 mod perfsample; // a counters snapshot and its arithmetic (the IPC, the MPKI)
+mod gdbproto;   // the GDB Remote Serial Protocol without the machine (the stubs are `arch::gdb`)
 mod vdso;
 mod uaccess;
 mod fr;
