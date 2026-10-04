@@ -260,6 +260,7 @@ static PSEQ: [core::sync::atomic::AtomicU32; NPIPE] =
 fn pipe_bump(i: usize) {
     PSEQ[i].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
     crate::sync::wake_addr_kernel(PSEQ[i].as_ptr() as u64, usize::MAX);
+    crate::netsys::mix_kick(); // a pipe in an epoll/poll set (`talaria.netmix=`)
 }
 pub fn pipe_is(h: i64) -> bool { h >= PIPE_BASE && ((h - PIPE_BASE) as usize) < NPIPE * 2 && unsafe { let i = ((h - PIPE_BASE) / 2) as usize; PR[i] || PW[i] } }
 fn pidx(h: i64) -> (usize, usize) { let k = (h - PIPE_BASE) as usize; (k / 2, k % 2) }
@@ -437,11 +438,13 @@ fn sig_ignored(p: usize, sig: u64, mask: u64) -> bool {
 /// Put a signal to the task t (pending).
 pub fn send(t: usize, sig: u64) { if t < NT && (1..=64).contains(&sig) {
     if sig_ignored(crate::sched::proc_of(t), sig, sigmask_of(t)) { return; }
-    PENDING[t].fetch_or(1u64 << (sig - 1), Ordering::Release); } }
+    PENDING[t].fetch_or(1u64 << (sig - 1), Ordering::Release);
+    crate::netsys::mix_kick(); } } // a signalfd in an epoll set, a waiter's EINTR (`talaria.netmix=`)
 /// A signal to a PROCESS (the leader p): any of its threads for which it is not masked will take it.
 pub fn send_proc(p: usize, sig: u64) { if p < NT && (1..=64).contains(&sig) {
     if sig_ignored(p, sig, sigmask_of(p)) { return; }
-    PPEND[p].fetch_or(1u64 << (sig - 1), Ordering::Release); } }
+    PPEND[p].fetch_or(1u64 << (sig - 1), Ordering::Release);
+    crate::netsys::mix_kick(); } }
 /// A SIGTERM to all the live processes (by their leaders) — the regular stop of the machine. It returns the number of processes.
 pub fn term_all() -> usize {
     let mut n = 0;

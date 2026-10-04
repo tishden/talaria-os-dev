@@ -3,7 +3,7 @@
   mongoprobe.py HOST PORT ping   -> {ping:1}
   mongoprobe.py HOST PORT demo   -> buildInfo, insert, find, count (database talaria, collection t)
 """
-import socket, struct, sys, time
+import os, socket, struct, sys, time
 
 def enc_doc(d):
     out = b''
@@ -43,7 +43,7 @@ def dec_doc(b, i=0):
 
 class Mongo:
     def __init__(self, host, port):
-        self.s = socket.create_connection((host, port), timeout=20); self.rid = 1
+        self.s = socket.create_connection((host, port), timeout=float(os.environ.get('MONGOPROBE_TIMEOUT', '20'))); self.rid = 1  # the timeout: a TCG guest is slow
     def cmd(self, doc):
         body = struct.pack('<I', 0) + b'\x00' + enc_doc(doc)
         hdr = struct.pack('<iiii', 16 + len(body), self.rid, 0, 2013); self.rid += 1

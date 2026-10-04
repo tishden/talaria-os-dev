@@ -462,7 +462,7 @@ pub(crate) const NET_LIVE_OPTS: &[&str] = &[
     "talaria.netirq=",    // the NIC's line is set on the live stack (`netsys::line_late`)
     "talaria.netscan=", "talaria.netslice=", "talaria.netyield=",
     "talaria.netpark=", "talaria.netsolo=", "talaria.netprof=", "talaria.netpause=",
-    "talaria.nettrace=", "talaria.netidle=",
+    "talaria.nettrace=", "talaria.netidle=", "talaria.netmix=",
 ];
 
 /// The `talaria.net*` knobs that REALLY apply only when the NIC is

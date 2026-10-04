@@ -174,6 +174,14 @@ pub fn dump() {
                 crate::netsys::NET_POLLER_LEFT_BUSY.load(Relaxed), crate::netsys::NET_POLLER_HANDOFF.load(Relaxed));
         }
     }
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let m = crate::netsys::NET_MIX_PARKS.load(Relaxed);
+        if m != 0 {
+            crate::println!("stat: net: mixed-set waiters parked {} (woken {}, by the ceiling {}); non-socket kicks that woke one {}",
+                m, crate::netsys::NET_MIX_WAKE.load(Relaxed), crate::netsys::NET_MIX_TMO.load(Relaxed), crate::netsys::NET_MIX_KICKS.load(Relaxed));
+        }
+    }
     if crate::sched::RUNHIST_ON.load(core::sync::atomic::Ordering::Relaxed) {
         let mut line = [0u64; 9];
         for i in 0..9 { line[i] = crate::sched::RUNHIST[i].load(core::sync::atomic::Ordering::Relaxed); }

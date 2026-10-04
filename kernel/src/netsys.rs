@@ -738,6 +738,11 @@ pub fn configure_from_cmdline(cmdline: &str) {
             // cost MariaDB 29 times (see `wait_frame_w`).
             NETSOLO.store(true, core::sync::atomic::Ordering::SeqCst);
         }
+        else if let Some(v) = tok.strip_prefix("talaria.netmix=") {
+            // A waiter whose set is NOT only sockets parks too (`wait_frame_w`), with this
+            // ceiling in nanoseconds; implies `netsolo`. 0 — off (the default: the spin).
+            if let Ok(ns) = v.parse::<u64>() { NETMIX_NS.store(ns, core::sync::atomic::Ordering::SeqCst); }
+        }
         else if let Some(v) = tok.strip_prefix("talaria.netpark=") {
             // The ceiling of a waiter's parking in nanoseconds; 0 — switch it off (the former
             // polling). An explicitly set value cancels the default, which
@@ -2364,6 +2369,49 @@ static NETSOLO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool:
 fn park_on() -> bool {
     NETPARK_NS.load(core::sync::atomic::Ordering::Relaxed) != 0
         || NETSOLO.load(core::sync::atomic::Ordering::Relaxed)
+        || NETMIX_NS.load(core::sync::atomic::Ordering::Relaxed) != 0
+}
+
+/// A MIXED SET MAY PARK TOO (`talaria.netmix=<ns>`, off by default).
+///
+/// A waiter whose set holds a pipe, an eventfd or a signalfd next to its sockets is not
+/// allowed to park by `netsolo` — nothing moves its word when a non-socket becomes ready —
+/// so it spins in `yield_window`. Every PostgreSQL process waits that way (a socket or two,
+/// the latch's signalfd or self-pipe, the postmaster's death pipe): an idle server is six
+/// tasks spinning `epoll_pwait`. Measured on arm64 under TCG with Alpine's PostgreSQL 16:
+/// six tasks at ~32 % of a core each, 18 thousand switches a second, `select 1` taking from
+/// zero to 147 s depending on how the spinners meet the backend; the x86 numbers were taken
+/// with the spin, so the default stays.
+///
+/// With the knob a NON-polling waiter of a mixed set parks on its word like a socket-only one,
+/// for at most this many nanoseconds (the ceiling also bounds how late a timerfd's expiry is
+/// seen — nothing kicks for time). Sockets wake it by `wake_owner`; the producers of the
+/// other readiness — a pipe's bytes, room or close (`proc::pipe_bump`), an eventfd's write,
+/// a signal made pending (`proc::send`/`send_proc`, the signalfd's readiness) — call
+/// `mix_kick`, which moves the word of every task inside a network wait. The order is
+/// Dekker's: the waiter publishes `NW_IN` (SeqCst) before its snapshot of the word and its
+/// scan; the producer publishes its state, then a SeqCst fence, then reads `NW_IN` — either
+/// the producer sees the waiter and moves its word (the park returns at once), or the
+/// waiter's scan sees the state.
+static NETMIX_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static NET_MIX_PARKS: AtomicU64 = AtomicU64::new(0);
+pub static NET_MIX_WAKE: AtomicU64 = AtomicU64::new(0);
+pub static NET_MIX_TMO: AtomicU64 = AtomicU64::new(0);
+pub static NET_MIX_KICKS: AtomicU64 = AtomicU64::new(0);
+/// A non-socket's readiness has changed: wake the network waiters to rescan (see NETMIX_NS).
+pub fn mix_kick() {
+    use core::sync::atomic::Ordering::{Relaxed, SeqCst};
+    if NETMIX_NS.load(Relaxed) == 0 { return; }
+    core::sync::atomic::fence(SeqCst);
+    if NET_WAITERS.load(SeqCst) == 0 { return; }
+    for t in 0..crate::sched::NTASKS {
+        if !NW_IN[t].load(SeqCst) { continue; }
+        NW_WORD[t].fetch_add(1, SeqCst);
+        if crate::sync::waiting_on(t) == nw_addr(t) {
+            NET_MIX_KICKS.fetch_add(1, Relaxed);
+            crate::sync::wake_addr(nw_addr(t), 1, crate::sched::proc_of(t), false);
+        }
+    }
 }
 
 /// The guard "I am waiting for the network": it counts the waiters and frees the polling one's slot.
@@ -2372,7 +2420,8 @@ impl NetWaiter {
     pub fn new() -> Self {
         NET_WAITERS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         let me = crate::sched::current_id();
-        if me < crate::sched::NTASKS { NW_IN[me].store(true, core::sync::atomic::Ordering::Relaxed); }
+        // SeqCst: published before the wait's first snapshot of the word (`mix_kick`'s Dekker)
+        if me < crate::sched::NTASKS { NW_IN[me].store(true, core::sync::atomic::Ordering::SeqCst); }
         crate::netprof::mark_wait_in(); // `talaria.appprof=1`: the stage write -> the network wait
         NetWaiter(false)
     }
@@ -2547,6 +2596,20 @@ fn wait_frame_w(seq: u32, cap_ns: u64, w: &mut NetWaiter, only_sock: bool) -> bo
             return false;
         }
     }
+    // A mixed set with `talaria.netmix=` (see NETMIX_NS): the non-polling one parks; the
+    // polling one stays, as above, the stack's driver.
+    let mix = NETMIX_NS.load(core::sync::atomic::Ordering::Relaxed);
+    if mix != 0 && !only_sock && !w.take_poll() {
+        let t = crate::sched::current_id();
+        if t < crate::sched::NTASKS && !crate::console::in_tick() {
+            let cap = if cap_ns == 0 { mix } else { mix.min(cap_ns) };
+            NET_MIX_PARKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let r = crate::sync::wait_on_coarse(NW_WORD[t].as_ptr(), seq, crate::tsc::mono_ns() + cap);
+            if r == -110 { NET_MIX_TMO.fetch_add(1, core::sync::atomic::Ordering::Relaxed); return true; }
+            NET_MIX_WAKE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
+    }
     // The polling one is as it was: by sockets it waits for a frame, with a mixed set it
     // yields the window (parking on a socket's word is not allowed, the readiness of a pipe or
     // an eventfd does not move it).
@@ -2696,7 +2759,13 @@ fn note_cap_exit(had_data: bool) {
         unsafe { crate::arch::cpu::irq_disable(); }
     } else { nw_why(crate::sched::current_id(), 0); core::hint::spin_loop(); }
 }
-fn ms_to_cycles(ms: i64) -> u64 { (ms as u64) * (unsafe { HZ } / 1000) }
+/// The counter's rate for a waiter's TIMEOUT. `HZ` is set when the first card is added; a
+/// process on a machine without a network (a test, a workload with no NIC) waits in
+/// `epoll_wait`/`poll` all the same, and with `HZ`'s placeholder of 1 every timeout was zero
+/// cycles — the wait returned 0 at once, a 5-second `epoll_wait` became a spin of calls
+/// (both machines; `mixwait` found it).
+fn timeout_hz() -> u64 { let h = unsafe { HZ }; if h > 1 { h } else { crate::tsc::hz().max(1000) } }
+fn ms_to_cycles(ms: i64) -> u64 { (ms as u64) * (timeout_hz() / 1000) }
 
 fn tcp_slot(fd: i64) -> Option<usize> {
     let i = (fd - TCP_BASE) as usize;
@@ -3642,7 +3711,7 @@ fn left_ns(t0: u64, limit: u64) -> u64 {
     if limit == 0 { return 0; }
     let spent = tsc::rdtsc().wrapping_sub(t0);
     if spent >= limit { return 1; }
-    (limit - spent).saturating_mul(1_000_000_000) / unsafe { HZ }.max(1)
+    (limit - spent).saturating_mul(1_000_000_000) / timeout_hz()
 }
 /// poll(fds, nfds, timeout_ms): struct pollfd {i32 fd; i16 events; i16 revents}.
 pub fn poll_fds(fds: *mut u8, nfds: usize, timeout: i64) -> i64 {

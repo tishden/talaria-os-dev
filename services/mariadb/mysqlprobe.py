@@ -3,7 +3,7 @@
 server on Talaria from the qemu container (a fallback when the static mariadb client is not built).
   mysqlprobe.py HOST PORT "stmt1; stmt2; ..."   (user root, no password)
 """
-import socket, struct, sys
+import os, socket, struct, sys
 
 def lenenc(b, i):
     c = b[i]
@@ -18,7 +18,7 @@ def lenenc_str(b, i):
 
 class Conn:
     def __init__(self, host, port):
-        self.s = socket.create_connection((host, port), timeout=10)
+        self.s = socket.create_connection((host, port), timeout=float(os.environ.get('MYSQLPROBE_TIMEOUT', '10')))  # the env: a TCG guest is slow
         self.seq = 0
     def read_packet(self):
         hdr = self._recv(4)

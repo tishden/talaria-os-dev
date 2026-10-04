@@ -1,0 +1,24 @@
+diff --git a/kernel/build.rs b/kernel/build.rs
+index 908f9e4..b468b47 100644
+--- a/kernel/build.rs
++++ b/kernel/build.rs
+@@ -30,7 +30,7 @@ fn main() {
+             for e in rd.filter_map(|e| e.ok()) {
+                 let Ok(n) = e.file_name().into_string() else { continue };
+                 if e.path().is_file() { names.push(n); }
+-                else if e.path().is_dir() {
++                else if e.path().is_dir() && false { // A/B: no tsync/ in the image
+                     println!("cargo:rerun-if-changed={}", e.path().display());
+                     if let Ok(sub) = std::fs::read_dir(e.path()) {
+                         for f in sub.filter_map(|f| f.ok()).filter(|f| f.path().is_file()) {
+@@ -45,6 +45,10 @@ fn main() {
+                 arms.push_str(&format!("    ({n:?}) => {{ include_bytes!({:?}) }};\n", dir.join(&n).display().to_string()));
+             }
+         }
++        // A/B: tsync's 143424 bytes as one blob in its place (the layout without the content)
++        let pad = PathBuf::from(env::var("OUT_DIR").unwrap()).join("pad.bin");
++        std::fs::write(&pad, vec![0x5au8; 143424]).unwrap();
++        arms.push_str(&format!("    (\"tsync/tsynctest\") => {{ include_bytes!({:?}) }};\n", pad.display().to_string()));
+         let src = format!("macro_rules! user_elf {{\n{arms}    ($p:literal) => {{ &[] }};\n}}\n");
+         std::fs::write(PathBuf::from(env::var("OUT_DIR").unwrap()).join("user_aarch64.rs"), src).expect("write user_aarch64.rs");
+     }

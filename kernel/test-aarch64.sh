@@ -240,6 +240,24 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
   assert 'piperace: the pipe carried 4194304 bytes in order across cores'     'piperace: a pipe between threads on two cores carries 4 MB byte-exact'
   assert 'piperace: the eventfd summed 300000 increments from 3 threads exactly' 'piperace: an eventfd written from three cores loses no increment'
   assertnot "$BAD"                                                           'piperace: no trap'
+  # A waiter of a mixed epoll set (a pipe, an eventfd, a signalfd) PARKED by talaria.netmix=
+  # with a 2 s ceiling: a missing kick reads as a ~2000 ms wake (the kick-less kernel: 1970).
+  # Also the epoll_wait timeout on a machine with no NIC (it was zero cycles: an instant 0).
+  boot 120 "talaria.test=mixwait talaria.netmix=2000000000"
+  assert 'mixwait: ALL OK'                                                    'mixwait: a parked mixed-set waiter is woken by a pipe, an eventfd and a signal at once, not by its 2 s ceiling'
+  assert 'mixed-set waiters parked [1-9][0-9]* \(woken [1-9][0-9]*, by the ceiling 0\)' 'mixwait: the waiters really parked, and no park ended by the ceiling'
+  assertnot "$BAD"                                                           'mixwait: no trap'
+  # The ID registers from EL0: AT_HWCAP's CPUID bit promises Linux's emulation of `mrs` (OpenSSL
+  # reads MIDR at load; Alpine's PostgreSQL died on it with a SIGILL before).
+  boot 60 "talaria.test=idregs"
+  assert 'idregs: ALL OK'                                                     'idregs: MIDR/MPIDR/ID_AA64* read from EL0 as Linux answers them (no SVE, SME, MTE or PAC shown)'
+  assertnot "$BAD"                                                           'idregs: no trap'
+  # A dynamic ELF: a PIE + ld-musl-aarch64 + libz through dlopen (services/build-aarch64-db.sh dyn).
+  if [ -f "$REPO/kernel/target/disk-a64-dyn.img" ]; then
+    bootx 90 "talaria.test=dyn" kernel/target/disk-a64-dyn.img
+    assert 'dyn-hello: zlibVersion=1\.'                                       'dyn: a PIE through PT_INTERP (ld-musl-aarch64), threads, dlopen of libz'
+    assert 'dyn-hello: ALL OK'                                                'dyn: the dynamic hello finishes'
+  else echo "  SKIP  dyn: there is no kernel/target/disk-a64-dyn.img (services/build-aarch64-db.sh dyn)"; fi
   boot 120 "talaria.test=smp2"
   if [ "$KVM" = 1 ]; then
     assert 'SMP2: the parallel speedup [12]\.[0-9]+ .the thread on an AP, the syscalls from the AP. ALL OK' 'smp2: sched_setaffinity migrates a thread onto a secondary, the speedup is ~2x'

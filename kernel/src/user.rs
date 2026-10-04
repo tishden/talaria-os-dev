@@ -715,13 +715,14 @@ unsafe fn build_stack(top: u64, entry: u64) -> u64 {
     p -= arg.len() as u64;
     core::ptr::copy_nonoverlapping(arg.as_ptr(), p as *mut u8, arg.len());
     let arg0 = p;
-    // the array: argc, argv[0], NULL, envp NULL, auxv(PAGESZ,ENTRY,RANDOM,NULL)
-    let items: [u64; 14] = [
+    // the array: argc, argv[0], NULL, envp NULL, auxv(PAGESZ,ENTRY,HWCAP,RANDOM,SYSINFO,NULL)
+    let items: [u64; 16] = [
         1,                    // argc
         arg0, 0,              // argv[0], NULL
         0,                    // envp NULL
         6, 4096,              // AT_PAGESZ
         9, entry,             // AT_ENTRY
+        16, crate::arch::AT_HWCAP, // AT_HWCAP: Linux always gives it (on arm64 its CPUID bit licenses `mrs` of the ID registers)
         25, random,           // AT_RANDOM
         33, vdso_here(),      // AT_SYSINFO_EHDR (0 = there is no vDSO) — the clock without a syscall
         0, 0,                 // AT_NULL
