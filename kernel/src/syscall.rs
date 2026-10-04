@@ -160,10 +160,12 @@ pub fn nullfd_readiness(fd: i64) -> u32 {
 // ── a procfs/sysfs minimum: virtual files (kind 7) and directories (kind 8) ──────────────────
 // The content is generated at a read (processes like mongod/FTDC and the Go runtime read /proc/meminfo,
 // cpuinfo, self/status, /sys/kernel/mm/transparent_hugepage/enabled and so on).
-const VIRT_FILES: [&[u8]; 18] = [b"/proc/meminfo", b"/proc/cpuinfo", b"/proc/stat", b"/proc/uptime", b"/proc/version", b"/proc/self/status", b"/proc/self/stat",
+const VIRT_FILES: [&[u8]; 19] = [b"/proc/meminfo", b"/proc/cpuinfo", b"/proc/stat", b"/proc/uptime", b"/proc/version", b"/proc/self/status", b"/proc/self/stat",
     b"/proc/self/maps", b"/proc/self/cmdline", b"/proc/self/mounts", b"/proc/mounts", b"/proc/sys/vm/max_map_count", b"/proc/sys/vm/overcommit_memory",
     b"/proc/sys/kernel/pid_max", b"/proc/sys/kernel/osrelease", b"/sys/kernel/mm/transparent_hugepage/enabled", b"/sys/kernel/mm/transparent_hugepage/defrag",
-        b"/proc/diskstats"];
+        b"/proc/diskstats", b"/proc/self/smaps"];
+/// `/proc/self/smaps`'s index in `VIRT_FILES`.
+const VIRT_SMAPS: usize = 18;
 const VIRT_DIRS: [&[u8]; 8] = [b"/proc", b"/proc/self", b"/proc/sys", b"/proc/sys/vm", b"/proc/sys/kernel", b"/sys", b"/sys/block", b"/sys/kernel"];
 /// A virtual path: Some((the index, a directory?)).
 fn virt_lookup(path: &[u8]) -> Option<(usize, bool)> {
@@ -220,6 +222,7 @@ pub fn selftest_virtfiles() -> bool {
 fn virt_bytes_needed(id: usize) -> usize {
     match id {
         1 | 2 => 1024 + crate::affinity::online_count().max(1) * 512, // cpuinfo, stat — a record per core
+        VIRT_SMAPS => { let mut k = 0usize; crate::paging::as_runs(smaps_root(), |_| k += 1); 512 + k * SMAPS_RECORD }
         _ => 4096,
     }
 }
@@ -339,9 +342,54 @@ proc /proc proc rw 0 0
 "); }
         15 | 16 => { wr_s(out, &mut n, b"always madvise [never]
 "); }
+        VIRT_SMAPS => smaps(out, &mut n),
         _ => {}
     }
     n
+}
+/// The calling process's root table (0 — a kernel thread: nothing to show).
+fn smaps_root() -> u64 { crate::sched::task_cr3(crate::sched::current_id()) & 0x0000_ffff_ffff_f000 }
+/// The bytes one smaps record takes at most (the header line and twelve fields).
+const SMAPS_RECORD: usize = 512;
+/// `/proc/self/smaps` from the tables (`paging::as_runs`): a record per run of resident
+/// pages, Linux's field names, what the kernel cannot know (Pss as the share it does not
+/// split, Swap) given as Linux gives it for a private anonymous mapping. Redis reads
+/// Shared_Dirty at start-up (its check for an arm64 kernel that loses the dirty bit across
+/// a write-protect) and refuses to run when the file is not there.
+fn smaps(out: &mut [u8], n: &mut usize) {
+    fn hex(out: &mut [u8], n: &mut usize, v: u64) {
+        let mut t = [0u8; 16]; let mut k = 0; let mut x = v;
+        loop { t[k] = b"0123456789abcdef"[(x & 0xF) as usize]; x >>= 4; k += 1; if x == 0 && k >= 8 { break; } }
+        while k > 0 && *n < out.len() { k -= 1; out[*n] = t[k]; *n += 1; }
+    }
+    fn field(out: &mut [u8], n: &mut usize, name: &[u8], kb: u64) {
+        wr_s(out, n, name);
+        let mut t = [0u8; 20]; let mut k = 0; let mut x = kb;
+        loop { t[k] = b'0' + (x % 10) as u8; x /= 10; k += 1; if x == 0 { break; } }
+        for _ in k..(24usize.saturating_sub(name.len()) + 4) { wr_s(out, n, b" "); }
+        while k > 0 && *n < out.len() { k -= 1; out[*n] = t[k]; *n += 1; }
+        wr_s(out, n, b" kB\n");
+    }
+    crate::paging::as_runs(smaps_root(), |r| {
+        if *n + SMAPS_RECORD > out.len() { return; }
+        hex(out, n, r.start); wr_s(out, n, b"-"); hex(out, n, r.end);
+        wr_s(out, n, if r.write { b" rw" } else { b" r-" });
+        wr_s(out, n, if r.exec { b"xp 00000000 00:00 0\n" } else { b"-p 00000000 00:00 0\n" });
+        let size = (r.end - r.start) / 1024;
+        let rss = (r.shared_clean + r.shared_dirty + r.private_clean + r.private_dirty) * 4;
+        field(out, n, b"Size:", size);
+        field(out, n, b"KernelPageSize:", 4);
+        field(out, n, b"MMUPageSize:", 4);
+        field(out, n, b"Rss:", rss);
+        field(out, n, b"Pss:", rss);
+        field(out, n, b"Shared_Clean:", r.shared_clean * 4);
+        field(out, n, b"Shared_Dirty:", r.shared_dirty * 4);
+        field(out, n, b"Private_Clean:", r.private_clean * 4);
+        field(out, n, b"Private_Dirty:", r.private_dirty * 4);
+        field(out, n, b"Referenced:", rss);
+        field(out, n, b"Anonymous:", rss);
+        field(out, n, b"Swap:", 0);
+    });
 }
 /// Open a virtual file/directory -> a handle (kind 7/8), None — it is not a virtual path.
 fn virt_open(path: &[u8]) -> Option<i64> {

@@ -337,6 +337,29 @@ pub fn run(name: &str, cmdline: &str) -> bool {
         "console" => {
             crate::console::selftest();
         }
+        "dirtyprot" => {
+            // A WRITTEN page that is then write-protected is still written: `protect` rebuilt
+            // the leaf without D on both machines, and arm64 kept D in AP[2], which a read-only
+            // page needs for itself (Linux's ff1712f953e2; Redis refuses to start on a kernel
+            // that loses it). An ext2 MAP_SHARED page written, mprotect(PROT_READ)ed and synced
+            // was skipped by the writeback.
+            let ok = match crate::mem::alloc_frame() {
+                None => false,
+                Some(f) => {
+                    crate::paging::split_to_4k(f);
+                    crate::paging::protect(f, 4096, true, false);
+                    while crate::paging::take_dirty(f) {}               // clean, as the writeback leaves it
+                    unsafe { core::ptr::write_volatile(f as *mut u64, 0x5a5a); }
+                    crate::paging::protect(f, 4096, false, false);      // mprotect(PROT_READ) after the write
+                    let kept = crate::paging::take_dirty(f);
+                    let cleared = !crate::paging::take_dirty(f);        // and the take still clears it
+                    crate::paging::protect(f, 4096, true, false);
+                    println!("dirtyprot: a written page write-protected: dirty {}, after the take {}", kept, !cleared);
+                    kept && cleared
+                }
+            };
+            println!("dirtyprot: {}", if ok { "OK — the write survives the protection" } else { "FAIL — the dirty bit was lost" });
+        }
         "pmu" => {
             let have = crate::pmu::available(); // the counters are up from the boot — a second init only makes noise in the log
             let iters: u64 = 20_000_000;

@@ -671,6 +671,18 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     literal and never answered, and a stop reply the stub sent unasked crossed gdb's opening
     `qSupported` on a shared line and was taken for its answer (the arm64 stub waits for `?`
     until gdb is attached, as kgdb does).
+33. **"A bit that a rewrite forgot."** Redis on arm64 forks at start-up to test the kernel
+    for Linux's ff1712f953e2 (the dirty bit lost when a written page is write-protected) and
+    refuses to run if it is. It refused here — first for want of `/proc/self/smaps`, then,
+    with the file in place, for the bug itself, twice over: `paging::protect` rebuilt every
+    leaf from the frame and the rights and left D out (both machines — an ext2 MAP_SHARED
+    page written, then `mprotect(PROT_READ)`, was skipped by the writeback), and arm64's
+    encoding kept D in AP[2], which a read-only page needs for its protection (fork's COW
+    lost it too). D is now carried through `protect`, a 2M split, and in a software bit of a
+    read-only arm64 entry; `talaria.test=dirtyprot` fails on each half of the old code alone,
+    and Redis on the old kernel says "Your kernel has a bug". **A workload's own sanity
+    check is a test someone else already wrote** — run the real program before writing the
+    gate, and when it refuses, read why before reaching for its "ignore" switch.
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

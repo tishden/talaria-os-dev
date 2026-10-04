@@ -582,6 +582,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     NETLOG=$(mktemp)
     docker run --rm $KVMDEV --cap-add NET_ADMIN --device /dev/net/tun -v "$REPO:/w" -w /w \
       -e TAL_IMG="$IMG" -e TAL_ACCEL="$ACCEL" -e TAL_KVM="$KVM" -e TAL_DISK="$DISK" -e TAL_EXT2="$E2" \
+      -e TAL_SVC="$([ -d "$REPO/kernel/target/a64-services" ] && echo kernel/target/a64-services)" \
       talaria-qemu-aarch64 bash kernel/test-aarch64-net.sh > "$NETLOG" 2>&1
     grep -vE '^NET TOTAL' "$NETLOG"
     NP=$(sed -n 's/^NET TOTAL: PASS=\([0-9]*\) FAIL=\([0-9]*\)$/\1/p' "$NETLOG"); NF=$(sed -n 's/^NET TOTAL: PASS=\([0-9]*\) FAIL=\([0-9]*\)$/\2/p' "$NETLOG")
@@ -594,6 +595,22 @@ else
   echo "== ring 3 on arm64: SKIPPED — no kernel/user/aarch64 binaries here (make -C kernel/user aarch64) =="
 fi
 
+# PHASE 7's first step: the small open-source services, cross-built for arm64 by
+# services/build-aarch64.sh into kernel/target/a64-services (unmodified sources, static musl).
+SV=kernel/target/a64-services
+if [ -f "$REPO/$SV/disk-lua.img" ]; then
+  echo "== open source on arm64: Lua, SQLite, QuickJS, BusyBox from a TFS1 disk =="
+  for spec in "lua|Lua OK on Talaria|fib.30. = 832040" "sqlite|SQLite 3.46.1 on Talaria OS|rows=4 sum=12.0 avg=3.0" \
+              "quickjs|QuickJS OK on Talaria|fib.28. = 317811" "busybox|busybox 1.36.1 on Talaria OS|sum.i.2,1..1000.=333833500"; do
+    m=${spec%%|*}; r=${spec#*|}; p1=${r%%|*}; p2=${r#*|}
+    [ -f "$REPO/$SV/disk-$m.img" ] || { echo "  SKIP  $m: no $SV/disk-$m.img"; continue; }
+    bootx 150 "talaria.mode=$m" "$SV/disk-$m.img"
+    assert "$p1"                                                             "opensource ($m): the unmodified program runs to its verdict in EL0"
+    assert "$p2"                                                             "opensource ($m): and computes the right answer"
+    assertnot '\[trap\]|PANIC|an unknown number|\[fault\]'                    "opensource ($m): no trap, no fault, no unknown syscall"
+  done
+else echo "== open source on arm64: SKIPPED — no $SV (services/build-aarch64.sh with the aarch64 musl cross) =="; fi
+
 echo "== observability on arm64: PMUv3, the profile with stacks, the gdb stub =="
 # Under TCG the instructions counter is modelled only with -icount; with it every
 # instruction is one cycle, so the IPC is exactly 1.00 — a deterministic judge of the
@@ -604,10 +621,15 @@ assert 'talaria: the PMU is on \(PMUv3'                                    'pmu:
 assert 'pmu: [0-9]+ iterations \(rdpmc\): cycles=[0-9]+ instrs=[1-9][0-9]* IPC=' 'pmu: cycles AND retired instructions counted'
 [ $IC = 1 ] && assert 'IPC=1\.00'                                          'pmu: under -icount the IPC is exactly 1.00'
 assert 'pmu: OK'                                                           'pmu: the verdict'
+# The machine's counters into the gate's output: on the stand that is the record of what a
+# Neoverse core's PMU looks like through KVM (the version, the width, the events found).
+grep -E 'talaria: the PMU|pmu: [0-9]+ iterations|pmu: LLC|pmu: branches' "$LOG" | cut -c1-200 | sed 's/^/      /'
 boot 120 "talaria.test=pmu talaria.pmunarrow=1"
 assert 'the width: 32-bit, widened by the reader'                          'pmu (narrow): the no-CHAIN path is taken on request'
 assert 'pmu: across the 32-bit wrap: instrs=[0-9]+ cycles=[0-9]+ — the widening holds' 'pmu (narrow): a counter set below 2^32 is read correctly across its wrap'
 ACCEL=$A0
+boot 60 "talaria.test=dirtyprot"
+assert 'dirtyprot: OK'                                                     'paging: a written page made read-only keeps its dirty bit (protect, and arm64'"'"'s encoding of a read-only page)'
 boot 90 "talaria.test=obs"
 assert 'unwind: the unwinding checks all passed'                           'obs: the unwinder on a synthetic chain'
 assert 'kstat cache: the PMU — [0-9]+ GP \+ 1 fixed counters'              'obs: kstat names the counters'

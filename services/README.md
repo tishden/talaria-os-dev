@@ -28,6 +28,13 @@ common approach: link at `0x10000000` (the Talaria user region),
 `musl-gcc -static -no-pie`, run from disk. `docker/` holds the toolchain images
 (`build-images.sh`).
 
+**arm64.** `services/build-aarch64.sh` cross-builds Lua, SQLite, QuickJS, BusyBox,
+mongoose and Redis with the aarch64 musl toolchain (`aarch64-linux-musl-gcc` on the PATH),
+linked at `0x50000000` (RAM on `virt` and Graviton; x86's `0x10000000` is a PCIe window
+there), into `kernel/target/a64-services/`; `kernel/test-aarch64.sh` runs them when they are
+there. Redis on arm64 runs as a process (`talaria.mode=proc`, `ext2-redis.img` with a
+manifest): at start-up it forks to check the kernel for the arm64 dirty-bit-across-fork bug.
+
 ## Results
 
 - **mongoose:** serves HTTP over TCP with method/URI/Host parsing and keep-alive.

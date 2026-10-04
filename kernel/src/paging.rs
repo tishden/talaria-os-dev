@@ -236,7 +236,8 @@ fn ident_leaf_2m(va: u64) -> u64 {
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000; // the physical address [51:12]
 // P|RW|US|PWT|PCD|NX + the OS bits: the splitting of a 2M leaf OF THE WORKLOAD must preserve
 // the sign of a private page (otherwise munmap will not return the frames, and fork will not do a COW).
-const INHERIT: u64 = PTE_P | PTE_RW | PTE_US | PTE_UC | PTE_NX | PTE_PRIV | PTE_COW;
+// And D: the 4K pages of a written 2M leaf are written.
+const INHERIT: u64 = PTE_P | PTE_RW | PTE_US | PTE_UC | PTE_NX | PTE_PRIV | PTE_COW | PTE_D;
 
 /// # Safety
 /// P1 + P2: the root table of the CURRENT address space, taken from CR3. The
@@ -507,8 +508,8 @@ pub fn user_range_ok(addr: u64, len: u64, write: bool) -> bool {
 /// whether it now has a 4K entry. `protect`/`protect_none` deliberately keep a huge leaf
 /// whole (a heap must not shatter), so a caller that needs a genuine per-page mapping in a
 /// region the kernel maps as 2M (its own GB1, `mmu::gb_kind`) asks for it here — the dirty
-/// probe of the bring-up, which otherwise reads the 2M leaf's crude "always dirty".
-#[cfg(target_arch = "aarch64")]
+/// probe of the bring-up and `talaria.test=dirtyprot` (both machines), which otherwise read
+/// the 2M leaf's crude "always dirty".
 pub fn split_to_4k(vaddr: u64) -> bool {
     // SAFETY: P1 + P2 + P3 — `pte_ptr` walks the current root, splitting the large leaves it
     // meets through the CAS; nothing else holds a pointer into those tables here.
@@ -636,7 +637,7 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
                     let huge_present = e & PTE_P != 0 && e & PTE_PS != 0;
                     let huge_lazy = e & PTE_P == 0 && e & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS);
                     if huge_present && e & PTE_PRIV != 0 && e & PTE_COW == 0 {
-                        let mut ne = (e & (ADDR_MASK | PTE_PS | PTE_PRIV)) | PTE_P | PTE_US;
+                        let mut ne = (e & (ADDR_MASK | PTE_PS | PTE_PRIV | PTE_D)) | PTE_P | PTE_US;
                         if writable { ne |= PTE_RW; }
                         if !exec { ne |= PTE_NX; }
                         pte_w(pde, ne);
@@ -677,7 +678,7 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
                     let _ = cow_fault(a);
                     if let Some(fresh) = pte_ptr(a) {
                         let old = pte_r(fresh);
-                        let mut e = (old & ADDR_MASK) | PTE_P | PTE_US | (old & (PTE_PRIV | PTE_COW));
+                        let mut e = (old & ADDR_MASK) | PTE_P | PTE_US | (old & (PTE_PRIV | PTE_COW | PTE_D));
                         if writable && old & PTE_COW == 0 { e |= PTE_RW; }
                         if !exec { e |= PTE_NX; }
                         pte_w(fresh, e);
@@ -688,7 +689,10 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
                 }
                 let old = pte_r(pte);
                 let phys = old & ADDR_MASK;
-                let mut e = phys | PTE_P | PTE_US | (old & (PTE_PRIV | PTE_COW)); // we preserve PRIV/COW (fork/munmap)
+                // PRIV/COW are preserved (fork/munmap), and D: a written page made read-only is
+                // still written — dropping D here lost a MAP_SHARED page's writeback after an
+                // mprotect(PROT_READ), on both machines (`talaria.test=dirtyprot`).
+                let mut e = phys | PTE_P | PTE_US | (old & (PTE_PRIV | PTE_COW | PTE_D));
                 if writable && old & PTE_COW == 0 { e |= PTE_RW; }
                 if !exec { e |= PTE_NX; }
                 pte_w(pte, e);
@@ -2750,6 +2754,77 @@ pub fn as_footprint(pml4: u64) -> (u64, u64, u64, u64) {
         }
     }
     (res, huge, shared, lazy)
+}
+
+/// One run of `as_runs`: resident private pages at consecutive addresses with the same rights.
+#[derive(Clone, Copy, Default)]
+pub struct Run {
+    pub start: u64,
+    pub end: u64,
+    /// Writable (RW, or COW — written into after a copy), executable.
+    pub write: bool,
+    pub exec: bool,
+    /// In 4K pages: shared with another space (a COW refcount above one) or not, written or not.
+    pub shared_clean: u64,
+    pub shared_dirty: u64,
+    pub private_clean: u64,
+    pub private_dirty: u64,
+}
+
+/// The address space as `/proc/self/smaps` shows it, reconstructed from the tables: the
+/// kernel keeps no list of mappings, so a "mapping" here is a run of RESIDENT private pages
+/// with the same rights (a reserved, untouched range is not in it). The same walk and the
+/// same filter as `as_footprint`; a 2M leaf counts as 512 pages with its one dirty bit.
+pub fn as_runs(pml4: u64, mut emit: impl FnMut(&Run)) {
+    if pml4 == 0 { return; }
+    let mut cur: Option<Run> = None;
+    let mut page = |va: u64, n: u64, e: u64, emit: &mut dyn FnMut(&Run)| {
+        let write = e & (PTE_RW | PTE_COW) != 0;
+        let exec = e & PTE_NX == 0;
+        let shared = crate::mem::rc_get(e & ADDR_MASK) > 1;
+        let dirty = e & PTE_D != 0;
+        let joins = matches!(cur, Some(r) if r.end == va && r.write == write && r.exec == exec);
+        if !joins {
+            if let Some(r) = cur.take() { emit(&r); }
+            cur = Some(Run { start: va, end: va, write, exec, ..Run::default() });
+        }
+        if let Some(r) = cur.as_mut() {
+            r.end = va + n * 4096;
+            match (shared, dirty) {
+                (true, true) => r.shared_dirty += n, (true, false) => r.shared_clean += n,
+                (false, true) => r.private_dirty += n, (false, false) => r.private_clean += n,
+            }
+        }
+    };
+    // SAFETY: P1 + P2 — a read-only walk over an address space, as `as_footprint`.
+    unsafe {
+        for l4 in 0..256usize {
+            let e4 = pte_r((pml4 as *const Pte).add(l4));
+            if e4 & PTE_P == 0 { continue; }
+            let pdpt = e4 & ADDR_MASK;
+            for l3 in 0..512usize {
+                let e3 = pte_r((pdpt as *const Pte).add(l3));
+                if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; }
+                let pd = e3 & ADDR_MASK;
+                for l2 in 0..512usize {
+                    let e2 = pte_r((pd as *const Pte).add(l2));
+                    let va2 = ((l4 as u64) << 39) | ((l3 as u64) << 30) | ((l2 as u64) << 21);
+                    if e2 & PTE_P == 0 { continue; }
+                    if e2 & PTE_PS != 0 {
+                        if e2 & PTE_PRIV != 0 { page(va2, 512, e2, &mut emit); }
+                        continue;
+                    }
+                    let pt = e2 & ADDR_MASK;
+                    for l1 in 0..512usize {
+                        let e1 = pte_r((pt as *const Pte).add(l1));
+                        if e1 & PTE_PRIV == 0 || e1 & PTE_P == 0 { continue; }
+                        page(va2 | ((l1 as u64) << 12), 1, e1, &mut emit);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(r) = cur { emit(&r); }
 }
 
 /// The translation vaddr->phys by the active CR3 (for DMA under a non-identity AS, e.g. a COW process).

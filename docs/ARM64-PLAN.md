@@ -1738,6 +1738,31 @@ under a re-attach. x86's stub moved onto `gdbproto.rs` (its `gdb-stub` gate pass
 no longer faults on an unmapped address and its `qAttached` answers. arm64
 `test-aarch64.sh` **289/0** under TCG (269 before); clippy clean on both.
 
+**On the stand** (`docs/MEASUREMENTS.md` §10.6): the gate under KVM 305/0 with all of the above
+on a Neoverse V1 through KVM (its debug registers, its PMU), the soak 0/200, the race
+detector 0/192. The A/B of §10.11's wake-path step closed one door: reverting the audit
+commit's whole `kernel/src` over HEAD leaves the step in place — it is not the audit's code;
+the next suspect is what else that commit changed (the `tsync` set embedded by `build.rs`,
+a larger image and everything after it moved).
+
+**Phase 7, the first step: the small services** (`services/build-aarch64.sh`). Lua, SQLite,
+QuickJS, BusyBox, mongoose and Redis — the sources each README fetches, cross-built with the
+aarch64 musl at 0x5000_0000, unmodified — run on arm64: the four interpreters to their
+verdicts from a TFS1 disk, mongoose answers HTTP and Redis RESP over virtio-net, zero unknown
+syscalls. Redis runs as a process (`mode=proc`, ext2): on arm64 it forks at start-up to test
+the kernel for Linux's ff1712f953e2 (the dirty bit lost across a write-protect) and reads the
+child's `/proc/self/smaps`. It refused, and was right — `paging::protect` dropped D on both
+machines and arm64's read-only encoding had nowhere to keep it (`docs/ENGINEERING-NOTES.md`
+item 33). D is carried now; `/proc/self/smaps` is generated from the tables
+(`paging::as_runs`: a run of resident private pages with the same rights is a mapping, Rss and
+the shared/private clean/dirty split by the COW refcount and D); `talaria.test=dirtyprot`
+(both machines) fails on each half of the old code. The gate runs the services when
+`kernel/target/a64-services` is built (12 checks; the network two in `test-aarch64-net.sh`).
+The databases, the JVM and ClickHouse still need the arm64 builder (`c7g` + docker).
+
+Gates after both steps: arm64 `test-aarch64.sh` **307/0** under TCG (the services and
+`dirtyprot` included), x86 `test.sh` **497/0** + host 22/0; clippy clean on both.
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its
