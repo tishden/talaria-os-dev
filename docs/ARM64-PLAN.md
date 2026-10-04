@@ -1434,9 +1434,44 @@ host the gate script itself had stopped parsing — an apostrophe inside `${JM:+
 literal for bash 5.2, a quote for 5.1 — so the stand ran it whole and this box did not.
 
 Still open, in order: the allocator sees only the RAM below 4 GiB (850 MB of a
-`c7g.large`'s 3995 — the shared identity window, not an arm64 matter); the ENA's PHC is
-not declared on `c7g.large` (a clock reference wants a type that has it); the netirq
-fix's KVM run; the ordering audit (phase 5); the tails of phase 4.
+`c7g.large`'s 3995 — the shared identity window, not an arm64 matter; closed in §10.9);
+the ENA's PHC is not declared on `c7g.large` (a clock reference wants a type that has
+it); the netirq fix's KVM run; the ordering audit (phase 5); the tails of phase 4.
+
+### 10.9. The RAM above 4 GiB (2026-10-04)
+
+**The workload now gets the machine's memory, not the identity window's.** The main
+allocator still stops at 4 GiB — what it hands out (page tables, kernel stacks, the FS
+cache, DMA rings) is guarded, unguarded and split at 4K, which a 1 GiB identity leaf does
+not allow. What lies above is now the main node's **high area** (`mem::high_init`, after
+the NUMA areas, before the first address space): the largest piece of RAM above 4 GiB
+that no other node owns, mapped by 1 GiB identity leaves at once (an AS copies the
+kernel's PDPT at birth), with its frames returned into the areas' free list. The
+workload's own pages — heaps, stacks, lazy and COW pages, everything that comes through
+`alloc_contig_node` for the main node — take it first; the low memory is left to the
+kernel. On a `c7g.large` that is 850 MB -> ~3.8 GB for the workload; an x86 `c6i.xlarge`
+gets its five gigabytes above 4 back too. The ENA rings' `alloc_high` takes from the same
+bump (a CAS now). The COW refcount table grows to the top of RAM (`rc_grow`, from the high
+area): a `c7g.large`'s RAM ends at 18.9 GiB, past the static table's 16.
+
+Two holes the old limit hid, closed with it (ENGINEERING-NOTES §6.1 item 29): a
+`MAP_FIXED` over a gigabyte that is a 1 GiB identity leaf (`paging::ident_leaf_overlap`
+— the kernel would write a frame there into the process's page) is refused like one
+below 4 GiB, and the high area and the NUMA areas stop below the process heap's gigabyte
+(`PROC_HEAP_BASE`, 192 GiB). `lazy_fault`/`map_fresh_pages` check every frame against the
+active AS, above 4 GiB too. The FS cache's default is a sixteenth of all free memory but
+not more than half of the low.
+
+The gate: `talaria.test=highmem` (the frames are in the area and identity, a returned
+block comes back from the area's list, the low allocator untouched, the refcount reaches
+the top, a process inherits the leaf and its teardown leaves the kernel's, the MAP_FIXED
+refusal) on x86 `microvm` 4 GB and on arm64 `virt` 4 and 17 GB (the second grows the
+table); `forktls` on both runs its 1.5 GB over the high area; the NUMA block checks that
+node 0's area is not node 1's memory. arm64 **237/0** under TCG; x86 `test.sh` **489/0** + host 22/0; clippy clean on both.
+
+Still open: a single high area (the largest piece — a machine with several holes above
+4 GiB uses one of them); huge pages (`alloc_contig_aligned`) still come from the low
+memory; the real fix of the identity window is a kernel direct map in the higher half.
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),

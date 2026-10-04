@@ -1400,7 +1400,8 @@ The full map of the boundaries/the trade-offs/the limits is `docs/PRODUCT.md` (Â
   execute on any core. TLS is in user space (OpenSSL in the workload's binary).
 - The network: 64 TCP + 8 UDP sockets, a backlog of 8 (out of the same 64), 32 epoll instances.
 - The FS: TFS1/TFS2 are read-only; **writing goes to ext2** (a write-back cache of a sixteenth
-  of the free memory within [2 MB, 1 GB], `talaria.fscache=`; 4-way
+  of the free memory, at most half of the memory below 4 GB, within [2 MB, 1 GB],
+  `talaria.fscache=`; 4-way
   with an LRU). The JBD2 journal has been there since v1.1: after a successful `fsync` a crash will not
   leave the metadata in an intermediate state, and with a `talaria.ext2=journal=data` the data
   is recovered as well. What has NOT been fixed by an fsync an unclean stop
