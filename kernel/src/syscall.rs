@@ -2108,6 +2108,9 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 if pages == 0 { return (-22i64) as u64; }
                 let vaddr = if fixed { f.a1 & !0xFFF } else { crate::proc::mmap_alloc(f.a2) };
                 if vaddr < 0x1_0000_0000 && fixed { return (-22i64) as u64; } // we do not recut the identity area
+                // ...nor its gigabytes above 4 GB (the high area, the NUMA areas, the 1G MMIO
+                // windows): the kernel reaches those frames at their identity address in THIS AS too.
+                if fixed && crate::paging::ident_leaf_overlap(vaddr, pages) { return (-22i64) as u64; }
                 // MAP_FIXED_NOREPLACE (0x100000): "put it exactly here, but overwrite NOTHING".
                 // The JVM probes the addresses for its heap exactly that way (the kernel 5.15 in uname -> the flag is on)
                 // and moves to the next candidate by an EEXIST. While the flag was ignored,

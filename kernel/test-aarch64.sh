@@ -263,6 +263,16 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     assert 'forktls: matched 100, did not match 0'                            'forktls: a hundred forks of a 1.5 GB address space — the TPIDR_EL0 and the TLS of every child are intact'
     assert 'forktls: ALL OK'                                                  'forktls: the outcome'
     assertnot "$BAD|THE PARENT is spoilt|ATTENTION: the COW refcount table|\[fault\]" 'forktls: the parent is not spoilt, no fault over a hundred forks'
+    assert 'mem: the high area 0x100000000\.\.0x140000000 \(1024 MB\)'       'forktls: the guest RAM above 4 GB (virt: 1..5 GB) is the high area the forks run over'
+    # The main node's memory above 4 GB (`mem::high_init`): 850 MB of a c7g.large's
+    # 3995 was all a workload got before. 4 GB crosses 4 GB; 17 GB reaches past the
+    # static refcount table's 16 GB, as a c7g.large's RAM (16-18.9 GiB) does.
+    run 120 "talaria.test=highmem" ext2 4096
+    assert 'highmem: ALL OK'                                                  'highmem: the workload frames above 4 GB — identity, their own free list, the refcount, the AS leaf, MAP_FIXED refused'
+    run 120 "talaria.test=highmem" ext2 17408
+    assert 'mem: the COW refcount table: [0-9]+ KB at 0x[0-9a-f]+, it covers up to 0x480000000' 'highmem: RAM past 16 GB grows the refcount table to the top'
+    assert 'highmem: ALL OK'                                                  'highmem: the same on 17 GB (the area 14 GB, the grown table)'
+    assertnot "$BAD|\[fault\]"                                              'highmem: no trap'
     run 150 "talaria.mode=proc" forkap
     assert 'crashme: forkap ALL OK'                                           'forkap: 40 children on the secondaries are born, work and are reaped by waitpid (an ignored SIGCHLD does not interrupt the wait)'
     assert "it has left the tables of the finished process onto the kernel.s CR3" 'forkap: an idling secondary leaves the tables of a dead process'

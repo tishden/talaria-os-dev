@@ -1611,7 +1611,9 @@ pub fn lazy_fault(vaddr: u64) -> bool {
         for _ in 0..8 {
             match crate::mem::alloc_contig_node(1, node) {
                 Some(f) => {
-                    if virt_to_phys(f) == f || f >= 0x1_0000_0000 { fr = f; break; }
+                    // Above 4 GB too: the high area's gigabytes are identity leaves in every
+                    // AS, and one a process has overlaid is not (`ident_leaf_overlap`).
+                    if virt_to_phys(f) == f { fr = f; break; }
                     rejected[nrej] = f; nrej += 1;
                 }
                 None => break,
@@ -1654,7 +1656,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
             if e2 & PTE_P != 0 || e2 & PTE_LAZY == 0 || e2 & PTE_PNONE != 0 { break; }
             if e2 & (LAZY_W | LAZY_X) != e & (LAZY_W | LAZY_X) { break; } // different rights — a different mmap
             let f2 = match crate::mem::alloc_contig_node(1, node) { Some(f) => f, None => break };
-            if virt_to_phys(f2) != f2 && f2 < 0x1_0000_0000 { crate::mem::free_contig(f2, 1); break; }
+            if virt_to_phys(f2) != f2 { crate::mem::free_contig(f2, 1); break; }
             core::ptr::write_bytes(f2 as *mut u8, 0, 4096);
             let mut n2 = f2 | PTE_P | PTE_US | PTE_PRIV;
             if e2 & LAZY_W != 0 { n2 |= PTE_RW; }
@@ -1682,7 +1684,7 @@ pub fn map_fresh_pages(vaddr: u64, pages: u64) -> bool {
     for _ in 0..pages {
         // the frame must not coincide with a privately mapped identity vaddr of this AS (a write through identity)
         let mut fr = 0u64;
-        for _ in 0..8 { match crate::mem::alloc_contig_node(1, node) { Some(f) => { if virt_to_phys(f) == f || f >= 0x1_0000_0000 { fr = f; break; } }
+        for _ in 0..8 { match crate::mem::alloc_contig_node(1, node) { Some(f) => { if virt_to_phys(f) == f { fr = f; break; } }
             None => return false } }
         if fr == 0 { return false; }
         // SAFETY: P1 — a frame straight from the allocator, zeroed through the identity map before
@@ -1919,6 +1921,29 @@ static KERNEL_PML4: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU6
 /// a 1G entry into the kernel PDPT. Call it BEFORE the processes' address spaces are created
 /// (they copy the kernel PDPT entirely). It returns the vaddr (== phys) or 0.
 pub fn map_ram_1g(phys: u64) -> u64 { map_1g(phys, true) }
+/// Does [vaddr, vaddr+pages*4K) touch a gigabyte the reference kernel table maps by a 1G
+/// identity leaf (`map_1g`: the high area, the NUMA areas, the MMIO windows). Every AS
+/// carries a copy of those leaves, and the kernel reaches the frames there at their
+/// identity address whatever AS is active — a process mapping of its own over one would
+/// turn the kernel's write into a write into the process's page. `mmap` refuses such a
+/// MAP_FIXED the way it refuses one below 4 GB.
+pub fn ident_leaf_overlap(vaddr: u64, pages: u64) -> bool {
+    let end = vaddr.saturating_add(pages * 4096);
+    let mut g = vaddr & !((1u64 << 30) - 1);
+    // SAFETY: P1 + P2 — a read-only walk of the reference kernel table.
+    unsafe {
+        let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
+        let pml4 = if k != 0 { k as *const Pte } else { cr3_root() as *const Pte };
+        while g < end && g < USER_TOP {
+            let e4 = pte_r(pml4.add(((g >> 39) & 0x1FF) as usize));
+            if e4 & PTE_P == 0 { g = ((g >> 39) + 1) << 39; continue; }
+            let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(((g >> 30) & 0x1FF) as usize));
+            if g >= 4u64 << 30 && e3 & PTE_P != 0 && e3 & PTE_PS != 0 { return true; }
+            g += 1 << 30;
+        }
+    }
+    false
+}
 /// The same for a device's MMIO registers (uncached).
 pub fn map_mmio_1g(phys: u64) -> u64 { map_1g(phys, false) }
 fn map_1g(phys: u64, cached: bool) -> u64 {
@@ -1971,6 +1996,16 @@ pub fn kernel_pdpt_entry(l3: usize) -> u64 {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
         let pml4 = if k != 0 { k as *const Pte } else { cr3_root() as *const Pte };
         pte_r(((pte_r(pml4) & ADDR_MASK) as *const Pte).add(l3 & 0x1FF))
+    }
+}
+/// The same entry in a given AS (the gate `highmem`: a process inherits the kernel's leaf),
+/// decoded as `kernel_pdpt_entry` decodes it — a raw read differs on arm64.
+pub fn pdpt_entry_in(pml4_phys: u64, l3: usize) -> u64 {
+    // SAFETY: P1 + P2 — one read of the AS `pml4_phys`, which the caller owns.
+    unsafe {
+        let e4 = pte_r(pml4_phys as *const Pte);
+        if e4 & PTE_P == 0 { return 0; }
+        pte_r(((e4 & ADDR_MASK) as *const Pte).add(l3 & 0x1FF))
     }
 }
 

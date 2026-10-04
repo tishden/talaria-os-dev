@@ -884,7 +884,7 @@ unsafe fn load_elf_into_space(pml4: u64, elf: &[u8]) -> u64 {
 }
 
 const PROC_STACK_TOP: u64 = 0x7fff_f000_0000; // the top of the process's private stack
-const PROC_HEAP_BASE: u64 = 0x30_0000_0000;   // the base of the process's private heap (192 GB, a private region)
+pub const PROC_HEAP_BASE: u64 = 0x30_0000_0000;   // the base of the process's private heap (192 GB, a private region)
 const PROC_HEAP_FRAMES: u64 = 4096;           // 16 MB of heap per process
 
 /// Map the process's private heap (RW+NX+US, zeroed). Returns (base, top).

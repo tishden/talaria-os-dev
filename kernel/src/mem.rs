@@ -20,8 +20,12 @@ fn kernel_top() -> u64 {
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 static END: AtomicU64 = AtomicU64::new(0);
-// A separate RAM region ABOVE 4 GB (on EC2 the memory map contains it): it is needed for
-// the ENA rings — a Nitro device accepts them only in that area (see ena.rs).
+// THE MAIN NODE'S HIGH AREA: the RAM above 4 GB that no other node owns (`high_init`).
+// It is mapped identity by 1 GB leaves before the first process address space exists, as
+// the per-node areas are, and it serves the same consumers: the workload's memory (heaps,
+// stacks, lazy and COW pages) through `alloc_contig_node`, and the ENA rings (`alloc_high`
+// — a Nitro device accepts them only above 4 GB, see ena.rs). 0 — there is no such area.
+static HIGH_BASE: AtomicU64 = AtomicU64::new(0);
 static HIGH_NEXT: AtomicU64 = AtomicU64::new(0);
 static HIGH_END: AtomicU64 = AtomicU64::new(0);
 
@@ -52,10 +56,6 @@ pub fn init(start_info: u64) {
             let e = &*tbl.add(i);
             let kind = match e.typ { 1 => "RAM", 2 => "reserved", 3 => "ACPI", 4 => "NVS", _ => "?" };
             crate::println!("    [{:>2}] {:#012x}..{:#012x} {}", i, e.addr, e.addr + e.size, kind);
-            if e.typ == 1 && e.addr >= (4u64 << 30) && e.size > HIGH_END.load(Ordering::Relaxed).saturating_sub(HIGH_NEXT.load(Ordering::Relaxed)) {
-                HIGH_NEXT.store((e.addr + FRAME - 1) & !(FRAME - 1), Ordering::Relaxed);
-                HIGH_END.store(e.addr + e.size, Ordering::Relaxed);
-            }
             if e.typ == 1 {
                 total_ram += e.size;
                 let k = RAM_N.load(Ordering::Relaxed) as usize;
@@ -88,8 +88,8 @@ pub fn init(start_info: u64) {
                 // turned out to be ABOVE 4 GB: the very first alloc_frame for the PML4 gave
                 // the frame 0x1_0000_0000, while a write into it gave a #PF before our own tables
                 // were even brought up. The instance silently fell into a crash dump, and the type
-                // looked "unsupported". The memory above 4 GB is available through a
-                // separate allocator (alloc_high) — it is mapped explicitly.
+                // looked "unsupported". The memory above 4 GB is the high area (`high_init`),
+                // mapped explicitly and handed out only to the consumers that can take it.
                 let end = (e.addr + e.size).min(4u64 << 30);
                 if end > base && end - base > best_len { best_len = end - base; best_base = base; }
             }
@@ -100,29 +100,145 @@ pub fn init(start_info: u64) {
         crate::println!("talaria: RAM in total {} MB; the frame allocator: {:#x}..{:#x} ({} MB)",
             total_ram / 1048576, NEXT.load(Ordering::Relaxed), END.load(Ordering::Relaxed),
             (END.load(Ordering::Relaxed) - NEXT.load(Ordering::Relaxed)) / 1048576);
-        // LOUDLY, WHEN THE MACHINE CANNOT SEE ITS MEMORY. On the stand (c6i.xlarge, 8 GB)
-        // the allocator sees 3021 MB, and it is from THAT number that `ext2::cache_pick` takes
-        // a sixteenth for the block cache (180 MB against Linux's page cache
-        // over the whole machine). For three sessions that stood as a "known" item, and
-        // not a single boot line said anything about it.
-        let seen = (END.load(Ordering::Relaxed) - NEXT.load(Ordering::Relaxed)) / 1048576;
-        if total_ram / 1048576 > seen * 3 / 2 {
-            crate::println!("talaria: ATTENTION: the allocator sees {} MB out of the machine's {} MB (identity 0..4 GB) — the FS block cache is by default \
-                computed from the VISIBLE share; set fscache= in the manifest explicitly",
-                seen, total_ram / 1048576);
+        // What the machine cannot see and what the refcount table does not cover is said
+        // once the high area is known (`high_init`, after ACPI) — here it would be a lie
+        // about every machine with RAM above 4 GB.
+    }
+}
+
+/// How much memory the allocators can hand out at all: the main one, the high area and the
+/// other nodes' areas (the bump extents, not what is left).
+fn seen_bytes() -> u64 {
+    let mut s = END.load(Ordering::Relaxed).saturating_sub(ALLOC_BASE.load(Ordering::Relaxed));
+    s += HIGH_END.load(Ordering::Relaxed).saturating_sub(HIGH_BASE.load(Ordering::Relaxed));
+    for n in 0..MAX_NODES {
+        s += NODE_END[n].load(Ordering::Relaxed).saturating_sub(NODE_BASE[n].load(Ordering::Relaxed));
+    }
+    s
+}
+
+/// The ceiling of the identity map above 4 GB. A process's private heap is mapped at
+/// `user::PROC_HEAP_BASE` in the same PML4 slot as the identity gigabytes, so an
+/// identity leaf there would be overlaid by the heap in every process — and the kernel,
+/// writing a frame at its identity address under that AS, would write into the heap.
+fn ident_ceiling() -> u64 { crate::user::PROC_HEAP_BASE }
+
+/// Build the main node's high area: the largest piece of RAM above 4 GB (and below
+/// `ident_ceiling`) that no other node's area holds, mapped identity by 1 GB at once.
+///
+/// WHY IT IS NEEDED. The main allocator stops at 4 GB (A2 above), and that was the whole
+/// machine's memory as far as a workload could tell: 850 MB of a `c7g.large`'s 3995 (its
+/// RAM is 1-2 GiB and 16-18.9 GiB), 3 GB of a `c6i.xlarge`'s 8. The frames above serve
+/// what tolerates a 1 GB identity leaf: a process's own pages are mapped by 4K leaves
+/// at their user addresses, and the kernel touches them only at their identity address
+/// (zeroing, a COW copy) — never a guard or an `unguard`. The kernel's own structures
+/// (page tables, kernel stacks, the FS cache) stay in the low memory, which is now left
+/// to them instead of being eaten by the workload's heaps.
+///
+/// WHEN. After the node areas (the piece must not be another node's) and before the first
+/// process address space — the same condition as theirs: an AS copies the kernel's PDPT
+/// at its birth, and a leaf laid later is not in it.
+fn high_init() {
+    let main = MAIN_NODE.load(Ordering::Relaxed) as u8;
+    let ceil = ident_ceiling();
+    let nram = (RAM_N.load(Ordering::Relaxed) as usize).min(MAX_RAM);
+    let (mut best_b, mut best_e) = (0u64, 0u64);
+    for k in 0..nram {
+        let (rb, rl) = unsafe {
+            (core::ptr::read_volatile(core::ptr::addr_of!(RAM_BASE[k])),
+             core::ptr::read_volatile(core::ptr::addr_of!(RAM_LEN[k])))
+        };
+        // A region may straddle 4 GB (QEMU's `virt` puts RAM at 1 GB, so 4 GB of it ends
+        // at 5): the part below belongs to the main allocator, the part above is ours.
+        let mut b = (rb.max(4u64 << 30).max(kernel_top()) + FRAME - 1) & !(FRAME - 1);
+        let e = (rb + rl).min(ceil) & !(FRAME - 1);
+        // The runs between the other nodes' areas.
+        while b < e {
+            let mut run_end = e;
+            let mut inside = 0u64;
+            for n in 0..MAX_NODES {
+                let (nb, ne) = (NODE_BASE[n].load(Ordering::Relaxed), NODE_END[n].load(Ordering::Relaxed));
+                if ne <= nb { continue; }
+                if b >= nb && b < ne { inside = ne; break; }
+                if nb > b && nb < run_end { run_end = nb; }
+            }
+            if inside != 0 { b = (inside + FRAME - 1) & !(FRAME - 1); continue; }
+            // With an SRAT the piece must be the main node's: a foreign one would hand the
+            // main node's workload remote memory under the name of its own.
+            let own = |a: u64| { let n = crate::acpi::node_of_phys(a); n == 255 || n == main || main == 255 };
+            if run_end - b > best_e - best_b && own(b) && own(run_end - 1) { best_b = b; best_e = run_end; }
+            b = run_end;
         }
-        // THE REFCOUNT TABLE MUST COVER EVERYTHING THE ALLOCATOR HANDS OUT.
-        // A frame outside it is considered shared (see `rc_get`), that is, there will be no
-        // corruption — but there will be extra copies and leaks, and one must know about that IN ADVANCE
-        // rather than from a workload's crash an hour later. Previously the table covered 1 GB with
-        // three gigabytes of the allocator, and not a single line said anything about it.
-        let top_frame = END.load(Ordering::Relaxed) >> 12;
-        if top_frame > rc_capacity_frames() {
-            crate::println!("talaria: ATTENTION: the COW refcount table covers {} MB, while the allocator hands out up to {:#x} ({} MB) — the frames above \
-                will be considered shared (extra copies and leaks, but not corruption)",
-                rc_capacity_frames() * 4096 / 1048576, END.load(Ordering::Relaxed),
-                END.load(Ordering::Relaxed) / 1048576);
+    }
+    if best_e > best_b {
+        // Mapped AT ONCE, for the reason `numa_init` gives; a piece that cannot be mapped is
+        // not slow memory but a guaranteed fault, so it is dropped whole.
+        let mut g = best_b & !((1u64 << 30) - 1);
+        let mut ok = true;
+        while g < best_e { if crate::paging::map_ram_1g(g) == 0 { ok = false; break; } g += 1 << 30; }
+        if ok {
+            HIGH_BASE.store(best_b, Ordering::Relaxed);
+            HIGH_NEXT.store(best_b, Ordering::Relaxed);
+            HIGH_END.store(best_e, Ordering::Relaxed);
+            crate::println!("mem: the high area {:#x}..{:#x} ({} MB) — the workload's memory above 4 GB",
+                best_b, best_e, (best_e - best_b) / 1048576);
+        } else {
+            crate::println!("mem: the high area {:#x}..{:#x} is NOT mapped — it is dropped", best_b, best_e);
         }
+    }
+    rc_grow();
+    // LOUDLY, WHEN THE MACHINE CANNOT SEE ITS MEMORY. On the stand (c6i.xlarge, 8 GB)
+    // the allocator once saw 3021 MB, and it is from THAT number that `ext2::cache_pick` takes
+    // a sixteenth for the block cache (180 MB against Linux's page cache
+    // over the whole machine). For three sessions that stood as a "known" item, and
+    // not a single boot line said anything about it.
+    let (seen, total) = (seen_bytes() / 1048576, ram_total_frames() * FRAME / 1048576);
+    if total > seen * 3 / 2 {
+        crate::println!("talaria: ATTENTION: the allocators see {} MB out of the machine's {} MB — the FS block cache is by default \
+            computed from the VISIBLE share; set fscache= in the manifest explicitly", seen, total);
+    }
+}
+
+/// The top of everything the allocators hand out (the refcount table must reach it).
+fn alloc_top() -> u64 {
+    let mut t = END.load(Ordering::Relaxed).max(HIGH_END.load(Ordering::Relaxed));
+    for n in 0..MAX_NODES { t = t.max(NODE_END[n].load(Ordering::Relaxed)); }
+    t
+}
+
+/// Make the refcount table reach `alloc_top`. The static table covers 16 GB; a machine
+/// whose RAM goes higher (a `c7g.large` has its RAM at 16-18.9 GiB, a two-socket one has
+/// its second node's above 130) gets a table from the high area — one byte per frame, a
+/// quarter of a per mille of the memory it describes. Called once, before any process.
+fn rc_grow() {
+    // THE REFCOUNT TABLE MUST COVER EVERYTHING THE ALLOCATOR HANDS OUT.
+    // A frame outside it is considered shared (see `rc_get`), that is, there will be no
+    // corruption — but there will be extra copies and leaks, and one must know about that IN ADVANCE
+    // rather than from a workload's crash an hour later. Previously the table covered 1 GB with
+    // three gigabytes of the allocator, and not a single line said anything about it.
+    let top = alloc_top();
+    let need = top >> 12;
+    if need <= rc_capacity_frames() { return; }
+    let pages = need.div_ceil(FRAME);
+    let t = alloc_high(pages, FRAME).or_else(|| {
+        let a = alloc_contig(pages)?;
+        unsafe { core::ptr::write_bytes(a as *mut u8, 0, (pages * FRAME) as usize) };
+        Some(a)
+    });
+    match t {
+        Some(a) => {
+            // The old table's contents go with it: nothing is shared yet at this point, but
+            // the copy makes the switch correct at any moment rather than at this one only.
+            let (old, oldlen) = rc_table();
+            unsafe { core::ptr::copy_nonoverlapping(old as *const u8, a as *mut u8, oldlen) };
+            // The length first: a reader that sees the new base must see its length too.
+            RC_LEN.store(pages * FRAME, Ordering::Relaxed);
+            RC_PTR.store(a, Ordering::Release);
+            crate::println!("mem: the COW refcount table: {} KB at {:#x}, it covers up to {:#x}", pages * 4, a, pages * FRAME * FRAME);
+        }
+        None => crate::println!("talaria: ATTENTION: the COW refcount table covers {} MB, while the allocators hand out up to {:#x} ({} MB) — the frames above \
+            will be considered shared (extra copies and leaks, but not corruption)",
+            rc_capacity_frames() * 4096 / 1048576, top, top / 1048576),
     }
 }
 
@@ -146,10 +262,15 @@ static NODE_END: [AtomicU64; MAX_NODES] = [const { AtomicU64::new(0) }; MAX_NODE
 /// The node the MAIN allocator belongs to (255 — there is no SRAT).
 static MAIN_NODE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(255);
 
-/// Build the per-node areas. It is called AFTER `acpi::init` (before that there are no
-/// nodes yet). Without a SRAT it does nothing, and the whole further path stays the former one.
+/// Build the per-node areas and then the main node's high area (`high_init`). It is called
+/// AFTER `acpi::init` (before that there are no nodes yet). Without a SRAT there are no node
+/// areas, and the high area is all the RAM above 4 GB.
 pub fn numa_init() {
-    if crate::acpi::nr_mem_regions() == 0 { return; }
+    if crate::acpi::nr_mem_regions() != 0 { node_areas_init(); }
+    high_init();
+}
+
+fn node_areas_init() {
     let main = crate::acpi::node_of_phys(NEXT.load(Ordering::Relaxed));
     MAIN_NODE.store(main as u32, Ordering::Relaxed);
     // THE INTERSECTION of two maps: the SRAT says which node a range belongs to, while
@@ -168,7 +289,10 @@ pub fn numa_init() {
                  core::ptr::read_volatile(core::ptr::addr_of!(RAM_LEN[k])))
             };
             let mut b = sb.max(rb).max(kernel_top());
-            let e = (sb + sl).min(rb + rl);
+            // Not above `ident_ceiling`: on a two-socket machine with 256 GB the second
+            // node's RAM crossed the process heap's gigabyte, and every process's heap
+            // overlaid the identity of the frames there.
+            let e = (sb + sl).min(rb + rl).min(ident_ceiling());
             if e <= b { continue; }
             // Do not climb into the main allocator: it already hands out those frames.
             if b < me && e > mb { b = me; if e <= b { continue; } }
@@ -226,9 +350,13 @@ pub fn main_node() -> u8 { MAIN_NODE.load(Ordering::Relaxed) as u8 }
 /// exhausted, the frames will come from the main allocator. Otherwise the NUMA policy would be able
 /// to bring down the workload's launch on a machine where its node has run out — and that is worse than
 /// slow memory.
+///
+/// The main node's memory is its high area first and the low allocator after it: the
+/// callers are the workload's pages, and the low memory is what the kernel's own
+/// structures cannot do without (`high_init`).
 pub fn alloc_contig_node(n: u64, node: u8) -> Option<u64> {
     let idx = node as usize;
-    if node == 255 || idx >= MAX_NODES || node == main_node() { return alloc_contig(n); }
+    if node == 255 || idx >= MAX_NODES || node == main_node() { return alloc_main(n); }
     // This node's free blocks (returned by free_contig) come before the bump.
     if let Some(a) = fl_node_take(n, NODE_BASE[idx].load(Ordering::Relaxed), NODE_END[idx].load(Ordering::Relaxed)) {
         crate::metrics::add_frames(n);
@@ -236,9 +364,9 @@ pub fn alloc_contig_node(n: u64, node: u8) -> Option<u64> {
     }
     loop {
         let base = NODE_NEXT[idx].load(Ordering::Relaxed);
-        if base == 0 { return alloc_contig(n); }         // the node has no area of its own
+        if base == 0 { return alloc_main(n); }         // the node has no area of its own
         let end = base + n * FRAME;
-        if end > NODE_END[idx].load(Ordering::Relaxed) { return alloc_contig(n); } // the node is exhausted
+        if end > NODE_END[idx].load(Ordering::Relaxed) { return alloc_main(n); } // the node is exhausted
         if NODE_NEXT[idx].compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
         // There is NOTHING to map here: the whole area is mapped in `numa_init`, before
         // the first process address space is created (see there — why
@@ -246,6 +374,27 @@ pub fn alloc_contig_node(n: u64, node: u8) -> Option<u64> {
         crate::metrics::add_frames(n);
         return Some(base);
     }
+}
+
+/// The main node's high area as it was built (the gate `highmem`; (0, 0) — there is none).
+pub fn high_area() -> (u64, u64) { (HIGH_BASE.load(Ordering::Relaxed), HIGH_END.load(Ordering::Relaxed)) }
+
+/// The main node's frames for the workload: the high area, then the low allocator.
+fn alloc_main(n: u64) -> Option<u64> {
+    if n == 0 { return None; }
+    let (hb, he) = (HIGH_BASE.load(Ordering::Relaxed), HIGH_END.load(Ordering::Relaxed));
+    if hb != 0 {
+        if let Some(a) = fl_node_take(n, hb, he) { crate::metrics::add_frames(n); return Some(a); }
+        loop {
+            let base = HIGH_NEXT.load(Ordering::Relaxed);
+            let end = base + n * FRAME;
+            if end > he { break; }
+            if HIGH_NEXT.compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
+            crate::metrics::add_frames(n);
+            return Some(base);
+        }
+    }
+    alloc_contig(n)
 }
 
 // ── the free list of released contiguous blocks (real reclaim, not only a bump) ──
@@ -270,13 +419,19 @@ fn fl_unlock() { FL_LOCK.store(false, Ordering::Release); }
 // a kernel stack — that is, to code that expects a 4K leaf and calls `unguard`.
 // The error class is the same as "the largest RAM region turned out to be above 4 GB" from A2:
 // a silent crash where the memory is simply "not like that".
-const FLN_MAX: usize = 128;
+//
+// The main node's high area shares this list (its frames are of the same kind), and with it
+// the traffic of every process's exit — as many slots as the main list has, because a
+// block that finds the list full is lost.
+const FLN_MAX: usize = 512;
 static mut FLN_ADDR: [u64; FLN_MAX] = [0; FLN_MAX];
 static mut FLN_PAGES: [u64; FLN_MAX] = [0; FLN_MAX];
 static mut FLN_N: usize = 0;
 
-/// Does the address lie in the area of some node (not of the main allocator).
+/// Does the address lie in the area of some node or in the high area (not in the main allocator).
 fn in_node_area(addr: u64) -> bool {
+    let hb = HIGH_BASE.load(Ordering::Relaxed);
+    if hb != 0 && addr >= hb && addr < HIGH_END.load(Ordering::Relaxed) { return true; }
     for n in 0..MAX_NODES {
         let b = NODE_BASE[n].load(Ordering::Relaxed);
         if b != 0 && addr >= b && addr < NODE_END[n].load(Ordering::Relaxed) { return true; }
@@ -320,21 +475,19 @@ fn fl_node_put(addr: u64, n: u64) {
     fl_unlock();
 }
 
-/// Allocate n contiguous frames from RAM ABOVE 4 GB with the alignment align
-/// (in bytes) and map them into the tables (identity, cacheable). None — there is no
-/// such memory. It is used for the ENA rings.
+/// Allocate n contiguous zeroed frames from the high area (RAM ABOVE 4 GB) with the
+/// alignment align (in bytes). None — there is no such memory. It is used for the ENA rings
+/// and the grown refcount table; the area is mapped already (`high_init`).
 pub fn alloc_high(pages: u64, align: u64) -> Option<u64> {
-    let mut cur = HIGH_NEXT.load(Ordering::Relaxed);
-    if cur == 0 { return None; }
-    cur = (cur + align - 1) & !(align - 1);
-    let end = cur + pages * FRAME;
-    if end > HIGH_END.load(Ordering::Relaxed) { return None; }
-    HIGH_NEXT.store(end, Ordering::Relaxed);
-    let mut g = cur & !((1u64 << 30) - 1);
-    while g < end {
-        if crate::paging::map_ram_1g(g) == 0 { return None; }
-        g += 1 << 30;
-    }
+    let cur = loop {
+        let base = HIGH_NEXT.load(Ordering::Relaxed);
+        if base == 0 { return None; }
+        let cur = (base + align - 1) & !(align - 1);
+        let end = cur + pages * FRAME;
+        if end > HIGH_END.load(Ordering::Relaxed) { return None; }
+        // A CAS, not a store: the workload's frames come from the same bump (`alloc_main`).
+        if HIGH_NEXT.compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_ok() { break cur; }
+    };
     unsafe { core::ptr::write_bytes(cur as *mut u8, 0, (pages * FRAME) as usize) };
     Some(cur)
 }
@@ -493,11 +646,14 @@ pub fn frame_is_free(phys: u64) -> bool {
     hit
 }
 
-/// How many pages there are in the free list (for telemetry/tests).
+/// How many pages there are in the free lists — the main one and the areas' (for telemetry/tests).
 pub fn free_list_pages() -> u64 {
     fl_lock();
     let mut s = 0u64;
-    unsafe { for i in 0..FL_N { s += FL_PAGES[i]; } }
+    unsafe {
+        for i in 0..FL_N { s += FL_PAGES[i]; }
+        for i in 0..FLN_N { s += FLN_PAGES[i]; }
+    }
     fl_unlock();
     s
 }
@@ -507,10 +663,30 @@ pub fn free_list_pages() -> u64 {
 pub fn alloc_base() -> u64 { ALLOC_BASE.load(Ordering::Relaxed) }
 static ALLOC_BASE: AtomicU64 = AtomicU64::new(0);
 
-/// How many frames are free.
+/// How many frames are free: the bumps' remainders — the main allocator, the high area and
+/// the nodes' areas (without the free lists, see `free_total_frames`).
 pub fn free_frames() -> u64 {
-    let n = NEXT.load(Ordering::Relaxed); let e = END.load(Ordering::Relaxed);
-    if e > n { (e - n) / FRAME } else { 0 }
+    let left = |n: u64, e: u64| if e > n { (e - n) / FRAME } else { 0 };
+    let mut s = left(NEXT.load(Ordering::Relaxed), END.load(Ordering::Relaxed));
+    if HIGH_BASE.load(Ordering::Relaxed) != 0 {
+        s += left(HIGH_NEXT.load(Ordering::Relaxed), HIGH_END.load(Ordering::Relaxed));
+    }
+    for n in 0..MAX_NODES {
+        if NODE_BASE[n].load(Ordering::Relaxed) != 0 {
+            s += left(NODE_NEXT[n].load(Ordering::Relaxed), NODE_END[n].load(Ordering::Relaxed));
+        }
+    }
+    s
+}
+/// The low allocator's remainder alone (bump + its free list): what the kernel's own
+/// structures — page tables, kernel stacks, the FS block cache — can still get.
+pub fn free_low_frames() -> u64 {
+    let (n, e) = (NEXT.load(Ordering::Relaxed), END.load(Ordering::Relaxed));
+    let mut s = if e > n { (e - n) / FRAME } else { 0 };
+    fl_lock();
+    unsafe { for i in 0..FL_N { s += FL_PAGES[i]; } }
+    fl_unlock();
+    s
 }
 /// The full free amount: the bump's remainder + the free list (reclaim). For telemetry/leak control:
 /// free_frames alone understates it — the returned blocks live in the free list without moving NEXT.
@@ -564,22 +740,38 @@ fn println_mem(msg: &str) { crate::println!("talaria: mem: {}", msg); }
 // type the stand runs on), that is 4 MB of .bss. And a frame OUTSIDE the table is considered
 // SHARED: an extra copy and a leaked frame are a price that can be paid,
 // the silent corruption of somebody else's memory is not.
+//
+// A machine whose RAM reaches higher gets a larger table at the bring-up (`rc_grow`): RC_PTR
+// and RC_LEN then name it, and the static one is no longer used. 0 — the static table.
 const RC_MAX: usize = 1 << 22; // 4 194 304 frames = 16 GB
 static mut REFCNT: [u8; RC_MAX] = [0; RC_MAX];
+static RC_PTR: AtomicU64 = AtomicU64::new(0);
+static RC_LEN: AtomicU64 = AtomicU64::new(0);
 /// How many times the counter was asked about a frame OUTSIDE the table. A zero in a healthy system;
 /// a non-zero one means forced copies and leaks rather than corruption, but the machine has more
 /// memory than the table covers, and one must know about that.
 pub static RC_OUTSIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The table in use: (its base, how many frames it covers).
+#[inline]
+fn rc_table() -> (*mut u8, usize) {
+    let p = RC_PTR.load(Ordering::Acquire);
+    if p == 0 { (core::ptr::addr_of_mut!(REFCNT) as *mut u8, RC_MAX) }
+    else { (p as *mut u8, RC_LEN.load(Ordering::Relaxed) as usize) }
+}
 /// How many frames the refcount table covers (for the check at the bring-up).
-pub fn rc_capacity_frames() -> u64 { RC_MAX as u64 }
+pub fn rc_capacity_frames() -> u64 { rc_table().1 as u64 }
 
 /// Set a frame's refcount (the number of COW references).
-pub fn rc_set(phys: u64, v: u8) { let i = (phys >> 12) as usize; if i < RC_MAX { unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(REFCNT[i]), v); } }
-    }
+pub fn rc_set(phys: u64, v: u8) {
+    let i = (phys >> 12) as usize;
+    let (t, len) = rc_table();
+    if i < len { unsafe { core::ptr::write_volatile(t.add(i), v); } }
+}
 /// Get the refcount. OUTSIDE the table it is "shared" (2) rather than "free" (0): see the header.
 pub fn rc_get(phys: u64) -> u8 {
     let i = (phys >> 12) as usize;
-    if i < RC_MAX { unsafe { core::ptr::read_volatile(core::ptr::addr_of!(REFCNT[i])) } }
+    let (t, len) = rc_table();
+    if i < len { unsafe { core::ptr::read_volatile(t.add(i)) } }
     else { RC_OUTSIDE.fetch_add(1, core::sync::atomic::Ordering::Relaxed); 2 }
 }
 /// +1 reference (for a fork). If it was 0 -> it becomes 2 (the parent+the child).
