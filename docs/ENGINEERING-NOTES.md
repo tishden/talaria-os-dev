@@ -620,7 +620,12 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     `MAP_FIXED` over a gigabyte mapped by a 1 GB identity leaf (the NUMA areas, the
     MMIO windows) turned the kernel's next write to a frame there into a write into the
     process's page, and a NUMA node's area could cross the gigabyte of the process
-    heap (`PROC_HEAP_BASE`, 192 GB) on a 256 GB machine. Both are refused now.
+    heap (`PROC_HEAP_BASE`, 192 GB) on a 256 GB machine. Both are refused now. And
+    the first live run named a third: the workload's 2 MB pages still came from the
+    low memory, and on the real machine's shape (850 MB low) `forktls` ate it and the
+    kernel panicked for a page table — under QEMU the low memory was 3 GB. **The
+    emulator's memory shape is not the machine's**: the gate now cuts the low
+    allocator to the machine's size (`talaria.lowmem=850`) and reproduces the panic.
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
