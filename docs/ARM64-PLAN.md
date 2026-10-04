@@ -17,9 +17,12 @@ ordering half: the SGI's `dsb`, the TLB invalidations' `dsb ishst` and their rea
 store-release where a stack is freed, an arm64 `membarrier` nobody acknowledged. virtio-pci
 drives the NIC on both machines (the UEFI paths have a network now), bridges are numbered
 when no firmware did, the zero-syscall cell runs on arm64, the RAM above 4 GB is kept in up
-to four pieces. `test-aarch64.sh` 267/0 under TCG, `test.sh` 496/0 + 22/0. The KVM confirmation
-and the measured `SeqCst` downgrades are what phase 5 still owes (§10.10's last list), with
-libtsync's tier-2 stall (shared, found by the port).
+to four pieces, libtsync runs on arm64 — and its port found the generic timer's interrupt
+storm after a borrowed deadline (every timed wait). `test-aarch64.sh` 269/0 under TCG,
+`test.sh` 496/0 + 22/0; on the KVM stand the gate 268/0, the soak and the parallel race
+detector 0 failures with `piperace` in both, the netirq fix confirmed. The measured `SeqCst`
+downgrades are what phase 5 still owes (§10.10's last list), with the price the audit put on
+the wake path (futex/condvar RTT up 11 %/32 % on the stand).
 
 Status (2026-10-01, branch `arm64-port`): **phase 4 is done on QEMU `virt` and the product
 boot path of phase 6 runs under `edk2`.** The network over virtio-mmio (the card's line
@@ -1604,12 +1607,21 @@ a device on a bare machine).
   `procdemo`, `fiber`, `syncbench`. `kernel/user/aarch64/tsync/` is embedded by `build.rs`
   as `tsync/<name>`, as on x86.
 
-**Found on the way, left open: libtsync's tier 2 stalls.** With the monitor tier off — every
-wait in the kernel — the `tsync` set stops in its MPSC phase now and then: the consumer parks
-for a slot whose producers are both asleep a lap later. It is not arm64's: x86 with
-`-DTSYNC_DISABLE_TIER1` stalls the same way (1 run of 5 completed under KVM), and it is the
-"tsync flakes by itself" of the x86 gate's history, which the tier 1 hid. On arm64 the tier 2
-is the only one, so `tsync` is not in the arm64 gate until the protocol is fixed.
+**Found by the port of libtsync, fixed: the generic timer's interrupt storm.** With every
+wait in the kernel (arm64 has no user-mode monitor tier) the `tsync` set stopped in its MPSC
+phase, 4 runs of 4 under TCG, while x86 with the tier 1 compiled out passed 12 of 12. A copy
+of the phase with a watchdog printed the queue at the stall: no position skipped (the tail
+equalled the pushes), one slot "free for h" whose producer slept with its predicate met —
+and the core's timer state: core 0 had taken **1 141 858 timer interrupts** at a 500 us
+period. The generic timer is level-sensitive: when a waiter's borrowed deadline fired,
+`rearm_period_ns()` said "nothing to re-arm" (the timer is borrowed) and the vector neither
+moved the compare nor masked the timer, so the line stayed raised and the vector was
+re-entered the moment it ended — until the borrower ran again and gave the timer back.
+x86's TSC-deadline fires once and never showed it. The vector now silences the timer when
+it has nothing to re-arm (`trap.rs`), and after the scheduler owns the timer a zero period
+is a dedicated core, not a cue to revive the bring-up tick (`smp::rearm_period_ns`). It hit
+every timed wait on arm64 (futex timeouts, `parkNanos`), not libtsync alone; `tsync` is in
+the arm64 gate now.
 
 **Graviton like for like** (`docs/MEASUREMENTS.md` §10.3). The UDP RTT from a Linux
 `c7g.large` neighbour: to a second Linux `c7g.large` p50 34.1 us, to Talaria's `userver` on a
@@ -1618,10 +1630,21 @@ narrower (39.9–42.1 against 39.8–49.4 us). The ENA's PHC is declared on none
 `c7gn`, `c8g`, `m7g`: the wall clock's reference on Graviton is not the PHC (the Amazon Time
 Sync service over the network is the candidate — a design item, not done).
 
-The gates: arm64 `test-aarch64.sh` **267/0** under TCG (240 before: `piperace`, virtio-pci with
-and without firmware, the bridges, the cell's two modes, `fiber`, `syncbench`, `procdemo`);
-x86 `test.sh` **496/0** + host 22/0 (`piperace`, the virtio-pci echo under OVMF); `kernel-unit`
-296/0; clippy clean on both. The KVM run of the audit is the stand's next bill.
+**The KVM stand on the audit** (`c7g.metal`, `infra/aws/kvm-stand-aarch64.sh` at `bd0e701`, the
+instance destroyed; `docs/MEASUREMENTS.md` §10.4): the gate under KVM **268/0**; `netnum`'s
+`tcp [netirq=1]` 39 509 req/s, 25.3 us a request — the `diskserver` fault of §10.7 is gone on
+hardware, §10.8's fix confirmed; the soak **0 of 50** on all ten modes with `piperace` among
+them; the parallel race detector **0 of 96** on `forkap`/`shmrace`/`memrace`/`piperace`, 24
+at once on 64 cores; one whole-gate loop clean. What it also showed: the wake path is slower
+than on the previous stand — futex cross-core p50 513 -> 558–598 ns, condvar 1900 -> 2450–2590
+ns — the price of the audit's barriers there (the SGI's `dsb`, the acknowledged membarrier,
+the `SeqCst` loads), to be attributed and paid back by measured commits. The stand ran
+before the timer fix above.
+
+The gates: arm64 `test-aarch64.sh` **269/0** under TCG (240 before: `piperace`, virtio-pci
+with and without firmware, the bridges, the cell's two modes, `tsync`, `fiber`, `syncbench`,
+`procdemo`); x86 `test.sh` **496/0** + host 22/0 (`piperace`, the virtio-pci echo under OVMF);
+`kernel-unit` 296/0; clippy clean on both.
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
