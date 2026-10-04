@@ -90,8 +90,15 @@ core::arch::global_asm!(r#"
 
 /* RESTORE_FRAME: by the FRAME's origin, not the stub's — a scheduling stub may enter a
    frame another kind of entry saved. SPSR.M == 0 (EL0t): SP_EL0 comes from the slot (a
-   signal's stack substitution is a write there); an EL1 frame leaves SP_EL1 to the add. */
+   signal's stack substitution is a write there); an EL1 frame leaves SP_EL1 to the add.
+   IRQ and FIQ are masked FIRST: the `svc` path comes back with them open (a parked
+   syscall enables them to be woken), and an IRQ taken after the `msr elr_el1` below
+   rewrites ELR/SPSR with ITS return — a pc inside this very macro — so the `eret` re-runs
+   the tail of the restore with sp already past the frame (the netirq diskserver fault
+   under KVM: the loads hit the page above the kernel stack). TCG never shows it: it
+   checks interrupts at a translation block's end, and the restore is one block. */
 .macro RESTORE_FRAME
+    msr daifset, #3
     ldp x2, x3, [sp, #256]
     msr elr_el1, x2
     msr spsr_el1, x3
