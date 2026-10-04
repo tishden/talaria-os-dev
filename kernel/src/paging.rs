@@ -1564,7 +1564,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
                     split_2m_lazy(pde);
                 } else {
                 let base = a & !0x1F_FFFF;
-                match crate::mem::alloc_contig_aligned(512, 0x20_0000) {
+                match crate::mem::alloc_workload_aligned(512, 0x20_0000) {
                     Some(fr) => {
                         core::ptr::write_bytes(fr as *mut u8, 0, 0x20_0000);
                         let mut ne = fr | PTE_P | PTE_US | PTE_PS | PTE_PRIV;
@@ -1711,6 +1711,37 @@ pub fn guard(vaddr: u64) {
             pte_w(pte, e);
         }
         flush_tlb();
+    }
+}
+
+/// `guard` in a GIVEN space (`sched::alloc_kstack_in`): the leaf is split in THAT space's
+/// tables if it must be. The caller guarantees the space is not running elsewhere while its
+/// directory may change (the kernel's reference one, or a fork's child not yet published).
+pub fn guard_in(pml4_phys: u64, vaddr: u64) {
+    let a = vaddr & !0xFFF;
+    if pml4_phys == 0 { return; }
+    // SAFETY: P1 + P2 + P3 + P4 — as `guard`, the entry in the space the caller names.
+    unsafe {
+        let pte = pte_ptr_in(pml4_phys, a);
+        pte_w(pte, (pte_r(pte) & !PTE_P) | PTE_GUARD);
+        flush_tlb();
+    }
+}
+
+/// Is the page a guard in the space `pml4_phys` (the gate `kstackguard`) — a read-only walk.
+pub fn is_guard_in(pml4_phys: u64, vaddr: u64) -> bool {
+    let a = vaddr & !0xFFF;
+    if pml4_phys == 0 { return false; }
+    // SAFETY: P1 + P2 — a read-only descent.
+    unsafe {
+        let e4 = pte_r((pml4_phys as *const Pte).add(((a >> 39) & 0x1FF) as usize));
+        if e4 & PTE_P == 0 { return false; }
+        let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(((a >> 30) & 0x1FF) as usize));
+        if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { return false; }
+        let e2 = pte_r(((e3 & ADDR_MASK) as *const Pte).add(((a >> 21) & 0x1FF) as usize));
+        if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { return false; }
+        let e = pte_r(((e2 & ADDR_MASK) as *const Pte).add(((a >> 12) & 0x1FF) as usize));
+        e & PTE_P == 0 && e & PTE_GUARD != 0
     }
 }
 

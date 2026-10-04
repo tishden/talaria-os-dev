@@ -2090,10 +2090,30 @@ unsafe fn free_kstack(base: u64, pages: u64) {
 pub const KSTACK_PAGES: u64 = 16;
 /// Allocate a task's kernel stack: it returns THE TOP. The bottom page stays
 /// a guard one — an overflow gives an honest #PF rather than a silent corruption of a neighbour.
-pub fn alloc_kstack() -> Option<u64> {
+/// The guard is laid in the ACTIVE space — right for a thread of the current process and for
+/// a kernel task; a stack for ANOTHER space (a fork's child) takes `alloc_kstack_in`.
+pub fn alloc_kstack() -> Option<u64> { alloc_kstack_in(crate::paging::current_cr3() & !0xFFF) }
+
+/// A kernel stack for a task that will run under the space `pml4`: the guard goes into THAT
+/// space and into the kernel's reference one (the spaces built later copy it; the kernel's
+/// own CR3 runs on the stack at an exit). It used to go only into the space active at the
+/// allocation — a fork's PARENT — so the child, the only one executing on the stack, ran
+/// with no guard under it: the kernel's gigabyte has a private directory in every process,
+/// and a hole in the parent's is not in the child's. `pml4` must not be running on another
+/// core while its directory may be split (a fork's child is not published yet).
+pub fn alloc_kstack_in(pml4: u64) -> Option<u64> {
     let base = crate::mem::alloc_contig(KSTACK_PAGES)?;
-    crate::paging::guard(base); // the stack's bottom is a guard page
+    let k = crate::paging::kernel_cr3();
+    crate::paging::guard_in(k, base);
+    if pml4 != 0 && pml4 != k { crate::paging::guard_in(pml4, base); }
     Some(base + KSTACK_PAGES * 4096)
+}
+
+/// Give back a stack from `alloc_kstack*` that no task got (a refused fork/clone): the guard
+/// is taken back everywhere first — a bare `free_contig` left the hole behind (item 25).
+pub fn release_kstack(top: u64) {
+    // SAFETY: C1 + C3 — the stack was never handed to a task, nobody executes on it.
+    unsafe { free_kstack(top - KSTACK_PAGES * 4096, KSTACK_PAGES); }
 }
 
 /// # Safety

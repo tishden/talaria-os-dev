@@ -441,6 +441,7 @@ for spec in \
   "talaria.test=console|console-ed: the editor's checks passed .all.|console: the line editor — the history, Ctrl-A/D/U/W, Tab completion, inserting in the middle (one typo no longer costs retyping)" \
   "talaria.test=console|unknown command: 'stauts' — did you mean 'status'|console: a typo -> a hint of the closest command rather than a blank 'unknown'" \
   "talaria.test=vmspace|vmspace: ISOLATION CONFIRMED|vmspace: per-process address spaces (a CR3 switch)" \
+  "talaria.test=kstackguard|kstackguard: ALL OK|kstackguard: a forked task kernel stack is guarded in the CHILD space and the kernel one, released with no hole" \
   "talaria.test=fork|fork: THE MEMORY WAS CLONED|fork: the clone of the address space (the copy semantics of the memory)" \
   "talaria.test=exec|musl static binary -> Talaria OS|exec: a musl binary in the process's private AS (a CR3 switch)" \
   "talaria.test=procs|sched: all the 2 task.s. have finished|procs: two processes in separate ASes under the scheduler (a per-process CR3)" \
@@ -895,6 +896,17 @@ qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 1 -m 4096 \
 q4=$!
 for i in $(seq 1 60); do sleep 1; grep -aq "highmem: ALL OK\|highmem: FAILED\|no high area\|panic" /tmp/o.log 2>/dev/null && break; done
 assert "highmem: ALL OK" "highmem: the workload's frames above 4 GB — identity, their own free list, the refcount, the AS leaf, MAP_FIXED refused"
+stopq $q4
+# A c7g.large's shape (850 MB below 4 GB): forktls's 1.5 GB took 2 MB pages from the LOW
+# memory, and the next page table found no frame — a kernel panic on the real machine.
+rm -f /tmp/o.log
+qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 4 -m 5120 \
+  -kernel "/w/$K" -append "console=ttyS0 talaria.test=forktls talaria.smp=4 talaria.lowmem=850" -display none -serial file:/tmp/o.log -no-reboot \
+  -drive id=d0,file=/img/disk_ext2.img,format=raw,if=none,file.locking=off -device virtio-blk-device,drive=d0 >/tmp/q.log 2>&1 &
+q4=$!
+for i in $(seq 1 180); do sleep 1; grep -aq "forktls: ALL OK\|forktls: FAILED\|forktls: THE PARENT\|panic\|PANIC" /tmp/o.log 2>/dev/null && break; done
+assert "forktls: ALL OK" "forktls on a c7g.large shape (talaria.lowmem=850): the huge pages come from the high area"
+refute "there is no frame|PANIC|panicked" "forktls on a c7g.large shape: the kernel keeps the low memory for its page tables"
 stopq $q4
 
 # THE CEILING OF THE TASK TABLE IS A REFUSAL RATHER THAN A WRITE PAST THE BOUND.
