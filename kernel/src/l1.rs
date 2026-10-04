@@ -266,6 +266,9 @@ pub struct SmolDev {
     /// The card's interrupt status/acknowledge registers (`NetDev::intr_regs`), taken once:
     /// the line's handler clears the status through them without asking for the card.
     intr: Option<(usize, usize)>,
+    /// The receive interrupt's unmask register (`NetDev::arm_reg`), taken once: `arm_intr`
+    /// writes it without asking for the card.
+    arm: Option<(usize, u32)>,
 }
 
 impl SmolDev {
@@ -279,8 +282,10 @@ impl SmolDev {
             else { let k = if inst == 0 { 0 } else { (inst - 1).min(MAXEXTRA - 1) }; (&mut *addr_of_mut!(RXB2[k]), &mut *addr_of_mut!(TXB2[k])) }
         };
         let intr = dev.intr_regs();
+        let arm = dev.arm_reg();
         SmolDev {
             intr,
+            arm,
             sh: DevCell::new(Shared {
                 q: NicQ::new(dev, rb, tb),
                 last_rx: 0,
@@ -325,8 +330,21 @@ impl SmolDev {
         let mut s = g;
         s.q.flush(); note_borrow(true); note_holder(4);
     }
-    /// §7.5: allow an interrupt from the card (before going to sleep).
-    pub fn arm_intr(&self) { if let Some(mut s) = self.sh.try_take() { s.q.arm_intr(); } }
+    /// §7.5: allow an interrupt from the card (before going to sleep, and at the end of the
+    /// line's handler). A card whose unmask is one register (the ENA) is armed directly:
+    /// the `try_take` this was SKIPPED the unmask whenever a neighbour held the card — the
+    /// handler's re-arm lost to any pass on another core, and the queue's interrupt stayed
+    /// masked until the next pass that happened to receive (the ordering audit's note).
+    /// Otherwise arming touches the rings and needs the card.
+    pub fn arm_intr(&self) {
+        if let Some((reg, v)) = self.arm {
+            // SAFETY: the card's own register window, mapped as device memory for the life of
+            // the kernel; the unmask write carries no state of the queues.
+            unsafe { core::ptr::write_volatile(reg as *mut u32, v); }
+            return;
+        }
+        if let Some(mut s) = self.sh.try_take() { s.q.arm_intr(); }
+    }
     /// THE CLEARING DOES NOT DEPEND ON WHO HOLDS THE CARD. It used to be `try_take` and
     /// nothing else: when the handler interrupted a pass that held the card, the status was
     /// NOT cleared. On an edge-routed line that costs nothing; on the GIC the window's SPI is

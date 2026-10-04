@@ -21,6 +21,7 @@
 #   UPONLY=1 ...                                        # stop after the build, keep the instance: hand work
 #   BISECT="f3f06bc a843638" VARIANTS=dir ABROUNDS=5    # the A/B of a regression: futexlat + svccost on
 #                                                       # each commit and each dir/*.patch over HEAD
+#   ABONLY=1 ...                                        # the A/B alone: no gate, numbers, soak or loop
 #
 # The ring-3 set travels as BINARIES: kernel/user/aarch64/ (`make -C kernel/user aarch64` on the
 # dev box — the cross musl is there, the stand's Amazon Linux has none) is uploaded next to the
@@ -142,6 +143,7 @@ if [ "${UPONLY:-0}" = 1 ]; then
   exit 0
 fi
 
+if [ "${ABONLY:-0}" != 1 ]; then
 echo "== the gate under KVM (TAL_KVM=1: the timing lines are judged too) =="
 rrun gate 3600 'cd talaria && TAL_KVM=1 kernel/test-aarch64.sh' || true
 grep -E 'FAIL|TOTAL|SKIP' "$LOGD/gate.log" || true
@@ -168,6 +170,8 @@ for n in 1 2 3; do
   done
 done
 
+fi # ABONLY
+
 # The A/B of a regression (BISECT/VARIANTS): each commit of BISECT and each patch of VARIANTS
 # (applied over HEAD) is built in a tree of its own, then `futexlat` and `svccost` boot
 # ABROUNDS rounds, the variants in turn inside a round — a drift of the stand lands on all of
@@ -192,6 +196,8 @@ if [ -n "${BISECT:-}${VARIANTS:-}" ]; then
       echo \"AB \$v round \$n: \$o svc=\$s\"; done; done" || true
   grep -a '^AB' "$LOGD/ab.log" || true
 fi
+
+if [ "${ABONLY:-0}" = 1 ]; then T4=$(date +%s); echo "ABONLY=1: the A/B alone, done after $((T4-T0)) s"; echo "logs: $LOGD"; exit 0; fi
 
 echo "== the probes TCG cannot judge (docs/ARM64-PLAN.md §9.2 B-E) =="
 for p in "ring talaria.ringn=${RINGN:-2000000}" icache bbm svccost; do
