@@ -179,18 +179,25 @@ fn aadd(st: usize, cyc: u64) {
 pub const APP_DUMP_N: usize = 4;
 pub const APP_DUMP_EV: usize = 10;
 pub struct AppDump {
-    pub used: AtomicBool, pub t: u8, pub cpu: u8, pub sw: u8, pub us: u32, pub off: u32, pub ran: u32,
+    /// The slot's claim (a swap: two cores that ended a slow turnaround at once both saw a
+    /// free `used` and wrote one slot field by field) and its publication (`used`).
+    pub claim: AtomicBool, pub used: AtomicBool, pub t: u8, pub cpu: u8, pub sw: u8, pub us: u32, pub off: u32, pub ran: u32,
     pub t0: u64, pub n: u8, pub ev: [crate::sched::SchedEv; APP_DUMP_EV],
 }
-const AD0: AppDump = AppDump { used: AtomicBool::new(false), t: 0, cpu: 0, sw: 0, us: 0, off: 0, ran: 0, t0: 0, n: 0, ev: [crate::sched::SEV0; APP_DUMP_EV] };
+const AD0: AppDump = AppDump { claim: AtomicBool::new(false), used: AtomicBool::new(false), t: 0, cpu: 0, sw: 0, us: 0, off: 0, ran: 0, t0: 0, n: 0, ev: [crate::sched::SEV0; APP_DUMP_EV] };
 pub static mut APP_DUMP: [AppDump; APP_DUMP_N] = [AD0; APP_DUMP_N];
 static APP_DUMP_MISSED: AtomicU64 = AtomicU64::new(0);
 fn app_dump(t: usize, t0: u64, us: u64, off: u64, ran: u64, sw: u64) {
     // While the `stat:` block is being flushed — do not write (the same lesson as for `dl_dump`).
     if crate::obs::flush_active() { return; }
     for k in 0..APP_DUMP_N {
-        let d = unsafe { &mut *core::ptr::addr_of_mut!(APP_DUMP[k]) };
-        if d.used.load(Ordering::Relaxed) { continue; }
+        // SAFETY: only the place is taken; nothing is read or written through it here.
+        let p = unsafe { core::ptr::addr_of_mut!(APP_DUMP[k]) };
+        // SAFETY: the claim is an atomic in a static, read through a shared view.
+        if unsafe { (*p).claim.swap(true, Ordering::Acquire) } { continue; }
+        // SAFETY: the slot is this core's from the claim on; the reader looks at it only
+        // after `used` (Release below, Acquire there).
+        let d = unsafe { &mut *p };
         let cpu = crate::sched::cpu_of(t);
         d.t = t as u8; d.cpu = cpu as u8; d.sw = sw.min(255) as u8;
         d.us = us.min(u32::MAX as u64) as u32; d.off = off.min(u32::MAX as u64) as u32; d.ran = ran.min(u32::MAX as u64) as u32;

@@ -88,6 +88,12 @@ pub trait NetDev {
     /// before the interrupted code runs one instruction. None — the driver's interrupt needs
     /// no clearing (MSI-X) or cannot be cleared this way.
     fn intr_regs(&self) -> Option<(usize, usize)> { None }
+    /// The receive interrupt's unmask as ONE register write with no state of the queues
+    /// (the address, the value) — the ENA's. It is written without asking for the card:
+    /// the line's handler re-arms at the end of a pass, and an arm that waited for a
+    /// neighbour holding the card (or skipped, as a `try_take` did) left the interrupt masked.
+    /// None — arming touches the rings (virtio's flags) and goes through `arm_intr` under the card.
+    fn arm_reg(&self) -> Option<(usize, u32)> { None }
     /// The card's line by an MSI/MSI-X message (the ENA): ALLOW the device's interrupts
     /// and return the IDT vector they arrive on — the line's handler is put on it
     /// by `netsys::netirq_setup`. None — this card's line goes only through the

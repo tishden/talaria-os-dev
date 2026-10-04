@@ -1191,6 +1191,9 @@ impl crate::netdev::NetDev for Ena {
     // Ena::... — in order to call the card's OWN method rather than this same one from the trait.
     fn flush(&mut self) -> bool { Ena::flush(self) }
     fn arm_intr(&mut self) { Ena::arm_intr(self); }
+    fn arm_reg(&self) -> Option<(usize, u32)> {
+        if self.rx_intr_reg == 0 { None } else { Some(((self.regs + self.rx_intr_reg) as usize, 1 << 30)) }
+    }
     fn irq_vector(&mut self) -> Option<u8> { Ena::irq_vector(self) }
     fn idle_watch(&self) -> Option<(*const u32, u32)> { Some(self.rx_cq_watch()) }
     /// IS THERE A RECEIVED FRAME — by the same phase bit by which
