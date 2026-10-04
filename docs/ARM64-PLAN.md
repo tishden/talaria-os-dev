@@ -1385,6 +1385,59 @@ space switch on the TCP+disk path, not the line itself. `netirq` is a non-defaul
 (polling is the default and passes); the crash wants its own session with the stand or a
 TCG repro harness that drives the guest from the host.
 
+### 10.8. The netirq fault closed, and the first own boot on EC2 Graviton (2026-10-04)
+
+**The `netirq` diskserver fault was an interrupt inside the restore, not a page-table
+hole.** The svc path comes back from a parked syscall with interrupts open (the parking
+in `wait_on_ex` enables them to be woken). `RESTORE_FRAME` writes ELR/SPSR and then reloads
+the registers; an IRQ taken in between rewrites ELR/SPSR with ITS return — a pc inside the
+macro — and the `eret` re-runs the tail of the restore with sp already past the frame. Both
+stand dumps fit it to the byte: SPSR with I clear, ELR at two different points of the
+restore sequence, sp equal to the kernel stack's top (the frame's 0x120 too high), the
+faulting page the user stack's guard right above it. TCG takes interrupts only at a
+translation block's end and the restore is one block — a TCG repro harness ran clean 4/4
+before the fix too, which is what pointed away from the tables. `RESTORE_FRAME` now masks
+IRQ/FIQ first (`trap.rs`). The x86 return path had the same window in a narrower form —
+`rust_syscall` may return with IF=1, and an interrupt between `pop %rsp` and `sysretq`
+lands at CPL0 on the user stack — and now executes `cli` after the call. The KVM
+confirmation of the arm64 fix waits for the next stand run.
+
+**Talaria boots on a `c7g.large`** (a Nitro guest, edk2; `infra/aws/logs/aarch64-ec2-
+c7g.large-*.log`): the stub, the kernel from ACPI, GICv3+ITS, PSCI, our own tables with
+hardware DBM, a musl process in ring 3; `talaria.pci=1 talaria.test=ext2` — ext2+JBD2 RW on
+the EBS NVMe, ALL OK; `talaria.test=smp2` — the second vCPU through PSCI, speedup 2.00;
+`talaria.mode=userver talaria.ip=dhcp` — **the ENA came up unchanged** (LLQ in BAR2 as
+Normal-NC, the descriptor writes behind `dma_wmb`), DHCP, and a UDP echo answered 20 000
+round trips from an x86 `c6i.large` neighbour with no loss, p50 40.3 us, p99 48.6 us (a first
+number, not a comparison: the neighbour is another type and there is no Linux baseline on
+`c7g` yet). What it took:
+
+* **The SPCR's address is a placeholder on EC2.** The table is revision 2 and its PCI fields
+  name `1d0f:8250` at 00:01.0; its address structure says `0x8000_0000`, which is the
+  ENA's BAR, and the function's own BAR 0 (`0x8004_8000`) has memory decoding OFF — the
+  firmware does not print through it at all. Writing the placeholder printed nothing (and
+  would write into the ENA). `acpiboot` reads the PCI fields and the MCFG's segment-0
+  window, takes BAR 0 through the ECAM and switches decoding on; no BAR — no console,
+  never the placeholder. Session 56's "16550, mmio32" was wrong twice: the access size is
+  a byte, and the address is not the console's.
+* **The early map got one span of RAM** (1 GiB .. 18.9 GiB on a Nitro guest: RAM at 1-2 GiB
+  and from 16 GiB), so the PCI window between was a Normal block. `kmain` passes the
+  firmware's RAM entries, joined only where no whole gigabyte lies between them.
+* Two hazards no gate can show, closed on the way (TCG has no caches; KVM on a Graviton
+  forces the guest's RAM cacheable through S2FWB): the stub cleans the ACPI tables, the
+  RSDP and the device tree to PoC — the kernel reads them with its MMU off — and
+  `uart::lock` takes no atomic while the MMU is off (an RMW on Device memory is the
+  implementation's choice).
+
+The gate: **232/0** under TCG (the htree-unsigned block of §10.7 included). On a bash 5.1
+host the gate script itself had stopped parsing — an apostrophe inside `${JM:+...}`,
+literal for bash 5.2, a quote for 5.1 — so the stand ran it whole and this box did not.
+
+Still open, in order: the allocator sees only the RAM below 4 GiB (850 MB of a
+`c7g.large`'s 3995 — the shared identity window, not an arm64 matter); the ENA's PHC is
+not declared on `c7g.large` (a clock reference wants a type that has it); the netirq
+fix's KVM run; the ordering audit (phase 5); the tails of phase 4.
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its

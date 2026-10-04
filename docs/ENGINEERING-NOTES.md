@@ -591,6 +591,24 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     name in them. The gate now builds the unsigned volume on purpose on both
     machines (`mkext2.sh HASHU=1`): a check whose verdict depends on the host it
     runs on is not a check.
+27. **"An interrupt window the emulator cannot open."** A return to user space that
+    restores the saved state in several instructions must do it with interrupts
+    masked: an interrupt taken in the middle rewrites the very registers the restore
+    is setting up (ELR/SPSR on arm64) and comes back into the middle of it with the
+    stack already moved. The svc path came back from a parked syscall with
+    interrupts open, and under KVM a NIC interrupt landed there 3 times in 4 (the
+    `netirq` diskserver fault); under TCG never — the emulator takes interrupts at a
+    translation block's end, and the restore is one block. The x86 return path had
+    the same window, between `pop %rsp` and `sysretq`. Masking at the restore's head
+    closes both; a fault that only real hardware raises is diagnosed from the dump,
+    not from a repro under the emulator.
+28. **"A firmware table's field that is a placeholder."** EC2's SPCR names its console
+    twice: an address (`0x8000_0000`) and, in the revision-2 PCI fields, a PCI
+    function. The address is the ENA's BAR; the console is the function's BAR 0, with
+    memory decoding left off by the firmware. A kernel that trusts the address writes
+    into another device and says nothing. When a table offers a structured locator
+    (a PCI function), that is the authority, and the address beside it is checked
+    against it — or ignored.
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

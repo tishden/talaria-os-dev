@@ -277,10 +277,11 @@ reasoning does not have to be repeated.
    machines, the C++ set included), the process model, the signals, the core
    dumps of a workload and of the kernel, the supervisor, the network over
    virtio-net, PCIe through ECAM, NVMe, MSI-X through the GICv3 ITS, the
-   ext2/jbd2 block on both disks; `kernel/test-aarch64.sh` is 229 checks. The
-   product boot path runs under `edk2`: the arm64 half of `kernel/uefi-stub`
-   and the machine described by ACPI alone. What is left: EC2's own boot
-   (phase 6 proper — a 16550 console, the AMI, ENA on Graviton), the weak
+   ext2/jbd2 block on both disks; `kernel/test-aarch64.sh` is 232 checks. The
+   product boot path runs under `edk2` and on EC2 itself: a `c7g.large` boots
+   the AMI to ring 3, runs ext2 on the EBS NVMe, both vCPUs, and the ENA with
+   LLQ, DHCP and a UDP echo (§10.8). What is left: the RAM above 4 GiB (the
+   shared identity window), a clock reference on Graviton, the weak
    memory model (an audit of 1 444 `Relaxed` and 367 `volatile` sites that TSO
    made correct — phase 5; the device barriers are in, the soak that judges the
    rest is `kernel/soak-aarch64.sh`), and the six workloads (phase 7). The stand
