@@ -19,6 +19,8 @@
 #                                                       # forkap/shmrace/memrace/piperace, PAR at once (96 vCPUs
 #                                                       # on 64 cores — §10.5's recipe, default 96/24)
 #   UPONLY=1 ...                                        # stop after the build, keep the instance: hand work
+#   BISECT="f3f06bc a843638" VARIANTS=dir ABROUNDS=5    # the A/B of a regression: futexlat + svccost on
+#                                                       # each commit and each dir/*.patch over HEAD
 #
 # The ring-3 set travels as BINARIES: kernel/user/aarch64/ (`make -C kernel/user aarch64` on the
 # dev box — the cross musl is there, the stand's Amazon Linux has none) is uploaded next to the
@@ -165,6 +167,31 @@ for n in 1 2 3; do
     grep -aE "RESULT mbench|FUTEXLAT|SMP[24]: (t1|the parallel)|\[trap\]|PANIC" "$LOGD/num-$p-$n.log" | cut -c1-160 | sed "s/^/   [$n] /"
   done
 done
+
+# The A/B of a regression (BISECT/VARIANTS): each commit of BISECT and each patch of VARIANTS
+# (applied over HEAD) is built in a tree of its own, then `futexlat` and `svccost` boot
+# ABROUNDS rounds, the variants in turn inside a round — a drift of the stand lands on all of
+# them alike. The table is ab.log's `AB` lines.
+if [ -n "${BISECT:-}${VARIANTS:-}" ]; then
+  echo "== the A/B: ${BISECT:-} ${VARIANTS:+patches from $VARIANTS} (${ABROUNDS:-5} rounds) =="
+  names=""
+  for r in ${BISECT:-}; do
+    git -C "$REPO" archive "$r" | ssh $SSH_OPTS ec2-user@"$IP" "mkdir -p ab/$r && tar -x -C ab/$r && cp -a talaria/kernel/user/aarch64 ab/$r/kernel/user/"
+    names="$names $r"
+  done
+  for p in ${VARIANTS:+$VARIANTS/*.patch}; do
+    v=$(basename "$p" .patch)
+    ssh $SSH_OPTS ec2-user@"$IP" "mkdir -p ab/$v && tar -C talaria --exclude=./kernel/target -c . | tar -x -C ab/$v && cd ab/$v && git apply" < "$p" || { echo "variant $v: the patch did not apply"; continue; }
+    names="$names $v"
+  done
+  rrun ab 3600 ". \$HOME/.cargo/env; built=''; for v in $names; do \
+      (cd ab/\$v && AARCH64_OBJCOPY=objcopy VDSO_CC_AARCH64=gcc kernel/build-aarch64.sh > build.log 2>&1) && built=\"\$built \$v\" || echo \"AB \$v: the build FAILED\"; done; \
+    for n in \$(seq 1 ${ABROUNDS:-5}); do for v in \$built; do \
+      o=\$(cd ab/\$v && TAL_APPEND='console=ttyAMA0 talaria.test=futexlat talaria.smp=4 talaria.poweroff=1' kernel/runq-aarch64.sh 120 -smp 4 2>&1 | grep -a 'FUTEXLAT .*RTT' | sed 's/.*FUTEXLAT \\([a-z]*\\) \\([a-z-]*\\): RTT p50=\\([0-9]*\\).*/\\1-\\2=\\3/' | tr '\\n' ' '); \
+      s=\$(cd ab/\$v && TAL_APPEND='console=ttyAMA0 talaria.test=svccost talaria.smp=4 talaria.poweroff=1' kernel/runq-aarch64.sh 120 -smp 4 2>&1 | grep -a 'WITH the FP' | grep -ao '[0-9]* ns per' | head -1); \
+      echo \"AB \$v round \$n: \$o svc=\$s\"; done; done" || true
+  grep -a '^AB' "$LOGD/ab.log" || true
+fi
 
 echo "== the probes TCG cannot judge (docs/ARM64-PLAN.md §9.2 B-E) =="
 for p in "ring talaria.ringn=${RINGN:-2000000}" icache bbm svccost; do
