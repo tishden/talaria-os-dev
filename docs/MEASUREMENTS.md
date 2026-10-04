@@ -598,6 +598,45 @@ previous stand, the audit's new barriers on it (the plan's §10.10). The stand r
 the generic timer's interrupt-storm fix (the plan's §10.10), which touches every timed wait.
 Log (local): `infra/aws/logs/aarch64-20261004-150746/`.
 
+### 10.5. The wake path's step, bisected (2026-10-04)
+
+`c7g.metal` (`kvm-stand-aarch64.sh` at `e64d4bb`, `BISECT=… VARIANTS=…`, the instance
+destroyed). The gate under KVM **270/0** (`tsync` among the checks — the timer-storm fix
+holds on hardware); the soak 0 of 50 on ten modes, the parallel detector 0 of 96, one gate
+loop clean; the network as in §10.4 (udp p50 11.6 us, tcp 72 327 req/s, `netirq=1` tcp
+39 803 req/s).
+
+The A/B: every variant built in its own tree on the stand, `futexlat` booted in rounds with
+the variants in turn (a drift of the stand lands on all alike). The cross-core p50, the
+median of the rounds (5 or 6), ns:
+
+| variant | futex | condvar | note |
+| --- | --- | --- | --- |
+| `f3f06bc` (the §10.2 stand) | 536 | 2176 | |
+| `bc96dd6` (IRQs masked before the restore) | 535 | 1949 | |
+| `04be5c4` (the RAM above 4 GiB) | 526 | 1937 | |
+| `ea24e3f` (the commit before the audit) | 518 / 511 / 541 | 2008 / 1956 / 2121 | three passes |
+| `a843638` (the audit) | 563 | 2596 | **the step** |
+| `88951b0` (the timer fix) | 577 | 2515 | |
+| HEAD `e64d4bb` | 572 / 569 / 572 | 2437 / 2465 / 2467 | three passes |
+| HEAD − the SGI's `dsb` / − the membarrier ack / − the dead-space Acquire | 573 / 604 / 571 | 2396 / 2595 / 2452 | |
+| HEAD − all three | 577 | 2486 | not them |
+| HEAD + `rcpc` (Acquire as `ldapr`) | 566 | 2458 | no effect |
+| HEAD − the audit's `proc.rs` / `sched.rs` / `sync.rs` / `trap.rs` | 570 / 569 / 583 / 576 | 2484 / 2458 / 2534 / 2356 | |
+| HEAD − the audit's `syscall.rs` | 572 | 2180 | the condvar's spread 1983–2482 |
+| HEAD − the audit's memory files (`mem`, `paging`, `mmu`, …) | 541 | 2501 | |
+| `ea24e3f` / HEAD, all functions and loops 64-byte aligned | 530 / 580 | 2102 / 2438 | not alignment |
+| `svccost` (the bare entry), every variant | 130–134 | — | flat |
+
+The step is real and is the audit commit's: +50–60 ns on the futex RTT, +400–500 ns on the
+condvar's, reproduced in three passes. The barriers it was blamed on are not it, nor the
+`ldar`/`ldapr` choice, nor code alignment; no single file's revert takes it back beyond the
+spread. The combined reverts (memory + `syscall.rs`, + `trap.rs` + `sched.rs`, the whole
+commit as a control) were cut off by the stand's own teardown — the next pass is
+`ABONLY=1` with those and a hunk-level split. Logs (local):
+`infra/aws/logs/aarch64-20261004-163328/` (`ab.log`, `ab2-perfile-rcpc.log`, `ab3-align.log`,
+the patches).
+
 ## 11. Reproducing any of this
 
 ```sh

@@ -695,6 +695,10 @@ phase; re-opening it without new evidence costs a day.
 | The "foreign 8 ms" class | Not our code: 97 % of the hole is vCPU theft by the hypervisor (8092 µs of 8277), it arrives on both cores at once, and the class MIGRATED between workloads without a line of code changing. |
 | SMAP | Rejected with a reason: the kernel copies the process's memory with ordinary loads, and that is what makes a syscall cheap. SMEP is on where the CPU has it. |
 | Deferred block allocation (delalloc) in ext2 | Deliberately not done: a cache slot is addressed BY BLOCK NUMBER, so a data page must have its number at write time. What delalloc is done for was obtained by run-based allocation: bitmap trips 33 → 7 per 512 data blocks. |
+| The audit's wake-path price on arm64 is its new barriers (the SGI's `dsb ishst`, the membarrier ack, the dead-space scan's Acquire) | All three reverted at once over HEAD on the KVM stand: futex RTT 577 ns, condvar 2486 — where HEAD is 572/2437 and the commit before the audit 518/2008. Not them. |
+| Acquire loads as `ldar` (RCsc) are the price; `+rcpc` makes them `ldapr` | 566/2458 against HEAD's 569/2465 (six interleaved rounds). No effect. |
+| The step is code alignment luck | Both sides built with every function and loop on 64 bytes: 530/2102 against 580/2438 — the same step. |
+| x86: the waiter's registration (eight SeqCst stores = eight `xchg`) costs the futex RTT | Seven made Relaxed, WADDR Release, the fence kept: 446-471 ns against 438-463 under KVM. Within the spread; not done. |
 | More cores is always better | The opposite, and it depends on the workload. Databases on 2 cores beat themselves on 4 (extra cores breed spinning waiters that steal a core from the computing thread); ClickHouse wants 4 and is measurably worse on 2. The number of cores belongs in the workload's `meta.env`, not in a global default. |
 
 ---

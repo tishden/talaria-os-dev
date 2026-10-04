@@ -1646,6 +1646,45 @@ with and without firmware, the bridges, the cell's two modes, `tsync`, `fiber`, 
 `procdemo`); x86 `test.sh` **496/0** + host 22/0 (`piperace`, the virtio-pci echo under OVMF);
 `kernel-unit` 296/0; clippy clean on both.
 
+### 10.11. The wake path's step bisected; phase 5's small ones (2026-10-04)
+
+**The stand on the timer fix and an A/B in one run** (`docs/MEASUREMENTS.md` §10.5). The gate
+under KVM 270/0 with `tsync` in it — the generic timer's storm fix of §10.10 holds on
+hardware; the soak, the race detector and the loop clean. The stand script has an A/B step
+now: `BISECT=` commits and `VARIANTS=` patches over HEAD, each built in its own tree, then
+`futexlat` and `svccost` in interleaved rounds; `ABONLY=1` runs it alone.
+
+**What it found about §10.10's wake-path price.** The step is the audit commit's and
+reproducible (+50–60 ns futex RTT, +400–500 ns condvar; the RAM-above-4-GiB and
+masked-restore commits before it are flat). It is NOT the three barriers it was blamed on
+(the SGI's `dsb ishst`, the membarrier ack, the dead-space scan's Acquire — all three reverted
+together leave it whole), not Acquire as `ldar` (`+rcpc` does nothing), not code alignment
+(both sides 64-byte aligned keep it). No single file's revert takes it back beyond the
+spread. Still owed: the combined reverts and a hunk-level split (`ABONLY=1`, ~20 min of the
+instance). The barriers stay — they are correct and they are not the price.
+
+**x86's SeqCst downgrades, measured.** The waiter's registration (`sync::wait_on_ex`: eight
+SeqCst stores before a fence — eight `xchg` per wait) made Relaxed + a Release WADDR:
+futex RTT 446–471 ns against 438–463 under KVM. Nothing to pay back; not committed. The
+scheduler's `fence(SeqCst)` after a SeqCst `swap` in `ap_claim` is redundant by the model
+but sits off the mwait wake path; left.
+
+**Phase 5's small ones.** `l1::arm_intr` writes the ENA's receive unmask directly
+(`NetDev::arm_reg`) instead of skipping it when a neighbour holds the card; `netprof`'s
+dump slot is claimed by a swap. The 1 GB identity leaves of a high area that cover a hole
+beside it stay: the right fix is 2 MB leaves for a partial gigabyte, which touches how every
+address space inherits the kernel's PDPT, and no machine seen puts a device in such a
+gigabyte (Graviton's PCI window is in GB3, x86's high BARs are far above RAM).
+
+**The wall clock on Graviton** (no PHC, §10.10): the servo takes any source
+(`wallclock::feed_ref`), but nothing feeds it in production on either machine — the PHC is
+read by a self-test only. A reference over the network (SNTP to the Amazon Time Sync
+service, 169.254.169.123, from a thread with the network stack, the round trip's midpoint as
+the sample, a source `SRC_NTP`) is a new feature for both architectures, not a port item.
+
+Gates: arm64 `test-aarch64.sh` 269/0 (TCG), 270/0 (KVM); x86 `test.sh` `TAL_CI=1` 182/0 + host
+16/0; clippy clean on both.
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its
