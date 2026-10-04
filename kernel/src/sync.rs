@@ -48,7 +48,13 @@ pub const MODE_WAITPKG: u8 = 3; // Intel user UMONITOR/UMWAIT (tier 1 in ring 3)
 static MODE: AtomicU8 = AtomicU8::new(MODE_HLT);
 pub fn mode() -> u8 { MODE.load(Ordering::Relaxed) }
 pub fn mode_name(m: u8) -> &'static str {
-    match m { MODE_WAITPKG => "waitpkg(umwait)", MODE_MWAITX => "mwaitx", MODE_MWAIT => "mwait(ring0)", _ => "hlt+ipi" }
+    // arm64's tiers sit under x86's names (`cpu::wait_caps`): the monitor wait is `wfe`.
+    let arm = cfg!(target_arch = "aarch64");
+    match m {
+        MODE_WAITPKG => "waitpkg(umwait)", MODE_MWAITX => "mwaitx",
+        MODE_MWAIT => if arm { "wfe(monitor)" } else { "mwait(ring0)" },
+        _ => if arm { "wfi+ipi" } else { "hlt+ipi" },
+    }
 }
 
 

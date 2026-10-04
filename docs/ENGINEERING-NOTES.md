@@ -659,6 +659,18 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     interrupt. **Port the semantics of an interrupt source, not its call sites**: what
     silences it, and who does when the usual silencer is away (`trap.rs` stops the timer
     itself when it has nothing to re-arm).
+32. **"A register read by its x86 position."** The tick's profile took the interrupted frame
+    pointer as the frame's ninth word and the privilege as `cs & 3` — RBP's slot and the CS
+    selector on x86. On arm64 the ninth word is x8 and `& 3` reads SPSR's mode bits, so every
+    ring-3 sample was filed as the kernel's and unwound to depth 1. Nothing failed loudly:
+    arm64 simply had no profile gate, so nobody looked. The frame has accessors (`switch::ctx_fp`, `mode_is_user`);
+    a shared module that indexes a frame by number is an x86 module in disguise. The
+    debugger's port found three of the stub's own on the way: a memory read gdb asks for at a
+    stale address took the kernel down from inside the stub (both machines — `m` goes through
+    the profiler's guarded load now), x86's `qAttached` compared a 10-byte slice with a 9-byte
+    literal and never answered, and a stop reply the stub sent unasked crossed gdb's opening
+    `qSupported` on a shared line and was taken for its answer (the arm64 stub waits for `?`
+    until gdb is attached, as kgdb does).
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

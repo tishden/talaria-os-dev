@@ -409,8 +409,11 @@ fn prof_note(frame: u64) {
         if take {
             // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row
             // it touches, and what crosses cores is atomic (see the module's note).
-            let rbp = unsafe { core::ptr::read_volatile((frame + 8 * 8) as *const u64) };
-            let user = cs & 3 == 3;
+            // The frame pointer of the interrupted code (RBP on x86, x29 on arm64) and its
+            // privilege by the machine's own encoding: on arm64 `cs & 3` read SPSR's M bits,
+            // and every ring-3 sample was taken for the kernel's, unwound to depth 1.
+            let rbp = crate::arch::switch::ctx_fp(frame);
+            let user = crate::arch::switch::mode_is_user(cs);
             let mut stk = [0u64; PROFR_D];
             let d = crate::obs::unwind::walk(rip, rbp, user, &mut stk);
             let w = PROFR_W.fetch_add(1, Relaxed);
@@ -418,13 +421,13 @@ fn prof_note(frame: u64) {
             for k in 0..d { PROFR_STK[i][k].store(stk[k], Relaxed); }
             PROFR_META[i].store(crate::percpu::cur_task() & 0xFF
                 | ((crate::percpu::cpu_id() as u64 & 0xFF) << 8)
-                | ((cs & 3) << 16)
+                | (if user { 3u64 << 16 } else { 0 })
                 | ((d as u64 & 0xFF) << 24), Relaxed);
         }
     }
     // Ring 0 is written SEPARATELY and with an accuracy of 64 bytes: the kernel has symbols, and
     // "the thread sleeps in the kernel" differs from "the thread spins in the kernel" exactly by the address.
-    if cs & 3 != 3 {
+    if !crate::arch::switch::mode_is_user(cs) {
         let slot = rip & !0x3F;
         for i in 0..PROF_N {
             let p = PROFK_ADDR[i].load(Relaxed);

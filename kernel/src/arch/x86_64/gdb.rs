@@ -4,6 +4,7 @@
 //! through DR0/DR7) qSupported qfThreadInfo qsThreadInfo qC qAttached. The entry is by
 //! a #BP(3)/#DB(1) with a full ExcFrame.
 use crate::serial::{inb, outb};
+use crate::gdbproto::{self, Port, PACKET, push_le, read_le_hex, parse_hex};
 
 const COM2: u16 = 0x2F8;
 pub fn init_com2() { unsafe {
@@ -12,6 +13,7 @@ pub fn init_com2() { unsafe {
 }}
 fn putb(b: u8) { unsafe { while inb(COM2+5)&0x20==0 {} outb(COM2,b); } }
 fn getc() -> Option<u8> { unsafe { if inb(COM2+5)&0x01!=0 { Some(inb(COM2)) } else { None } } }
+const PORT: Port = Port { putb, getc };
 
 // The frame as in idt.rs (the same layout).
 #[repr(C)]
@@ -26,75 +28,15 @@ static mut BP_ADDR: [u64; BPMAX] = [0; BPMAX];
 static mut BP_ORIG: [u8; BPMAX] = [0; BPMAX];
 static mut BP_USED: [bool; BPMAX] = [false; BPMAX];
 
-fn getc_block() -> u8 { loop { if let Some(c) = getc() { return c; } } }
-fn hexd(n: u8) -> u8 { if n < 10 { b'0' + n } else { b'a' + n - 10 } }
-fn unhex(c: u8) -> u8 { match c { b'0'..=b'9' => c - b'0', b'a'..=b'f' => c - b'a' + 10, b'A'..=b'F' => c - b'A' + 10, _ => 0 } }
-
-fn put_hex_le(v: u64, bytes: usize) { for i in 0..bytes { let b = (v >> (i * 8)) as u8; putb(hexd(b >> 4)); putb(hexd(b & 0xf)); } }
-
-// receiving a packet $...#xx -> into buf, return the length; it sends +/-
-fn recv(buf: &mut [u8]) -> usize {
-    loop {
-        loop { if getc_block() == b'$' { break; } }
-        let mut n = 0; let mut sum: u8 = 0;
-        loop { let c = getc_block(); if c == b'#' { break; } if n < buf.len() { buf[n] = c; n += 1; } sum = sum.wrapping_add(c); }
-        let c1 = getc_block(); let c2 = getc_block();
-        let want = (unhex(c1) << 4) | unhex(c2);
-        if want == sum { putb(b'+'); return n; } else { putb(b'-'); }
-    }
-}
-fn send(data: &[u8]) {
-    loop {
-        putb(b'$'); let mut sum: u8 = 0;
-        for &b in data { putb(b); sum = sum.wrapping_add(b); }
-        putb(b'#'); putb(hexd(sum >> 4)); putb(hexd(sum & 0xf));
-        if getc_block() == b'+' { return; }
-    }
-}
-
-fn send_regs(f: &Frame) {
-    // GDB x86-64 g-order: rax rbx rcx rdx rsi rdi rbp rsp r8..r15 rip eflags cs ss ds es fs gs
-    put_hex_le(f.rax, 8); put_hex_le(f.rbx, 8); put_hex_le(f.rcx, 8); put_hex_le(f.rdx, 8);
-    put_hex_le(f.rsi, 8); put_hex_le(f.rdi, 8); put_hex_le(f.rbp, 8); put_hex_le(f.rsp, 8);
-    put_hex_le(f.r8, 8); put_hex_le(f.r9, 8); put_hex_le(f.r10, 8); put_hex_le(f.r11, 8);
-    put_hex_le(f.r12, 8); put_hex_le(f.r13, 8); put_hex_le(f.r14, 8); put_hex_le(f.r15, 8);
-    put_hex_le(f.rip, 8); put_hex_le(f.rflags, 4); put_hex_le(f.cs, 4); put_hex_le(f.ss, 4);
-    put_hex_le(0, 4); put_hex_le(0, 4); put_hex_le(0, 4); put_hex_le(0, 4); // ds es fs gs
-}
-// send_regs writes straight into the serial line without the $..# wrapping — we wrap it by hand
+/// The registers in gdb's x86-64 `g` order: rax rbx rcx rdx rsi rdi rbp rsp r8..r15 rip,
+/// then eflags cs ss ds es fs gs (32 bits each).
 fn send_regs_packet(f: &Frame) {
-    // we compute the checksum on the fly: it is simpler to assemble it into a buffer
     let mut buf = [0u8; 512]; let mut n = 0;
-    let push = |v: u64, bytes: usize, buf: &mut [u8], n: &mut usize| {
-        for i in 0..bytes { let b = (v >> (i*8)) as u8; buf[*n]=hexd(b>>4); buf[*n+1]=hexd(b&0xf); *n+=2; }
-    };
     let regs64 = [f.rax,f.rbx,f.rcx,f.rdx,f.rsi,f.rdi,f.rbp,f.rsp,f.r8,f.r9,f.r10,f.r11,f.r12,f.r13,f.r14,f.r15,f.rip];
-    for &r in regs64.iter() { push(r, 8, &mut buf, &mut n); }
-    push(f.rflags, 4, &mut buf, &mut n); push(f.cs, 4, &mut buf, &mut n); push(f.ss, 4, &mut buf, &mut n);
-    for _ in 0..4 { push(0, 4, &mut buf, &mut n); }
-    send(&buf[..n]);
-    let _ = send_regs; let _ = put_hex_le;
-}
-
-fn parse_hex(s: &[u8]) -> u64 { let mut v = 0u64; for &c in s { if c == b',' || c == b':' || c == b'#' { break; } v = (v << 4) | unhex(c) as u64; } v }
-
-/// Read a little-endian register out of GDB's hex buffer (`bytes` bytes from the offset `start`).
-fn read_le_hex(buf: &[u8], start: usize, bytes: usize) -> u64 {
-    let mut v = 0u64;
-    for i in 0..bytes {
-        let j = start + i * 2;
-        if j + 1 < buf.len() { v |= ((unhex(buf[j]) << 4 | unhex(buf[j + 1])) as u64) << (i * 8); }
-    }
-    v
-}
-
-/// Write a decimal tid as a minimal hex into `out`, return the number of characters.
-fn write_tid_hex(out: &mut [u8], id: u64) -> usize {
-    if id == 0 { out[0] = b'0'; return 1; }
-    let mut tmp = [0u8; 16]; let mut k = 0; let mut v = id;
-    while v > 0 { tmp[k] = hexd((v & 0xf) as u8); v >>= 4; k += 1; }
-    for i in 0..k { out[i] = tmp[k - 1 - i]; }
-    k
+    for &r in regs64.iter() { push_le(r, 8, &mut buf, &mut n); }
+    push_le(f.rflags, 4, &mut buf, &mut n); push_le(f.cs, 4, &mut buf, &mut n); push_le(f.ss, 4, &mut buf, &mut n);
+    for _ in 0..4 { push_le(0, 4, &mut buf, &mut n); }
+    PORT.send(&buf[..n]);
 }
 
 // THE DEBUG REGISTERS ARE THE MACHINE'S STATE, NOT THE KERNEL'S. DR0-DR7 are each core's
@@ -283,7 +225,7 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
     }
     if f.vec == 1 { unsafe { core::arch::asm!("mov dr6, {}", in(reg) 0u64, options(nomem, nostack)); } } // clear the DR6 (a watchpoint/a step)
     f.rflags &= !0x100; // clear the TF (after a step)
-    let mut buf = [0u8; 512];
+    let mut buf = [0u8; PACKET];
     // THE THREADS. A thread's number in gdb is the workload's tid (the task + 1), as in `ps` and in
     // the core dump. The thread that stopped gives out its registers from the exception's frame;
     // the others — from the context saved by the scheduler (where they were taken off
@@ -291,18 +233,16 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
     // showed the registers of one and the same thread under different numbers.
     let me = crate::sched::current_id() as u64 + 1;
     let mut sel = me;
-    let mut stop = [0u8; 40]; let mut sn = 0;
-    for &b in b"T05thread:" { stop[sn] = b; sn += 1; }
-    sn += write_tid_hex(&mut stop[sn..], me); stop[sn] = b';'; sn += 1;
     // `core:` is a standard field of the stop answer: on which core the thread stopped.
-    for &b in b"core:" { stop[sn] = b; sn += 1; }
-    sn += write_tid_hex(&mut stop[sn..], crate::percpu::cpu_id() as u64); stop[sn] = b';'; sn += 1;
-    send(&stop[..sn]); // we have stopped (a SIGTRAP), and have named which thread
+    let mut stop = [0u8; 40];
+    let sn = gdbproto::stop_reply(&mut stop, me, crate::percpu::cpu_id() as u64);
+    PORT.send(&stop[..sn]); // we have stopped (a SIGTRAP), and have named which thread
     loop {
-        let n = recv(&mut buf);
-        if n == 0 { send(b""); continue; }
+        let n = PORT.recv(&mut buf);
+        if n == 0 { PORT.send(b""); continue; }
+        if gdbproto::common(&PORT, &buf, n, me, &mut sel) { continue; }
         match buf[0] {
-            b'?' => send(&stop[..sn]),
+            b'?' => PORT.send(&stop[..sn]),
             b'g' if sel == me => send_regs_packet(f),
             b'g' => {
                 // The thread stands on a parked core — its registers are in the parking frame.
@@ -325,7 +265,7 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
                     None => { let z: Frame = unsafe { core::mem::zeroed() }; send_regs_packet(&z); }
                 }
             }
-            b'G' if sel != me => send(b"E01"),     // only the one that stopped may be written to
+            b'G' if sel != me => PORT.send(b"E01"),     // only the one that stopped may be written to
             b'G' => { // a write of the registers: the g-order (LE per reg) back into the frame
                 // i-th 64-bit register in g-order: '1' skips the 'G', 16 hex digits each
                 let reg = |i: usize| read_le_hex(&buf, 1 + i * 16, 8);
@@ -341,55 +281,36 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
                 f.rflags = read_le_hex(&buf, 1 + 17 * 16, 4);
                 f.cs = read_le_hex(&buf, 1 + 17 * 16 + 8, 4);
                 f.ss = read_le_hex(&buf, 1 + 17 * 16 + 16, 4);
-                send(b"OK");
-            }
-            b'm' => { // m addr,len
-                let addr = parse_hex(&buf[1..n]);
-                let mut i = 1; while i < n && buf[i] != b',' { i += 1; }
-                let len = parse_hex(&buf[i+1..n]) as usize;
-                let mut out = [0u8; 512]; let mut o = 0;
-                for k in 0..len.min(240) {
-                    let b = unsafe { core::ptr::read_volatile((addr + k as u64) as *const u8) };
-                    out[o]=hexd(b>>4); out[o+1]=hexd(b&0xf); o+=2;
-                }
-                send(&out[..o]);
-            }
-            b'M' => { // M addr,len:data
-                let addr = parse_hex(&buf[1..n]);
-                let mut i = 1; while i < n && buf[i] != b':' { i += 1; }
-                let mut k = 0; let mut j = i + 1;
-                while j + 1 < n { let b = (unhex(buf[j])<<4)|unhex(buf[j+1]);
-                    unsafe { core::ptr::write_volatile((addr + k) as *mut u8, b); } k += 1; j += 2; }
-                send(b"OK");
+                PORT.send(b"OK");
             }
             b'Z' if n >= 2 && buf[1] == b'0' => { // Z0,addr,kind — sw breakpoint
                 let addr = parse_hex(&buf[3..n]);
                 unsafe { for i in 0..BPMAX { if !BP_USED[i] {
                     BP_ADDR[i]=addr; BP_ORIG[i]=core::ptr::read_volatile(addr as *const u8);
                     core::ptr::write_volatile(addr as *mut u8, 0xCC); BP_USED[i]=true; break; } } }
-                send(b"OK");
+                PORT.send(b"OK");
             }
             b'z' if n >= 2 && buf[1] == b'0' => { // z0,addr,kind
                 let addr = parse_hex(&buf[3..n]);
                 unsafe { for i in 0..BPMAX { if BP_USED[i] && BP_ADDR[i]==addr {
                     core::ptr::write_volatile(addr as *mut u8, BP_ORIG[i]); BP_USED[i]=false; break; } } }
-                send(b"OK");
+                PORT.send(b"OK");
             }
             b'Z' if n >= 2 && (buf[1] == b'2' || buf[1] == b'3' || buf[1] == b'4') => { // hw-watchpoint
                 let addr = parse_hex(&buf[3..n]);
                 let rw = if buf[1] == b'2' { 0b01 } else { 0b11 }; // write / access (read->access)
                 unsafe { set_watchpoint(addr, rw); }
-                send(b"OK");
+                PORT.send(b"OK");
             }
             b'z' if n >= 2 && (buf[1] == b'2' || buf[1] == b'3' || buf[1] == b'4') => {
                 unsafe { clear_watchpoint(); }
-                send(b"OK");
+                PORT.send(b"OK");
             }
             b'Z' if n >= 2 && buf[1] == b'1' => { // a hw breakpoint on execution (hbreak)
                 let addr = parse_hex(&buf[3..n]);
-                if unsafe { set_hw_exec(addr) } { send(b"OK"); } else { send(b"E0e"); } // there are no slots
+                if unsafe { set_hw_exec(addr) } { PORT.send(b"OK"); } else { PORT.send(b"E0e"); } // there are no slots
             }
-            b'z' if n >= 2 && buf[1] == b'1' => { let addr = parse_hex(&buf[3..n]); unsafe { clear_hw_exec(addr); } send(b"OK"); }
+            b'z' if n >= 2 && buf[1] == b'1' => { let addr = parse_hex(&buf[3..n]); unsafe { clear_hw_exec(addr); } PORT.send(b"OK"); }
             // Continuing after a HARDWARE breakpoint on execution: without the RF the processor
             // will stop on the same instruction again without having executed it — and gdb
             // will get stuck on `continue` forever.
@@ -403,42 +324,11 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
                     clear_watchpoint(); clear_hw_exec_all();
                 }
                 if f.vec == 1 { f.rflags |= 1 << 16; }
-                send(b"OK");
+                PORT.send(b"OK");
                 return ACT_DETACH;
             }
             b's' => { f.rflags |= 0x100; return ACT_STEP; }// single-step (TF)
-            b'H' => { // Hg<tid> — whose registers to read; Hc — we always continue everyone
-                if n >= 2 && buf[1] == b'g' {
-                    let neg = n >= 3 && buf[2] == b'-';
-                    let t = if neg { 0 } else { parse_hex(&buf[2..n]) };
-                    if t == 0 { sel = me; send(b"OK"); }
-                    else if crate::sched::saved_ctx(t as usize - 1).is_some() || t == me { sel = t; send(b"OK"); }
-                    else { send(b"E01"); }
-                } else { send(b"OK"); }
-            }
-            b'T' => { // is the thread alive
-                let t = parse_hex(&buf[1..n]);
-                if t == me || (t >= 1 && crate::sched::task_alive(t as usize - 1)) { send(b"OK"); } else { send(b"E01"); }
-            }
-            b'q' => { // qSupported / qfThreadInfo / qsThreadInfo / qC / qAttached
-                if n >= 10 && &buf[0..10] == b"qSupported" { send(b"PacketSize=200;multiprocess-"); }
-                else if n >= 12 && &buf[0..12] == b"qfThreadInfo" {
-                    // the list of the threads: under the scheduler — the tasks, otherwise one ("1")
-                    let cnt = if crate::syscall::THREADED.load(core::sync::atomic::Ordering::SeqCst) {
-                        crate::sched::task_count().max(1) } else { 1 };
-                    let mut out = [0u8; 128]; let mut o = 0; out[o] = b'm'; o += 1;
-                    for t in 0..cnt { if t > 0 { out[o] = b','; o += 1; } o += write_tid_hex(&mut out[o..], (t + 1) as u64); }
-                    send(&out[..o]);
-                }
-                else if n >= 12 && &buf[0..12] == b"qsThreadInfo" { send(b"l"); } // the end of the list
-                else if n >= 2 && &buf[0..2] == b"qC" {                        // the current thread
-                    let mut out = [0u8; 20]; out[0] = b'Q'; out[1] = b'C';
-                    let k = write_tid_hex(&mut out[2..], me); send(&out[..2 + k]);
-                }
-                else if n >= 10 && &buf[0..10] == b"qAttached" { send(b"1"); }
-                else { send(b""); }
-            }
-            _ => send(b""),
+            _ => PORT.send(b""),
         }
     }
 }
@@ -452,6 +342,11 @@ pub fn enable() {
     unsafe extern "C" { fn gdb_park_stub(); }
     crate::idt::set_vector(PARK_VECTOR, gdb_park_stub as *const () as u64);
 }
+
+/// Whether the stub talks over the console's line (arm64's does; this one has COM2).
+pub fn on_console() -> bool { false }
+/// gdb's ^C on the console's line (arm64); here COM2 is the stub's own.
+pub fn interrupt() { breakpoint() }
 
 /// A breakpoint for entering the debugger (an int3).
 #[inline(always)]

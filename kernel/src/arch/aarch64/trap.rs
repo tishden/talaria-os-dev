@@ -513,6 +513,9 @@ extern "C" fn sync_el0(kind: u64, f: &mut Frame) {
         f.a1 = r;
         return;
     }
+    // The debugger's breakpoint, watchpoint or step in the workload (`gdb.rs`), before the
+    // fault path turns it into a SIGTRAP.
+    if super::gdb::on_exception(f, ec) { return; }
     if user_fault(f) { return; }
     let back = EL0_RETURN.swap(0, Ordering::Relaxed);
     if ec == 0x3C && f.esr & 0xFFFF == 2 && back != 0 {
@@ -621,6 +624,8 @@ extern "C" fn sync_el1_entry(kind: u64, f: &mut Frame) -> u64 {
         if no_page && crate::paging::lazy_fault(f.far) { return me; }
         if write && !no_page && crate::paging::cow_fault(f.far) { crate::metrics::inc_cow_fault(); return me; }
     }
+    // The debugger: its `brk`s in the kernel, a step of kernel code (`gdb.rs`).
+    if super::gdb::on_exception(f, ec) { return me; }
     trap(kind, f)
 }
 
@@ -755,11 +760,15 @@ extern "C" fn irq_entry(_kind: u64, f: &mut Frame) -> u64 {
             crate::sync::WAKE_ACKS.fetch_add(1, Ordering::SeqCst);
             SGIS[cpu.min(63)].fetch_add(1, Ordering::Relaxed);
             super::idt::IPI_COUNT.fetch_add(1, Ordering::Relaxed);
+        } else if id == super::gdb::PARK_SGI {
+            // All-stop: another core talks to gdb; this one stands with its frame visible.
+            super::gdb::park(f);
         } else if let Some(h) = super::idt::handler_of(id) {
             h();
         } else if id < 16 {
             SGIS[cpu.min(63)].fetch_add(1, Ordering::Relaxed);
             super::idt::IPI_COUNT.fetch_add(1, Ordering::Relaxed);
+            if id as usize == super::idt::IPI_VECTOR { crate::pmu::ipi_check(); } // `perf poke <core>`: the counters are read only there
         } else {
             UNCLAIMED[cpu.min(63)].fetch_add(1, Ordering::Relaxed);
         }

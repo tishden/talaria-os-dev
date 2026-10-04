@@ -1685,6 +1685,59 @@ the sample, a source `SRC_NTP`) is a new feature for both architectures, not a p
 Gates: arm64 `test-aarch64.sh` 269/0 (TCG), 270/0 (KVM); x86 `test.sh` `TAL_CI=1` 182/0 + host
 16/0; clippy clean on both.
 
+### 10.12. Phase 8 under TCG: PMUv3, the profile with stacks, the gdb stub (2026-10-04)
+
+**PMUv3** (`arch/aarch64/pmu.rs`). The surface is x86's — the cycles, the retired
+instructions, the last-level cache, the predictor, on every core — and the per-core
+snapshots, the tick's 20 ms step, `perf poke` through an IPI and the refresh before printing
+moved out of x86's module into the shared `perfsample.rs`, so `perf`, `top`, `kstat` and
+`metrics` read both machines the same way. The events are chosen by `PMCEID0/1` and checked
+against the deed (a counter that does not move over a short loop is dropped, not printed as
+zero); the cycles are `PMCCNTR_EL0` with `PMCR.LC`. The difference from x86 is the width:
+before PMUv3p5 an event counter is 32 bits and wraps in about a second at a workload's
+rate. The module takes the first the machine allows — 64-bit counters (`PMCR.LP`), CHAIN
+pairs (half the events), or 32 bits widened by the reader (correct while the core is read
+once per wrap: the tick's snapshot does it; a dedicated core unread for longer loses the
+wraps, and the boot line says which width it is). QEMU's `max` is PMUv3p5 and models
+`INST_RETIRED` only under `-icount`; the gate runs `-icount shift=0`, where the IPC is
+exactly 1.00, and `talaria.pmunarrow=1` forces the reader's widening and sets the counter
+4096 events below 2^32 before a million-iteration loop — the positive control (the widening
+switched off) reads a difference of 2^64 - 4 288 967 251. EL0 may read the counters
+(`PMUSERENR.CR|ER`), not write them.
+
+**The profile with stacks.** The tick's sampler read the interrupted frame pointer as the
+frame's ninth word and the privilege as `cs & 3` (x86's RBP slot and CS selector): on arm64
+every ring-3 sample was filed as the kernel's at depth 1 (`docs/ENGINEERING-NOTES.md` item
+32). Through the frame's accessors: `profdeep` has 248 ring-3 samples, the most frequent
+stack 237 times, the average depth 5.8 — the same picture as x86.
+
+**The gdb stub** (`arch/aarch64/gdb.rs` over the shared `gdbproto.rs`). arm64 has one serial
+line — `virt` models one PL011, a Graviton guest's only port is the console's — so the stub
+shares the console's, as Linux's kgdboc does: while the machine is stopped every other core
+is parked (an SGI; its frame is what `g` shows for its thread) and the line carries packets
+alone; while it runs, gdb skips the console's text; gdb's ^C reaches the console's poll and
+stops the machine. The machine's part: `brk #0x401` for the kernel's own stop, `brk #0x400`
+written into the text for `Z0`, the breakpoint and watchpoint registers for `Z1`-`Z4`
+(published as the machine's state and applied by every core at its scheduler entry, the OS
+lock released first), the software step with the stepped frame's D cleared and I set. Two
+things arm64 does not give: a resume flag — a resume from a hardware breakpoint or a
+watchpoint is a silent step over the instruction with this core's registers off, then the
+registers back — and debug exceptions in the kernel, which runs with `PSTATE.D` set, so the
+registers catch the workload and the kernel is debugged with `break` and `stepi`. The stub
+waits for `?` until gdb is attached: an unsolicited stop reply crossed gdb's `qSupported` on
+the shared line and the attach failed.
+
+Gates (TCG, new in `test-aarch64.sh`): the counters with the exact IPC, the widening across a
+wrap, `obs` with kstat naming the counters and the `wfe` tier, `perf` in the console,
+`profdeep`, `obslive`; the stub — `g` of 536 hex digits, two steps, `hbreak`, detach — and a
+host gdb attaching over the console's line (`bt`, `cpsr` decoded, `info threads`, detach); on
+SMP a stop before the workload's first instruction, an `hbreak` on a thread spinning on a
+secondary caught there, a write watchpoint stopping at three consecutive stores (0, 1, 2 —
+the silent step-over works), ^C, the thread list, detach, and the workload's counter moving
+under a re-attach. x86's stub moved onto `gdbproto.rs` (its `gdb-stub` gate passes); its `m`
+no longer faults on an unmapped address and its `qAttached` answers. arm64
+`test-aarch64.sh` **289/0** under TCG (269 before); clippy clean on both.
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its

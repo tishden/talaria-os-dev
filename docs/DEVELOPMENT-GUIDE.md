@@ -246,8 +246,12 @@ The point where a new mode is added is `selftest/` or `runmode.rs` (§10.2).
 | `telemetry.rs` | 68 | the cell's telemetry: the pkts, the p50/p99 (a log2 histogram), the gaps, the restarts, the uptime | `record_lat`, `inc_gap`, `inc_restart`, `pctl`, `dump` |
 | `watchdog.rs` | 43 | the workload's health: there is no progress of the pkts → a stall→a restart | `arm`, `tick`, `disarm`, `stalls_total` |
 | `fr.rs` | 62 | the flight recorder: a ring of events (boot/paging/fault/restart/syscall-deny/…) | `record`, `dump`, the events' constants |
-| `arch/x86_64/pmu.rs` | ~490 | the hardware counters: the layout is CHECKED against the deed (not by the CPUID), an initialisation on every core, the per-core snapshots from the tick, a `poke` through an IPI | `init`, `init_cpu`, `sample`, `note_tick`, `note_here`, `poke`, `last`, `Sample::delta` |
-| `arch/x86_64/gdb.rs` | 553 | the gdb stub (the GDB Remote Serial Protocol over COM2) | — |
+| `arch/x86_64/pmu.rs` | ~300 | the hardware counters: the layout is CHECKED against the deed (not by the CPUID), an initialisation on every core | `init`, `init_cpu`, `sample` |
+| `perfsample.rs` | ~220 | a snapshot and its arithmetic, and the per-core snapshots of both machines: from the tick, a `poke` through an IPI, the refresh before printing | `note_tick`, `note_here`, `poke`, `last`, `refresh_all`, `Sample::delta` |
+| `arch/x86_64/gdb.rs` | ~450 | the gdb stub (the GDB Remote Serial Protocol over COM2): the entry, the registers, DR0-DR7, the trap flag, the all-stop parking | — |
+| `arch/aarch64/gdb.rs` | ~450 | arm64's stub over the console's line: `brk`, the breakpoint/watchpoint registers, the software step (a resume over a hardware stop is a silent step), the parking SGI | `on_exception`, `park`, `interrupt` |
+| `gdbproto.rs` | ~180 | the protocol without the machine: the framing, the hex, the stop reply, `m`/`M` through the guarded load, the threads, `q*` | `Port`, `common`, `stop_reply` |
+| `arch/aarch64/pmu.rs` | ~370 | PMUv3: the events by `PMCEID`, checked against the deed; the width — 64-bit (v3p5), CHAIN pairs, or 32 bits widened by the reader (`talaria.pmunarrow=1` tests it) | `init`, `init_cpu`, `sample`, `selftest_wrap` |
 | `arch/x86_64/tsc.rs` | 482 | the calibration of the TSC, `rdtsc`, the Hz cache | `calibrate`, `calibrate_cached`, `rdtsc`, `set_hz` |
 | `vdso.rs` | 86 | the vDSO: `clock_gettime` in a process WITHOUT a syscall (the page is mapped into the process, the base is republished by the clock's servo) | `init`, `map_into`, `publish`, `symbol` (the clock call's offset in the image — `init` refuses an image without it; the arm64 EL0 probe calls it) |
 | `arch/x86_64/vga.rs` | 123 | the VGA text screen (0xB8000) — the kernel's second output channel: on `*.metal` `get-console-output` returns the FIRMWARE's console, not COM1 | `clear`, `enable`, `putb`, `peek` |
@@ -767,7 +771,8 @@ kfast=0 and a cap=2), `syncbench`, `futexlat`, `fiber`, `dynsync`, `shmwake`, th
   tick (`note_tick`), while a dedicated core (there is no tick) is taken by an explicit
   `poke` through an IPI.
 - **`gdb.rs`** — the GDB RSP over COM2 (`-M pc` is needed); it is switched on by a `talaria.mode=gdb`
-  or by the command `gdb on` on a live machine.
+  or by the command `gdb on` on a live machine. The packets that do not touch the machine are
+  `gdbproto.rs`'s, shared with arm64's stub (over the console's line — `arch/aarch64/gdb.rs`).
 
 ---
 
