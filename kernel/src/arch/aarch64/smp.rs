@@ -174,7 +174,11 @@ pub fn rearm_period_ns() -> u64 {
     let c = me();
     if TIMER_ONESHOT[c].load(Ordering::Relaxed) != 0 || TIMER_REM[c].load(Ordering::Relaxed) != 0 { return 0; }
     let p = TIMER_PERIOD[c].load(Ordering::Relaxed);
-    if p != 0 { p } else { trap::TICK_NS.load(Ordering::Relaxed) }
+    if p != 0 { return p; }
+    // No period of the scheduler's: the bring-up's tick, but only until the scheduler owns the
+    // timer — after that a zero period is a DEDICATED core (`sched::ap_loop` stopped its
+    // tick on purpose), and a borrowed deadline firing there must not revive the tick.
+    if super::idt::SCHED_TIMER.load(Ordering::Relaxed) != 0 { 0 } else { trap::TICK_NS.load(Ordering::Relaxed) }
 }
 /// Lend the tick's timer to a one-shot deadline (`sched`'s TSC-deadline waits): remember
 /// what was left of the current period.
