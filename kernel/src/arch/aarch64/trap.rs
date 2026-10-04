@@ -722,7 +722,18 @@ extern "C" fn irq_entry(_kind: u64, f: &mut Frame) -> u64 {
             // Re-arm the deadline (the x86 LAPIC reloads a periodic count itself) — unless the
             // scheduler borrowed the timer for a one-shot, which it re-arms itself.
             let p = super::smp::rearm_period_ns();
-            if p != 0 { timer::on_tick(cpu, p); } else if cpu < 64 { timer::TICKS[cpu].fetch_add(1, Ordering::Relaxed); }
+            if p != 0 { timer::on_tick(cpu, p); } else {
+                // Nothing to re-arm here: a borrowed deadline or the slice's remainder fired, or
+                // the core is dedicated (no tick). The generic timer is LEVEL-sensitive — with
+                // the compare in the past and the timer enabled the line stays raised, and the
+                // vector is re-entered the moment it ends (x86's TSC-deadline fires once). So
+                // the timer is silenced here; the borrower gives it back (`lapic_timer_restore`)
+                // and the scheduler re-arms the period after a remainder (`timer_tick_reload`).
+                // Before this a borrowed 1 ms timeout cost a core over a million interrupts
+                // (the `tsync` MPSC phase never finished on arm64).
+                timer::stop();
+                if cpu < 64 { timer::TICKS[cpu].fetch_add(1, Ordering::Relaxed); }
+            }
             super::idt::TICKS.fetch_add(1, Ordering::Relaxed);
             tick = true;
         } else if id == super::idt::RESCHED_SGI {
