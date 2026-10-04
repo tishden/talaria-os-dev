@@ -165,13 +165,28 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
     let summary = match (from_acpi, from_tree) {
         (Some((mut s, found)), t) => {
             acpi_found = Some(found);
-            // The RAM: the span of what the firmware's map calls memory (the tables of
-            // ACPI — types 3 and 4 — must stay readable too).
-            let (mut lo, mut hi) = (u64::MAX, 0u64);
+            // The RAM: what the firmware's map calls memory (the tables of ACPI — types 3
+            // and 4 — must stay readable too), as ranges joined only where no whole gigabyte
+            // lies between them. NOT one span: a Nitro guest has RAM at 1-2 GiB and from
+            // 16 GiB, and the span made the PCI window between (the console's BAR at
+            // 0x8004_8000) a Normal block of the early map.
+            s.nmem = 0; s.mem_seen = 0;
             for e in bb.map(boot_map).unwrap_or(&[]) {
-                if matches!(e.typ, 1 | 3 | 4) && e.size != 0 { lo = lo.min(e.addr); hi = hi.max(e.addr + e.size); }
+                if !matches!(e.typ, 1 | 3 | 4) || e.size == 0 { continue; }
+                s.mem_seen += 1;
+                let (a, end) = (e.addr, e.addr + e.size);
+                if let Some(r) = s.mem[..s.nmem].iter_mut().find(|r| (a >> 30) <= ((r.base + r.size - 1) >> 30) + 1 && (r.base >> 30) <= ((end - 1) >> 30) + 1) {
+                    let (lo, hi) = (r.base.min(a), (r.base + r.size).max(end));
+                    *r = dtb::Range { base: lo, size: hi - lo };
+                } else if s.nmem < dtb::MAX_MEM {
+                    s.mem[s.nmem] = dtb::Range { base: a, size: e.size }; s.nmem += 1;
+                } else {                                  // out of slots: the last one swallows it
+                    let r = &mut s.mem[dtb::MAX_MEM - 1];
+                    let (lo, hi) = (r.base.min(a), (r.base + r.size).max(end));
+                    *r = dtb::Range { base: lo, size: hi - lo };
+                }
             }
-            if lo != u64::MAX { s.mem[0] = dtb::Range { base: lo, size: hi - lo }; s.nmem = 1; s.mem_seen = 1; }
+            s.mem_seen = s.nmem;
             if let Some(t) = t {
                 s.virtio = t.virtio; s.nvirtio = t.nvirtio; s.virtio_seen = t.virtio_seen;
                 s.rtc = t.rtc;
@@ -233,6 +248,7 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
             bb.map(|b| b.rsdp).unwrap_or(0), f.madt, f.gtdt, f.spcr, f.fadt,
             match (f.uart_other, s.uart_kind) {
                 (Some(_), _) => " (the console is of a type with no driver)",
+                (None, _) if f.uart_pci.is_some() => " (the console is a 16550 behind PCI, its BAR 0)",
                 (None, dtb::UartKind::Ns16550 { width: 4, .. }) => " (the console is a 16550, mmio32)",
                 (None, dtb::UartKind::Ns16550 { .. }) => " (the console is a 16550)",
                 _ => "",
@@ -243,7 +259,13 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
         (None, None) => {}
     }
     for r in &s.mem[..s.nmem] { crate::println!("    RAM {:#012x}..{:#012x} ({} MiB)", r.base, r.base + r.size, r.size >> 20); }
-    if let Some(u) = s.uart { crate::println!("    uart pl011 at {:#x}", u.base); }
+    if let Some(u) = s.uart {
+        let kind = if s.uart_kind == dtb::UartKind::Pl011 { "pl011" } else { "16550" };
+        match acpi_found.and_then(|f| f.uart_pci) {
+            Some((b, d, f)) => crate::println!("    uart {} at {:#x} (BAR 0 of PCI {:02x}:{:02x}.{})", kind, u.base, b, d, f),
+            None => crate::println!("    uart {} at {:#x}", kind, u.base),
+        }
+    }
     match (s.gicd, s.gicr, s.its) {
         (Some(d), Some(r), its) => crate::println!("    gic v3: distributor {:#x}, redistributors {:#x} (+{:#x}), its {:#x}",
             d.base, r.base, r.size, its.map(|i| i.base).unwrap_or(0)),

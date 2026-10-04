@@ -196,6 +196,22 @@ tal_enter_kernel:
     br      x24
 "#);
 
+/// Clean and invalidate `[lo, hi)` to the point of coherency, by address (the firmware's
+/// identity map is still on; nothing writes these bytes again).
+fn clean_to_poc(lo: u64, hi: u64) {
+    let ctr: u64;
+    unsafe { core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)); }
+    let line = 4u64 << ((ctr >> 16) & 0xF);
+    let mut a = lo & !(line - 1);
+    while a < hi {
+        unsafe { core::arch::asm!("dc civac, {}", in(reg) a, options(nostack)); }
+        a += line;
+    }
+    unsafe { core::arch::asm!("dsb sy", options(nostack)); }
+}
+/// A big-endian word (the device tree's header), read through the firmware's mapping.
+fn be32_at(a: u64) -> u32 { u32::from_be(unsafe { core::ptr::read_unaligned(a as *const u32) }) }
+
 #[no_mangle]
 pub extern "efiapi" fn efi_main(image: *mut c_void, st: *mut SystemTable) -> Status {
     unsafe { CON = (*st)._con_out as *mut TextOut; }
@@ -334,6 +350,18 @@ pub extern "efiapi" fn efi_main(image: *mut c_void, st: *mut SystemTable) -> Sta
             }
         }
     }
+    // What the kernel reads with ITS MMU off, straight from RAM, besides the four ranges the
+    // trampoline cleans: the ACPI tables (and the RSDP, wherever the firmware keeps it) and
+    // the device tree. The firmware wrote them through its caches, and nothing obliges it to
+    // have cleaned them: a line left dirty is stale in RAM, and the kernel would find no
+    // "RSD PTR " and no console. TCG has no caches and KVM on a Graviton forces the guest's
+    // memory cacheable (S2FWB), so neither gate can show this one.
+    for i in 0..n {
+        let e = unsafe { *mm.add(i) };
+        if e.typ == 3 || e.typ == 4 { clean_to_poc(e.addr, e.addr + e.size); }
+    }
+    if rsdp != 0 { clean_to_poc(rsdp, rsdp + 36); }
+    if dtb != 0 { clean_to_poc(dtb, dtb + be32_at(dtb + 4) as u64); }
     unsafe {
         *(info as *mut BootBlock) = BootBlock {
             magic: BOOT_MAGIC, rsdp, dtb, cmdline: info + CL_OFF as u64,

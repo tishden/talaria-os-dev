@@ -10,11 +10,15 @@
 //!   distributor (0x0C), the redistributor region (0x0E; a machine without one gives each
 //!   core's frame in its GICC entry, and the region is their span), the ITS (0x0F);
 //! * `GTDT`: the generic timer's interrupts, as INTIDs;
-//! * `SPCR`: the console's type and address — a PL011 here; the 16550 a Nitro guest names
-//!   needs its own driver and is reported, not driven;
+//! * `SPCR`: the console's type and address — a PL011, or the 16550 a Nitro guest names. A
+//!   revision-2 table may name a PCI function instead (EC2's does: `1d0f:8250` at 00:01.0,
+//!   with a placeholder address that is the ENA's BAR); then the console is that function's
+//!   BAR 0, read through the MCFG's window, its memory decoding switched on here — the
+//!   firmware leaves it off;
 //! * `FACP` (the FADT): the Arm boot flags — PSCI, and through `hvc` or `smc`.
-//! The ECAM window (the MCFG), the power-off and the NUMA tables stay with the shared
-//! `acpi.rs`, which walks the same RSDP later.
+//! The ECAM window (the MCFG) is read here only to find a PCI console; the PCI layer, the
+//! power-off and the NUMA tables stay with the shared `acpi.rs`, which walks the same RSDP
+//! later.
 //!
 //! The parsers take the table's BYTES, so a host test feeds them a table built in the test;
 //! `summary` is the one function that turns physical addresses into slices.
@@ -31,6 +35,11 @@ pub struct Found {
     /// The SPCR's interface type when it is not a PL011 (0x03), an SBSA UART (0x0E) or a
     /// 16550 (0x00, 0x01, 0x12) — a console the kernel has no driver for.
     pub uart_other: Option<u8>,
+    /// The SPCR names a PCI function (bus, device, function) rather than an address, and
+    /// whether its BAR 0 became the console (false: no MCFG, no such function, no memory BAR —
+    /// then there is no console at all: the table's address is a placeholder).
+    pub uart_pci: Option<(u8, u8, u8)>,
+    pub uart_pci_ok: bool,
 }
 
 /// The MADT: the cores, the distributor, the redistributors, the ITS.
@@ -98,6 +107,46 @@ pub fn spcr(t: &[u8], out: &mut Summary) -> Option<u8> {
     }
 }
 
+/// A revision-2 SPCR's PCI function: (bus, device, function), when the vendor field names
+/// one (0xFFFF — or 0 in a table that never set it — means "not a PCI device").
+pub fn spcr_pci(t: &[u8]) -> Option<(u8, u8, u8)> {
+    if *t.get(8)? < 2 { return None; }
+    let vendor = u16::from_le_bytes([*t.get(66)?, *t.get(67)?]);
+    if vendor == 0xFFFF || vendor == 0 { return None; }
+    Some((*t.get(68)?, *t.get(69)?, *t.get(70)?))
+}
+
+/// The MCFG's window for segment 0: its base (the address of bus 0, whatever the first bus).
+pub fn mcfg_seg0(t: &[u8]) -> Option<u64> {
+    let len = (le32(t, 4)? as usize).min(t.len());
+    let mut p = 44;
+    while p + 16 <= len {
+        if u16::from_le_bytes([t[p + 8], t[p + 9]]) == 0 { return le64(t, p); }
+        p += 16;
+    }
+    None
+}
+
+/// The console behind a PCI function: its BAR 0 (a memory BAR, 32- or 64-bit), with memory
+/// decoding switched on. Config space through the ECAM window, aligned words only (the
+/// MMU may be off).
+/// # Safety
+/// `ecam` is the MCFG's segment-0 window and identity-accessible.
+unsafe fn pci_uart_bar(ecam: u64, (bus, dev, func): (u8, u8, u8)) -> Option<u64> {
+    let cfg = ecam + ((bus as u64) << 20 | (dev as u64 & 0x1F) << 15 | (func as u64 & 7) << 12);
+    let rd = |o: u64| core::ptr::read_volatile((cfg + o) as *const u32);
+    if rd(0) & 0xFFFF == 0xFFFF { return None; }
+    let b0 = rd(0x10);
+    if b0 & 1 != 0 { return None; }                       // an I/O BAR: no ports on arm64
+    let mut base = (b0 & !0xF) as u64;
+    if (b0 >> 1) & 3 == 2 { base |= (rd(0x14) as u64) << 32; }
+    if base == 0 { return None; }
+    // Command: memory space on (bit 1); the status half is written as zeros, which its
+    // write-one-to-clear bits ignore.
+    core::ptr::write_volatile((cfg + 4) as *mut u32, (rd(4) & 0xFFFF) | 2);
+    Some(base)
+}
+
 /// The FADT: the Arm boot architecture flags at 129 — bit 0 PSCI, bit 1 "use hvc".
 pub fn fadt(t: &[u8], out: &mut Summary) {
     let Some(f) = t.get(129..131) else { return; };
@@ -124,6 +173,7 @@ pub unsafe fn summary(rsdp: u64) -> Option<(Summary, Found)> {
     let esz = if wide { 8 } else { 4 };
     let mut out = Summary::default();
     let mut found = Found::default();
+    let mut ecam = None;
     let mut p = 36;
     while p + esz <= len {
         let t = if wide { le64(x, p)? } else { le32(x, p)? as u64 };
@@ -135,10 +185,16 @@ pub unsafe fn summary(rsdp: u64) -> Option<(Summary, Found)> {
         match &tb[..4] {
             b"APIC" => { madt(tb, &mut out); found.madt = true; }
             b"GTDT" => { gtdt(tb, &mut out); found.gtdt = true; }
-            b"SPCR" => { found.uart_other = spcr(tb, &mut out); found.spcr = true; }
+            b"SPCR" => { found.uart_other = spcr(tb, &mut out); found.uart_pci = spcr_pci(tb); found.spcr = true; }
+            b"MCFG" => ecam = mcfg_seg0(tb),
             b"FACP" => { fadt(tb, &mut out); found.fadt = true; }
             _ => {}
         }
+    }
+    if let Some(bdf) = found.uart_pci {
+        let bar = ecam.and_then(|e| pci_uart_bar(e, bdf));
+        found.uart_pci_ok = bar.is_some();
+        if found.uart_other.is_none() { out.uart = bar.map(|base| Range { base, size: 0x1000 }); }
     }
     Some((out, found))
 }
@@ -246,6 +302,15 @@ mod tests {
         let t = header(b"SPCR", &b);
         assert_eq!(spcr(t.bytes(), &mut s2), None);
         assert_eq!(s2.uart_kind, UartKind::Ns16550 { shift: 0, width: 1 });
+        assert_eq!(spcr_pci(t.bytes()), None);      // revision 0: no PCI fields
+        let mut b2 = [0u8; 44];                     // EC2's: a 16550 at PCI 00:01.0, 1d0f:8250
+        b2[28..32].copy_from_slice(&[0x50, 0x82, 0x0f, 0x1d]); b2[33] = 1; // device, vendor; bus 0, device 1, function 0
+        let mut t2 = header(b"SPCR", &b2);
+        t2.b[8] = 2;
+        assert_eq!(spcr_pci(t2.bytes()), Some((0, 1, 0)));
+        let mut b3 = [0u8; 16 + 8];                 // MCFG: reserved 8, then one entry for segment 0
+        b3[8..16].copy_from_slice(&0x2000_0000u64.to_le_bytes()); b3[19] = 0xFF;
+        assert_eq!(mcfg_seg0(header(b"MCFG", &b3).bytes()), Some(0x2000_0000));
         b[0] = 0x08;                                // a type nobody drives
         let t = header(b"SPCR", &b);
         assert_eq!(spcr(t.bytes(), &mut s2), Some(0x08));

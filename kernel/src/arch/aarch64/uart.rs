@@ -21,6 +21,12 @@ const LOCK_SPINS: u32 = 2_000_000;
 
 pub struct Guard;
 pub fn lock() -> Guard {
+    // With the MMU off every access is Device-nGnRnE, and what an atomic read-modify-write
+    // does there is the implementation's choice (an external abort is allowed — taken with
+    // no vectors yet, a silent hang on the first line). TCG and KVM's S2FWB keep the RAM
+    // Normal and would never show it. Only the boot core runs before the MMU is on: there
+    // is nobody to lock out.
+    if super::cpu::sctlr_el1() & 1 == 0 { return Guard; }
     let mut n = 0u32;
     while LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
         n += 1;
