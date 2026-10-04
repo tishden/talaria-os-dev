@@ -194,7 +194,10 @@ pub fn fscache_from_cmdline(cmdline: &str) {
 /// A multiple of WAYS, otherwise the layout by ways will go off.
 fn cache_pick() -> usize {
     let mb = FSCACHE_MB.load(core::sync::atomic::Ordering::Relaxed);
-    let want = if mb != 0 { mb * (1 << 20) / BSZ } else { (crate::mem::free_total_frames() as usize) / 16 };
+    // The share is of ALL the free memory, but the cache itself comes from the low allocator
+    // (`alloc_contig`), which the kernel's own structures live on: not more than half of it.
+    let want = if mb != 0 { mb * (1 << 20) / BSZ } else {
+        ((crate::mem::free_total_frames() / 16).min(crate::mem::free_low_frames() / 2)) as usize };
     (want.clamp(512, NC) / WAYS) * WAYS
 }
 // The cycle of the last access to a slot — an LRU inside a set.

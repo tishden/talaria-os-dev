@@ -879,6 +879,22 @@ assert "forktls: ALL OK" "forktls: the outcome"
 refute "forktls: THE PARENT is spoilt" "forktls: the parent's memory is not spoilt (before the fix of the frames' counter — a corruption at the second fork)"
 refute "fault\] ring 3" "forktls: not a single crash in ring 3 over a hundred forks"
 refute "ATTENTION: the COW refcount table" "forktls: the refcount table covers everything the allocator hands out"
+assert "mem: the high area 0x100000000\.\.0x140000000 \(1024 MB\)" "forktls: the guest's gigabyte above 4 GB is the workload's (the high area) — the forks run over it"
+stopq $q4
+
+# THE MAIN NODE'S MEMORY ABOVE 4 GB (`mem::high_init`). Until session 58 the allocator
+# stopped at 4 GB and that was all a workload could get: 850 MB of a c7g.large's 3995,
+# 3 GB of a c6i.xlarge's 8. The gate checks what the high area rests on — the frames are
+# identity-mapped there, a returned block comes back from the area's own free list, the
+# refcount table reaches its top, a process inherits the leaf and its teardown leaves the
+# kernel's, and a MAP_FIXED over such a gigabyte is refused (the kernel writes the frames
+# there at their identity address under ANY address space).
+rm -f /tmp/o.log
+qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 1 -m 4096 \
+  -kernel "/w/$K" -append "console=ttyS0 talaria.test=highmem" -display none -serial file:/tmp/o.log -no-reboot >/tmp/q.log 2>&1 &
+q4=$!
+for i in $(seq 1 60); do sleep 1; grep -aq "highmem: ALL OK\|highmem: FAILED\|no high area\|panic" /tmp/o.log 2>/dev/null && break; done
+assert "highmem: ALL OK" "highmem: the workload's frames above 4 GB — identity, their own free list, the refcount, the AS leaf, MAP_FIXED refused"
 stopq $q4
 
 # THE CEILING OF THE TASK TABLE IS A REFUSAL RATHER THAN A WRITE PAST THE BOUND.
@@ -2286,6 +2302,7 @@ if [ -f /img/disk_pool.img ]; then
   q=$(bootnuma "talaria.pci=1 talaria.mode=cell talaria.smp=4" /img/disk_pool.img); sleep 3
   assert_slow "acpi: SRAT: the NUMA nodes 2" "numa: two nodes have been parsed from the SRAT (the map core -> node)"
   assert_slow "mem:   node 1: 0x1[0-9a-f]+\.\.0x[0-9a-f]+ \(3072 MB\)" "numa: the node 1 has ITS OWN area of memory, and it is above 4 GB"
+  assert_slow "mem: the high area 0x100000000\.\.0x140000000 \(1024 MB\)" "numa: node 0's own gigabyte above 4 GB is its high area — node 1's memory is not taken for it"
   assert_slow "sched-plan: the NUMA nodes 2 .the mask 0x3." "numa: the scheduler sees both nodes"
   assert_slow "sched-plan: the workload -> the NUMA node 1" "numa: node=1 from the manifest has been applied (the node is named by the operator)"
   assert_slow "cell: the heap 0x1[0-9a-f]+ is allocated \(node 1\)" "numa: the workload's heap is ACTUALLY allocated on the node 1 (the frames above 4 GB are mapped)"

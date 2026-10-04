@@ -130,6 +130,61 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             else { println!("sharedpd: FAILED"); }
             crate::suite::park()
         }
+        "highmem" => {
+            // THE MAIN NODE'S MEMORY ABOVE 4 GB (`mem::high_init`). The workload's frames come
+            // from there first; the gate checks what that rests on: the frames are in the area
+            // and identity-mapped, a returned block comes back from the area's free list (not
+            // the low one), the refcount table reaches the area's top, a process AS inherits
+            // the identity leaf and its teardown leaves the kernel's leaf alone, and a MAP_FIXED
+            // over such a gigabyte is refused. Booted with 4 GB on purpose: the RAM crosses 4 GB.
+            println!("talaria: highmem — the main node's memory above 4 GB");
+            let (hb, he) = crate::mem::high_area();
+            if hb == 0 { println!("highmem: there is no high area (the RAM ends below 4 GB)"); crate::suite::park() }
+            fn check(ok: &mut bool, what: &str, good: bool) {
+                println!("highmem: {}: {}", what, if good { "OK" } else { "FAILED" });
+                *ok &= good;
+            }
+            let mut ok = true;
+            let low0 = crate::mem::free_low_frames();
+            let a = crate::mem::alloc_contig_node(16, 255).unwrap_or(0);
+            check(&mut ok, "the workload's frames come from the high area", a >= hb && a + 16 * 4096 <= he);
+            check(&mut ok, "they are identity-mapped", a != 0 && crate::paging::virt_to_phys(a) == a);
+            let mut same = a != 0;
+            if a != 0 {
+                // SAFETY: P1 — sixteen frames straight from the allocator, nobody else holds them.
+                unsafe {
+                    for i in 0..16 * 512u64 { core::ptr::write_volatile((a + i * 8) as *mut u64, a ^ i); }
+                    for i in 0..16 * 512u64 { same &= core::ptr::read_volatile((a + i * 8) as *const u64) == a ^ i; }
+                }
+            }
+            check(&mut ok, "a pattern written at the identity address reads back", same);
+            crate::mem::free_contig(a, 16);
+            let b = crate::mem::alloc_contig_node(16, 255).unwrap_or(0);
+            check(&mut ok, "a returned block is handed out again from the area's free list", b == a);
+            check(&mut ok, "the low allocator was not touched", crate::mem::free_low_frames() == low0);
+            let top = he - 4096;
+            let out0 = crate::mem::RC_OUTSIDE.load(core::sync::atomic::Ordering::Relaxed);
+            crate::mem::rc_set(top, 3);
+            let rc = crate::mem::rc_get(top);
+            crate::mem::rc_set(top, 0);
+            check(&mut ok, "the refcount table reaches the area's top",
+                rc == 3 && crate::mem::RC_OUTSIDE.load(core::sync::atomic::Ordering::Relaxed) == out0);
+            let asp = crate::paging::new_process_space();
+            let l3 = (b >> 30) as usize;
+            let e3 = crate::paging::kernel_pdpt_entry(l3);
+            // The process's PDPT entry (`phys_of_in` sees private 4K pages only).
+            let e3p = crate::paging::pdpt_entry_in(asp, l3);
+            check(&mut ok, "a process AS inherits the identity leaf", e3p == e3 && e3 & 1 != 0);
+            crate::paging::free_address_space(asp);
+            check(&mut ok, "the AS teardown leaves the kernel's leaf", crate::paging::kernel_pdpt_entry(l3) == e3 && e3 & 1 != 0);
+            check(&mut ok, "a MAP_FIXED over the area's gigabyte is refused, the heap and mmap regions are not",
+                crate::paging::ident_leaf_overlap(b, 1) && !crate::paging::ident_leaf_overlap(crate::user::PROC_HEAP_BASE, 1)
+                    && !crate::paging::ident_leaf_overlap(0x6000_0000_0000, 1));
+            crate::mem::free_contig(b, 16);
+            println!("highmem: the area {:#x}..{:#x} ({} MB)", hb, he, (he - hb) / 1048576);
+            println!("highmem: {}", if ok { "ALL OK" } else { "FAILED" });
+            crate::suite::park()
+        }
         "vmspace" => {
             // Per-process address spaces: one vaddr -> different physical pages depending on CR3.
             println!("talaria: the per-process address space test (a CR3 switch)");
