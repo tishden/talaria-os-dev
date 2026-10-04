@@ -577,6 +577,27 @@ The ENA's PHC (`supported` bit 29) is **not declared** on any Graviton type trie
 (the Amazon Time Sync service over the network is the candidate); the x86 types that declare
 it (`m7i`) stay the PHC's ground. Log (local): `infra/aws/logs/aarch64-ec2-c7g.large-rtt-linux-vs-talaria.log`.
 
+### 10.4. The stand on the ordering audit (2026-10-04)
+
+`c7g.metal` once more (`infra/aws/kvm-stand-aarch64.sh LOOPN=1`, the kernel at `bd0e701`, the
+instance destroyed). The gate under KVM **268/0**.
+
+| what | number |
+| --- | --- |
+| `mbench` | alu 0.77 ns/step, syscall 157–162 ns, syscall-ptr16 194–198 ns, read64 176 ns, chase-64m 92–93 ns |
+| `futexlat` | futex same/cross-core p50 559–599 ns (§10.2: ~512); cond same/cross-core p50 2449–2590 ns (§10.2: ~1900) |
+| `smp2` / `smp4` | speedup 2.00 / 4.00 |
+| the probes | `ring` 2 M slots in 226 ms, 0 corrupted, 8.84 M slots/s; `svccost` 134 ns with the FP/SIMD save, 115 without |
+| the soak (`soak-aarch64.sh 50`, 10 modes with `piperace`) | **0 of 50** each |
+| the parallel race detector (`PAR=24 … 96`, forkap/shmrace/memrace/piperace) | **0 of 96** each |
+| the network, polling | udp RTT p50 11.5 us, p99 12.0; tcp 72 700 req/s (13.8 us/req) |
+| the network, `netirq=1` | udp RTT p50 22.7 us; **tcp `diskserver` 39 509 req/s, 25.3 us/req — no fault** (the fix of the plan's §10.8, confirmed) |
+
+The wake path is the one regression: the futex RTT +11 %, the condvar RTT +32 % against the
+previous stand, the audit's new barriers on it (the plan's §10.10). The stand ran before
+the generic timer's interrupt-storm fix (the plan's §10.10), which touches every timed wait.
+Log (local): `infra/aws/logs/aarch64-20261004-150746/`.
+
 ## 11. Reproducing any of this
 
 ```sh

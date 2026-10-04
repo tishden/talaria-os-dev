@@ -648,6 +648,17 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     translations to them — plus one with no ordering in it at all: arm64's `membarrier`
     waited for an acknowledgement nobody sent, so every call spun its 1 ms insurance and
     ordered nothing.
+31. **"A level where the code expected an edge."** The kernel lends the core's timer to a
+    waiter's deadline and gets it back when the waiter wakes. On x86 the TSC-deadline fires
+    once; arm64's generic timer is LEVEL-sensitive — with the compare in the past it stays
+    raised. When a lent deadline fired, the vector found "nothing to re-arm" (the timer is
+    lent) and did nothing to it, so it was re-entered the moment it ended: 1.1 million
+    interrupts on one core, until the waiter got the core back. Nothing crashed; libtsync's
+    MPSC phase simply never finished on arm64, and it took a watchdog printing the queue AND
+    the core's timer state to see that the "lost wakeup" was a core drowning in its own
+    interrupt. **Port the semantics of an interrupt source, not its call sites**: what
+    silences it, and who does when the usual silencer is away (`trap.rs` stops the timer
+    itself when it has nothing to re-arm).
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
