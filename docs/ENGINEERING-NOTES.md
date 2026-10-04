@@ -626,6 +626,28 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     kernel panicked for a page table — under QEMU the low memory was 3 GB. **The
     emulator's memory shape is not the machine's**: the gate now cuts the low
     allocator to the machine's size (`talaria.lowmem=850`) and reproduces the panic.
+30. **"One word that both sides read, change and write back."** The ordering audit
+    (`docs/ARM64-PLAN.md` §10.10) was meant to find `Relaxed` where a `Release` belongs;
+    most of what it found was older and blunter. A pipe kept ONE count that the reader
+    decremented and the writer incremented with plain stores — two cores at once, and one
+    end's update was gone (bytes lost or read twice). An eventfd's counter, a task's and a
+    process's pending-signal sets, the COW refcount of a frame shared between processes,
+    the task-slot claim of `fork`/`clone`, the queue of dead address spaces: each was a
+    read, a change and a store, and each was written when one core ran the workload.
+    None of it is about arm64 — x86 loses these races the same way — and none showed in a
+    year of gates, because no gate put two cores ON THE SAME WORD. A new one does
+    (`piperace`: a 4 MB stream through a pipe between threads, an eventfd from three
+    writers), and on the old kernel it failed 2 runs of 3 under TCG (4 million wrong
+    bytes, an eventfd sum of 304 930 for 300 000) and hung the third. **The question for
+    a shared word is "who else writes it?" before "with what ordering?"** — an atomic RMW,
+    a lock, or one writer per index (the pipe is SPSC now: the reader owns the head, the
+    writer the tail). The ordering half found what the plan expected — an SGI sent before
+    the `dsb` that makes its data visible, TLB invalidations without the `dsb ishst` that
+    must precede them and a large one that stayed on the local core, a kernel stack freed
+    by a plain store before the spills on it, frames given back before the flush of the
+    translations to them — plus one with no ordering in it at all: arm64's `membarrier`
+    waited for an acknowledgement nobody sent, so every call spun its 1 ms insurance and
+    ordered nothing.
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

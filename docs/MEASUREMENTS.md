@@ -553,6 +553,30 @@ starts at `0x4000_0000` (the `0x4008_0000` load address is RAM), PSCI is SMC, th
 runs at 1.05 GHz. Logs: `infra/aws/logs/aarch64-20261003-231145/` and
 `infra/aws/logs/aarch64-{graviton,nitro}-acpi-c7g.*.log`.
 
+### 10.3. Graviton like for like: the UDP RTT against a Linux `c7g`, and no PHC (2026-10-04)
+
+The first arm64 RTT (§10.8 of the plan, p50 40.3 us) was taken from an x86 neighbour.
+This one is like for like: the neighbour is a `c7g.large` with AL2023 arm64 (kernel 6.18,
+`bench/udp_ping`, 20 000 × 64 B, pinned), the echo is either a second AL2023 `c7g.large`
+running `bench/udp_echo` (L) or Talaria on a `c7g.large` with `talaria.mode=userver` — the
+musl echo through the socket syscalls, ENA LLQ, polling (T). All three in one cluster
+placement group; `lab-up.sh` now gives the neighbour the arm64 AMI when its type is arm64.
+
+| 8 alternating pairs | p50 | p99 | p99.9 |
+| --- | --- | --- | --- |
+| Linux ↔ Linux (L) | 33.6–34.9 us (median 34.1) | 39.8–49.4 us | 52–71 us |
+| Linux ↔ Talaria (T) | 33.7–35.0 us (median 34.5) | 39.9–42.1 us | 52–60 us |
+
+The median is a tie (within 1 %; one side of each path is the same Linux), the tail is
+narrower on Talaria's side. Before the alternation both sides showed a second mode at ~49 us
+p50 in some runs (L 49.1/49.0/35.8, T 33.7/34.1/49.1) — the path's, not the stack's.
+
+The ENA's PHC (`supported` bit 29) is **not declared** on any Graviton type tried —
+`c7g.large`, `c7gn.large`, `c8g.large`, `m7g.large` (`supported` = 0x14205df6 / 0x54205df6 /
+0xd4205df6 / 0x94205df6). The wall clock's reference on Graviton has to be something else
+(the Amazon Time Sync service over the network is the candidate); the x86 types that declare
+it (`m7i`) stay the PHC's ground. Log (local): `infra/aws/logs/aarch64-ec2-c7g.large-rtt-linux-vs-talaria.log`.
+
 ## 11. Reproducing any of this
 
 ```sh

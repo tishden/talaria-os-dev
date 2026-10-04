@@ -8,6 +8,19 @@ the kernel leans on, what replaces it, in which order it is built, and by which
 gate each step is judged. The numbers here are estimates and are marked as such;
 the measurements come later and go to `docs/MEASUREMENTS.md`.
 
+Status (2026-10-04, branch `arm64-port`): **the first pass of phase 5 (the ordering audit)
+is done by reading, and phase 4's tails are closed under TCG** (§10.10). The audit found more
+ATOMICITY than ordering: a pipe, an eventfd, the pending-signal sets, the COW refcount, the
+task-slot claim — one word written by two cores with plain read-change-store, wrong on x86
+as much as on arm64; a new gate (`piperace`) failed on the old kernel 2 runs in 3. The
+ordering half: the SGI's `dsb`, the TLB invalidations' `dsb ishst` and their reach, a
+store-release where a stack is freed, an arm64 `membarrier` nobody acknowledged. virtio-pci
+drives the NIC on both machines (the UEFI paths have a network now), bridges are numbered
+when no firmware did, the zero-syscall cell runs on arm64, the RAM above 4 GB is kept in up
+to four pieces. `test-aarch64.sh` 267/0 under TCG, `test.sh` 496/0 + 22/0. The KVM confirmation
+and the measured `SeqCst` downgrades are what phase 5 still owes (§10.10's last list), with
+libtsync's tier-2 stall (shared, found by the port).
+
 Status (2026-10-01, branch `arm64-port`): **phase 4 is done on QEMU `virt` and the product
 boot path of phase 6 runs under `edk2`.** The network over virtio-mmio (the card's line
 through the GIC, the whole network block of the regression), PCIe through the tree's ECAM,
@@ -674,6 +687,10 @@ or the core boundary:**
   14 ns, a quarter of the entry. The lazy-save decision (§4.5) stays open for phase 9.
 * Fifty runs of the bring-up gate in a loop (250 boots of 4 cores: PSCI, the
   redistributor wake, SGIs): **0 of 50 failed**, 36/36 every time, about 5 s a run.
+
+**The audit by reading, file by file (2026-10-04)** — what it found and changed, and what is
+left for the stand and for the measured downgrades, is §10.10. Most of it was not ordering
+but atomicity: words two cores rewrote with plain stores, as wrong on x86 as on arm64.
 
 ### 4.14. Observability
 
@@ -1497,6 +1514,114 @@ two FAILs the knob registry's order (`talaria.lowmem` out of alphabetical place 
 Still open: a single high area (the largest piece — a machine with several holes above
 4 GiB uses one of them); the real fix of the identity window is a kernel direct map in
 the higher half.
+
+### 10.10. The ordering audit by reading, and phase 4's tails (2026-10-04)
+
+**The audit (phase 5, §4.13), first pass.** Four readers went through the shared code by
+subsystem — the scheduler; the network stack and the rings; the file system, memory and
+page tables; the wait/wake protocols, the cores' bring-up, the syscalls and the
+observability counters — with one question per shared word: is this a publish/consume pair,
+a Dekker pair, or a read-change-store from two cores? Every finding was re-read on both
+sides before a line changed. What changed:
+
+* **One word, two writers, no atomic** (all architectures — `docs/ENGINEERING-NOTES.md`
+  §6.1 item 30). The pipe (one count both ends rewrote: now an SPSC ring, the reader owns the
+  head, the writer the tail, a lock per END for several readers or writers); the eventfd's
+  counter (a CAS take, an atomic add); the pending-signal sets of a task and of a process
+  (`fetch_or`/`fetch_and`, a take that checks the bit it took); `FUTEX_WAKE_OP`'s op on the
+  user word (atomic, as Linux's); the COW refcount (`mem::rc_release`: the check and the
+  decrement one RMW — and `cow_fault` installs its copy by a CAS over the entry it decided
+  on, so two threads faulting on one page no longer both install and both drop); the task
+  slot of `fork`/`clone` (a claim lock: two cores took one row); the dead-address-space
+  queue (a CAS claim); `mem::reserve`'s pair under the list's lock.
+* **The publish/consume pairs.** `wait4`'s exit code against the death marks (a release
+  after the code, an acquire before reading it — the slot's previous tenant's status could
+  be read); `NOTIFIED` (an `AtomicBool`, release/acquire); the core-dump registers;
+  ext2's deferred-write claim released without the FS lock (a fence before the `-1`);
+  the wall clock's seqlock writer (the fence after the odd count); the ITS's LPI vector
+  (set before the mapping, release/acquire).
+* **Dekker pairs.** The NIC's "a pass is owed" flag against the stack lock's release (both
+  sides `SeqCst`, and the interrupt retries the lock once after raising the flag — the window
+  existed with no reordering at all); the flag's clear is a swap that the ring reads follow;
+  `netsys::wake_owner`'s load of the sleeper's registration is `SeqCst` after its `SeqCst` bump.
+* **arm64's own barriers.** `send_sgi` has the `dsb ishst` Linux's `gic_ipi_send_mask` has
+  (a `dmb` does not order a system-register write, and `nomem` let the compiler move the
+  caller's stores past the `msr`); `flush_page`/`flush_all` have the `dsb ishst` before the
+  `tlbi`; a flush of more than 64 pages or of "everything" was LOCAL (`tlbi vmalle1`) — it is
+  `vmalle1is` now; `fork` flushes the parent's other threads' TLBs (on both machines: a
+  sibling on another core kept writing into the frame the child now shares); `munmap` and
+  `madvise(DONTNEED)` give the frames back AFTER the flush (`paging::Deferred`), not during
+  the walk; the switch stub frees the old kernel stack with `stlrb`; the ITS's command queue
+  is behind a `dsb st`; `dma_wmb`/`dma_rmb` lost `nomem` (a compiler barrier as well).
+* **One with no ordering in it.** arm64's `membarrier` waited for `WAKE_ACKS`, which only
+  x86's wake stub increments: every call with a second core online spun its 1 ms insurance
+  and ordered nothing. The wake SGI now acknowledges after a `dmb ish` (`trap.rs`).
+* **The secondary's boot data.** A core started by `CPU_ON` runs with its caches off until
+  `enable_here`: the kernel's root word and the top of its stack are cleaned to the PoC
+  before the call (Linux does the same for `secondary_data`; under KVM S2FWB hides it).
+
+The gate for the first class is new: **`piperace`** (both machines) — a 4 MB stream through
+a pipe between threads on two cores, checked byte by byte, and an eventfd written from three
+cores, summed exactly. On the old kernel under TCG it failed 2 runs of 3 (4.1 million wrong
+bytes, a sum of 304 930 for 300 000) and hung the third; it passes on the new one under TCG
+and KVM.
+
+**What phase 5 still owes.** The KVM run of all this (the stand's soak, the parallel race
+detector, `piperace` in a loop — with the netirq confirmation of §10.8 on the same bill);
+the hot `SeqCst` downgrades, each a measured x86 commit (the readers listed candidates: the
+scheduler's redundant `fence(SeqCst)` next to `SeqCst` accesses, the candidate filters of
+the pickup, `NET_WAITERS`/`NET_POLLER`); three small ones left as noted — `netprof`'s dump
+slot claim (diagnostics), `l1::arm_intr`'s `try_take` that can skip an unmask, the 1 GB
+identity leaves of a high area that cover a hole beside it (Normal memory over what may be
+a device on a bare machine).
+
+**Phase 4's tails.**
+
+* **virtio-pci** (`virtnet.rs`): the vendored crate's `PciTransport` over `pci.rs`'s config
+  access, its BARs assigned or respected (`pci::assign_mem_bars`), a driver of its own
+  (`virtio-pci` — the enumeration counts per driver). Polled; its interrupt would be an MSI-X
+  through the ITS. The gates: arm64 `virt` with no firmware (our BARs), arm64 under edk2 and
+  x86 q35 under OVMF (the firmware's BARs), a UDP echo each — the UEFI paths have a NIC.
+* **Bridges with no firmware** (`pci::number_bridge`): depth first, the next bus number as
+  the secondary, the subordinate opened while the buses below are numbered and closed after,
+  the devices behind given BARs during the scan and the bridge's memory window set around
+  them. The tree's ECAM now names as many buses as its window holds. Gate: a card behind a
+  root port, a switch's upstream and downstream ports (bus 3), echoing.
+* **The zero-syscall cell on arm64**: `fastapp`/`fastflood` take the call and the spin hint
+  from `tal_arch.h` (`fastflood`'s publish had a compiler barrier only — a release fence
+  now); the core started for the cell runs the datapath instead of the bring-up's idle loop
+  (`runmode::CELL_AP`) and reports through `AP_UP`, not `ONLINE`. Gate: 100 000 frames
+  through the TX ring with the kick amortised, and the echo with zero syscalls and faults per
+  packet.
+* **The RAM above 4 GB in up to four pieces** (`memspan::pick_high`, host-tested in
+  `kernel-unit`): a machine with holes between banks, or another node's area in the middle
+  of the main node's RAM, gets every piece, the largest first.
+
+* **The last ring-3 sources**: `launcher` (freestanding: raw `svc`, `clone(SIGCHLD)` for the
+  fork arm64 does not have; its child runs `/mhello` — there is no arm64 busybox yet) and
+  libtsync (the fibers' switch saves x19-x30 and d8-d15; the counter and the spin hint are the
+  machine's; there is no user-mode monitor wait on arm64, so the tier 1 stays off). Gates:
+  `procdemo`, `fiber`, `syncbench`. `kernel/user/aarch64/tsync/` is embedded by `build.rs`
+  as `tsync/<name>`, as on x86.
+
+**Found on the way, left open: libtsync's tier 2 stalls.** With the monitor tier off — every
+wait in the kernel — the `tsync` set stops in its MPSC phase now and then: the consumer parks
+for a slot whose producers are both asleep a lap later. It is not arm64's: x86 with
+`-DTSYNC_DISABLE_TIER1` stalls the same way (1 run of 5 completed under KVM), and it is the
+"tsync flakes by itself" of the x86 gate's history, which the tier 1 hid. On arm64 the tier 2
+is the only one, so `tsync` is not in the arm64 gate until the protocol is fixed.
+
+**Graviton like for like** (`docs/MEASUREMENTS.md` §10.3). The UDP RTT from a Linux
+`c7g.large` neighbour: to a second Linux `c7g.large` p50 34.1 us, to Talaria's `userver` on a
+`c7g.large` p50 34.5 us — a tie (8 alternating pairs of 20 000), with Talaria's p99 the
+narrower (39.9–42.1 against 39.8–49.4 us). The ENA's PHC is declared on none of `c7g`,
+`c7gn`, `c8g`, `m7g`: the wall clock's reference on Graviton is not the PHC (the Amazon Time
+Sync service over the network is the candidate — a design item, not done).
+
+The gates: arm64 `test-aarch64.sh` **267/0** under TCG (240 before: `piperace`, virtio-pci with
+and without firmware, the bridges, the cell's two modes, `fiber`, `syncbench`, `procdemo`);
+x86 `test.sh` **496/0** + host 22/0 (`piperace`, the virtio-pci echo under OVMF); `kernel-unit`
+296/0; clippy clean on both. The KVM run of the audit is the stand's next bill.
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
