@@ -8,7 +8,8 @@
 #     bash kernel/test-aarch64-net.sh
 # The environment: TAL_IMG (the kernel image), TAL_ACCEL (the QEMU accelerator flags),
 # TAL_KVM=1 (judge the timing lines too), TAL_DISK (the TFS1 volume), TAL_EXT2 (the ext2
-# image with forksrv; empty — that check is skipped). Paths are relative to /w.
+# image with forksrv; empty — that check is skipped), TAL_SVC (the arm64 services' disks,
+# services/build-aarch64.sh; empty — skipped). Paths are relative to /w.
 #
 # What TCG changes. The emulator is 50-100 times slower than the machine, so a client must
 # not give up early (socat's half-close timer is 0.5 s by default — `-t` below), and the
@@ -245,6 +246,33 @@ waitfor "hotpath enforce: packets=1 " 10
 assert "hotpath enforce: packets=1 Δsyscalls=0 Δfaults=0 -> OK zero-syscall" "fastapp: zero syscalls and zero faults per packet on the hot path"
 refute "$BAD" "fastapp: no trap"
 stopq
+
+# The network services of phase 7's first step (services/build-aarch64.sh): mongoose answers
+# HTTP, Redis RESP — unmodified, static musl, from a TFS1 disk.
+SVC=${TAL_SVC:-}
+if [ -n "$SVC" ] && [ -f "/w/$SVC/disk-mongoose.img" ]; then
+  bootn 2 "talaria.mode=mongoose" "$SVC/disk-mongoose.img"; waitfor "mongoose .an open-source web server. loaded" 120; sleep 2
+  MG=0; for i in $(seq 1 15); do
+    MG=$(printf 'GET / HTTP/1.0\r\n\r\n' | timeout 8 socat -t5 -T6 - tcp:10.0.0.2:80 2>/dev/null | tr -d '\0' | grep -c "200 OK"); [ "$MG" -ge 1 ] && break; sleep 1
+  done
+  [ "$MG" -ge 1 ] && ok "opensource (mongoose): an HTTP 200 from the unmodified web server (epoll, TCP)" || bad "opensource (mongoose): no HTTP 200"
+  refute "$BAD|\[fault\]" "opensource (mongoose): no trap, no fault, no unknown syscall"
+  stopq
+fi
+# Redis as a process (mode=proc, ext2): at start-up it forks to test the kernel for the arm64
+# dirty-bit-across-fork bug and reads the child's /proc/self/smaps — it refused to run on a
+# kernel that dropped D on write-protect (and on one with no smaps).
+if [ -n "$SVC" ] && [ -f "/w/$SVC/ext2-redis.img" ]; then
+  bootn 2 "talaria.mode=proc" "$SVC/ext2-redis.img"; waitfor "Ready to accept connections|exit_group" 150; sleep 1
+  RS=""; for i in $(seq 1 15); do
+    RS=$( (printf 'PING\r\nSET k v1\r\nGET k\r\n'; sleep 4) | timeout 8 bash -c 'cat >&3; cat <&3' 3<>/dev/tcp/10.0.0.2/6379 2>/dev/null | tr -d '\0')
+    echo "$RS" | grep -q "PONG" && break; sleep 1
+  done
+  echo "$RS" | grep -q "PONG" && echo "$RS" | grep -q "v1" && ok "opensource (redis): RESP PING/SET/GET from the unmodified server" || bad "opensource (redis): RESP (got '$(echo "$RS" | tr '\r\n' '  ')')"
+  refute "Your kernel has a bug|Failed to test the kernel" "opensource (redis): its arm64 COW-dirty check passes (D kept across the fork's write-protect, smaps read)"
+  refute "$BAD|\[fault\]" "opensource (redis): no trap, no fault, no unknown syscall"
+  stopq
+fi
 
 echo "NET TOTAL: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]

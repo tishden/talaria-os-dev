@@ -21,7 +21,7 @@
 //! | NX | UXN (bit 54); on a kernel page also PXN |
 //! | PWT or PCD | MAIR index 1 (Device-nGnRE); otherwise index 0 (Normal write-back, inner shareable) |
 //! | bits 9, 10, 11, 55 | the software bits 55, 56, 57, 58 (the hardware never reads them) |
-//! | A (5), D (6), G (8) | dropped: AF is always set by us, there is no dirty tracking (`take_dirty` never fires), everything is nG |
+//! | A (5), D (6), G (8) | A and G dropped: AF is always set by us, everything is nG; D — below |
 //!
 //! Every present entry also carries AF (the access flag — there is no hardware walk to
 //! set it) and nG (not global: translations are per ASID, which is how x86 without
@@ -74,6 +74,15 @@ const H_SW9: u64 = 1 << 55;
 const H_SW10: u64 = 1 << 56;
 const H_SW11: u64 = 1 << 57;
 const H_SW55: u64 = 1 << 58;
+/// The dirty state of a READ-ONLY page. The scheme above keeps D in AP[2], which a read-only
+/// page needs for its protection, so write-protecting a written page (fork's COW, an
+/// `mprotect(PROT_READ)`) dropped D — the bug Linux fixed in ff1712f953e2 ("arm64: pgtable:
+/// Ensure dirty bit is preserved across pte_wrprotect()"), which Redis tests for at start-up
+/// and refused to run on. On a MAP_SHARED page it lost the write's writeback. Bit 59 is a
+/// leaf's PBHA[0], IGNORED by the walker while TCR.HWU059 is clear (`tcr_value`). Only a
+/// read-only entry carries it; table entries are always made writable, where bit 59 would
+/// be PXNTable.
+const H_SWD: u64 = 1 << 59;
 
 /// The MAIR indices (`MAIR_VALUE` below). Attr0 = Normal write-back (RAM), Attr1 =
 /// Device-nGnRE (MMIO), Attr2 = Normal non-cacheable (the write-combining analogue: the
@@ -89,7 +98,7 @@ pub fn enc(c: u64) -> u64 {
     if c & C_P == 0 { return c; }
     let mut h = (c & ADDR_MASK) | VALID | AF | NG;
     if c & C_PS == 0 { h |= TABLE_OR_PAGE; }
-    if c & C_RW == 0 { h |= AP2_RO; }
+    if c & C_RW == 0 { h |= AP2_RO; if c & C_D != 0 { h |= H_SWD; } }
     else if hw_dirty() { h |= DBM; if c & C_D == 0 { h |= AP2_RO; } } // writable; read-only until the first write
     if c & C_US != 0 { h |= AP1_EL0 | PXN; }
     if c & C_NX != 0 { h |= UXN; if c & C_US == 0 { h |= PXN; } }
@@ -109,6 +118,7 @@ pub fn dec(h: u64) -> u64 {
     if h & TABLE_OR_PAGE == 0 { c |= C_PS; }
     if h & DBM != 0 { c |= C_RW; if h & AP2_RO == 0 { c |= C_D; } }   // tracked: written since the last take_dirty
     else if h & AP2_RO == 0 { c |= C_RW; if !hw_dirty() { c |= C_D; } } // untracked: conservatively dirty
+    else if h & H_SWD != 0 { c |= C_D; }                                // read-only, written before it was protected
     if h & AP1_EL0 != 0 { c |= C_US; }
     if h & UXN != 0 { c |= C_NX; }
     if (h >> ATTR_SHIFT) & 0x7 == ATTR_DEVICE { c |= C_PWT | C_PCD; }

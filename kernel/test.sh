@@ -374,6 +374,7 @@ for spec in \
   "talaria.test=sharedpd|sharedpd: the kernel's directory after the AS teardown: OK|sharedpd: A MINE — tearing a process's AS down freed the kernel's SHARED directory (the frame into the free list -> a #PF in the NVMe doorbell under any CR3; PostgreSQL on EC2 died after 0.3 s)" \
   "talaria.test=fault|FLIGHT RECORDER: [0-9]+ events|flightrec: the crash dump + the ring of the events (the post-mortem)" \
   "talaria.test=pmu|pmu: OK .cycles=[0-9]+|pmu: the rdpmc counters (cycles/instrs/IPC, a TSC fallback)" \
+  "talaria.test=dirtyprot|dirtyprot: OK|paging: a written page made read-only keeps its dirty bit (protect rebuilt the leaf without D — a MAP_SHARED page lost its writeback after an mprotect)" \
   "talaria.test=wc|wc-test: ALL OK|wc: the PAT4 slot = write-combining, the page has been moved into WC (A1: ENA's LLQ window)" \
   "talaria.test=wc|wc-test: PTE .*PAT=1 PWT=0 PCD=0|wc: a 4K PTE — the PAT is set, the PCD/PWT are cleared (the neighbouring page did not change its type)" \
   "talaria.test=vga|vga-test: the line was found in the screen.s buffer|vga: the screen as a second channel of output — the bytes reach the buffer 0xB8000 (PLAN-V1.6 §2)" \

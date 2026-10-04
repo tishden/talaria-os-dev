@@ -637,6 +637,34 @@ commit as a control) were cut off by the stand's own teardown — the next pass 
 `infra/aws/logs/aarch64-20261004-163328/` (`ab.log`, `ab2-perfile-rcpc.log`, `ab3-align.log`,
 the patches).
 
+### 10.6. Phase 8 on hardware, and the step is not the audit's code (2026-10-04)
+
+`c7g.metal` (`kvm-stand-aarch64.sh` at `be5de19`, `LOOPN=0 SOAKN=20 PARN=48`, the A/B with
+`BISECT="ea24e3f be5de19"` and three revert patches, the instance destroyed after 28 minutes).
+The gate under KVM **305/0** — the new PMUv3, profile and gdb-stub checks among them: the
+counters with retired instructions and the 32-bit widening across a wrap on a Neoverse V1
+through KVM, the stub's steps, `hbreak` on a secondary and the watchpoint's silent
+step-over with KVM's emulated debug registers, a host gdb attaching over the console's
+line. The soak 0 of 200 (20 boots × ten modes), the parallel detector 0 of 192. The network
+as before (udp p50 11.3 us, tcp 75 004 req/s; `netirq=1` tcp 39 209 req/s); `mbench` syscall
+156 ns, `svccost` 131 ns with the FP/SIMD save, 114 without.
+
+The A/B of §10.5's step, six interleaved rounds, the median p50 in ns:
+
+| variant | futex cross | condvar cross |
+| --- | --- | --- |
+| `ea24e3f` (before the audit) | 546 | 2243 |
+| HEAD `be5de19` | 574 | 2400 |
+| HEAD − the audit commit's WHOLE `kernel/src` (`rfull`) | 588 | 2432 |
+| HEAD − its wake-path files (`sched`, `sync`, `proc`, `syscall`, `trap`, `smp`, `gic`) | 560 | 2349 |
+| HEAD − its other files (the network, PCI, ext2, the ITS, the barriers, the wall clock) | 588 | 2429 |
+
+The control decides it: taking back every line the audit commit changed in `kernel/src`
+leaves the step where it is. The price is not in the audit's code. What the commit also
+changed is outside `kernel/src` — `build.rs` began embedding the `tsync` set, the image
+grew, everything after the embedded data moved — so the next A/B is the embedding alone
+(and an image padded to the same size without it). The barriers and the atomics stay.
+
 ## 11. Reproducing any of this
 
 ```sh
