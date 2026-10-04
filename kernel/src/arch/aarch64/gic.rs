@@ -210,5 +210,10 @@ pub fn send_sgi(mpidr: u64, sgi: u32) {
         | ((mpidr >> 8) & 0xFF) << 16           // Aff1
         | ((sgi as u64) & 0xF) << 24
         | (1u64 << aff0);                       // the target list within the Aff1 cluster
-    unsafe { core::arch::asm!("msr icc_sgi1r_el1, {}", "isb", in(reg) v, options(nomem, nostack)); }
+    // `dsb ishst` first: a `dmb` (what a SeqCst store or fence gives) does not order a
+    // system-register write, so without it the SGI may arrive before the stores it announces
+    // (a WOKEN mark, a hint) are visible to the target — a lost wakeup until the next
+    // interrupt. And no `nomem`: the compiler must not move the caller's stores past it.
+    // Linux's `gic_ipi_send_mask` does the same (docs/ARM64-PLAN.md §4.13).
+    unsafe { core::arch::asm!("dsb ishst", "msr icc_sgi1r_el1, {}", "isb", in(reg) v, options(nostack)); }
 }

@@ -1090,6 +1090,22 @@ if [ -f "/w/$EFI" ] && [ "/w/$EFI" -nt "/w/$K" ]; then
   assert_slow "pci: 00:03.0 1b36:0010 class=0x010802 msi-x" "uefi-pci: the NVMe is visible in the enumeration (the class 0x0108, MSI-X)"
   assert_slow "pci: 00:02.0 1af4:1000 class=0x020000 msi-x" "uefi-pci: the virtio-net-pci is visible in the enumeration"
   stopq $q
+  # virtio-net over virtio-pci (docs/ARM64-PLAN.md §10.10): the same card DRIVEN, not only
+  # seen — the transport finds its registers through the vendor capabilities in the BARs
+  # OVMF assigned; a UDP echo through it on the gate's tap.
+  rm -f /tmp/o.log
+  qemu-system-x86_64 -M q35 -enable-kvm -cpu "$CPU" -smp 1 -m 512 \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \
+    -drive if=pflash,format=raw,file=/tmp/vars.fd \
+    -kernel "/w/$EFI" -append "console=ttyS0 talaria.mode=userver talaria.pci=1" \
+    -netdev tap,id=n0,ifname=tap0,script=no,downscript=no -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56 \
+    -display none -serial file:/tmp/o.log -no-reboot >/tmp/q.log 2>&1 & q=$!
+  assert_slow "virtio-net: the instance 0 — PCI 00:02.0 1af4:1000 \(the virtio-pci transport" "uefi-virtio-pci: the card is driven over virtio-pci (the BARs OVMF assigned)"
+  for _ in $(seq 1 40); do grep -aq 'userver: the UDP echo' /tmp/o.log 2>/dev/null && break; sleep 0.5; done
+  R=$(printf 'PCI86PCI' | timeout 3 socat -T2 - udp:10.0.0.2:9998 2>/dev/null)
+  [ "$R" = PCI86PCI ] || { sleep 2; R=$(printf 'PCI86PCI' | timeout 3 socat -T2 - udp:10.0.0.2:9998 2>/dev/null); }
+  if [ "$R" = PCI86PCI ]; then echo "  PASS  uefi-virtio-pci: the UDP echo through the virtio-pci card"; PASS=$((PASS+1)); else echo "  FAIL  uefi-virtio-pci: the UDP echo (got '$R')"; FAIL=$((FAIL+1)); fi
+  stopq $q
   # §4.8: a device BEHIND BRIDGES and on a NON-zero bus — exactly the case on which
   # Talaria did not find the network on a c7i (the card on the bus 0x27, outside the tree
   # of the bus 0's bridges, while a hundred empty bridges pushed the devices out of the
@@ -1748,6 +1764,19 @@ qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 4 -m 1024 \
 q4=$!; qstarted shmrace-ab
 for i in $(seq 1 40); do sleep 0.5; grep -aq "shmrace: ALL OK\|shmrace: FAILURES\|panic" /tmp/o.log 2>/dev/null && break; done
 assert "shmrace: FAIL one name -> one object" "shmrace A/B: with the tables' lock OFF the same programme gets TWO objects for one name — that is the defect the lock closes"
+stopq $q4
+# A PIPE AND AN EVENTFD WITH THEIR ENDS ON TWO CORES (docs/ARM64-PLAN.md §10.10): each was
+# one counter both ends read, changed and wrote back with plain stores — bytes lost or read
+# twice, increments lost. The old kernel failed this 2 of 3 runs under TCG (4 M wrong bytes,
+# an eventfd sum of 304 930 for 300 000) and hung the third.
+rm -f /tmp/o.log
+qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 4 -m 1024 \
+  -kernel "/w/$K" -append "console=ttyS0 talaria.test=piperace talaria.smp=4" \
+  -display none -serial file:/tmp/o.log -no-reboot >/tmp/q.log 2>&1 &
+q4=$!; qstarted piperace
+for i in $(seq 1 120); do sleep 0.5; grep -aq "piperace: ALL OK\|piperace: FAILURES\|panic" /tmp/o.log 2>/dev/null && break; done
+assert "piperace: the pipe carried 4194304 bytes in order across cores" "piperace: a pipe between threads on two cores carries 4 MB byte-exact"
+assert "piperace: the eventfd summed 300000 increments from 3 threads exactly" "piperace: an eventfd written from three cores loses no increment"
 stopq $q4
 
 # THE ISOLATION OF THE MEMORY. The identity window GB0 (32 MB-1 GB of the physical memory)

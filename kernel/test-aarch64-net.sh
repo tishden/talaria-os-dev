@@ -28,13 +28,15 @@ ip link show tap0 >/dev/null 2>&1 || { echo "  FAIL  net: no tap0 (the container
 
 # bootn SMP APPEND [DISK]: the guest in the background with a NIC on tap0 (and a COPY of DISK
 # on virtio-blk), the console into $O; sets $Q. `waitfor` then waits for the mode's own line.
+# NICDEV (virtio-net-device by default) names the card's transport; KERNEL and FWOPT boot
+# through the firmware instead (the UEFI stub under edk2).
 bootn() {
   rm -f $O; local drv=""
   if [ -n "${3:-}" ]; then cp "/w/$3" /tmp/run.img; drv="-drive id=d0,file=/tmp/run.img,format=raw,if=none -device virtio-blk-device,drive=d0"; fi
-  qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp "$1" -m 1024 -display none -serial file:$O \
-    -kernel "/w/$IMG" -append "console=ttyAMA0 $2 talaria.smp=$1" \
+  qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp "$1" -m 1024 -display none -serial file:$O ${FWOPT:-} \
+    -kernel "${KERNEL:-/w/$IMG}" -append "console=ttyAMA0 $2 talaria.smp=$1" \
     -netdev tap,id=n0,ifname=tap0,script=no,downscript=no \
-    -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56 $drv >/tmp/q.log 2>&1 &
+    -device ${NICDEV:-virtio-net-device},netdev=n0,mac=52:54:00:12:34:56 $drv >/tmp/q.log 2>&1 &
   Q=$!
 }
 # waitfor PAT SECS: until the pattern is on the console (or QEMU is gone).
@@ -183,6 +185,66 @@ assert "connect-test: ALL OK" "the outgoing network: the summary ALL OK"
 refute "$BAD" "connect: no trap, no unknown syscall"
 grep -aq "connect-test: ALL OK" $O || { grep -aE "wall:|dns:|echo-|refused|close-|sleep:|connect-test" $O | sed 's/^/  | /'; tail -3 /tmp/dns.log | sed 's/^/  | dns: /'; }
 stopq; kill $DNSP $ECHOP $DEADP $SLOWP 2>/dev/null; ip addr del 10.0.0.9/24 dev tap0 2>/dev/null
+
+echo "== virtio-net over virtio-pci: the BARs our own (the device tree's window) and the firmware's (edk2) =="
+# The same echo with the card on the PCI bus: with no firmware the kernel assigns the BARs
+# the vendor capabilities name out of the host bridge's window; under edk2 it takes the ones
+# the firmware assigned. The card is polled (its interrupt would be an MSI-X through the ITS).
+NICDEV=virtio-net-pci bootn 1 "talaria.mode=userver talaria.pci=1"; waitfor "userver: the UDP echo" 60
+assert "virtio-net: the instance 0 — PCI 00:[0-9a-f]+\.0 1af4:10(00|41) \(the virtio-pci transport" "virtio-pci: the card is found on the PCI bus (no firmware: our BARs)"
+R=$(udp PCIPCIPC); [ "$R" = PCIPCIPC ] || { sleep 2; R=$(udp PCIPCIPC); }
+[ "$R" = PCIPCIPC ] && ok "virtio-pci: the UDP echo through a card the kernel assigned the BARs of" || bad "virtio-pci: the echo (got '$R')"
+refute "$BAD" "virtio-pci: no trap"
+stopq
+# Behind bridges, with no firmware to number them (docs/ARM64-PLAN.md §10.10): a root port,
+# a switch's upstream and downstream ports, the card three buses down. The kernel numbers the
+# buses depth first and opens each bridge's window around the BARs it gave the devices behind.
+rm -f $O
+qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp 1 -m 1024 -display none -serial file:$O \
+  -kernel "/w/$IMG" -append "console=ttyAMA0 talaria.mode=userver talaria.pci=1 talaria.smp=1" \
+  -netdev tap,id=n0,ifname=tap0,script=no,downscript=no \
+  -device pcie-root-port,id=rp0,bus=pcie.0,chassis=1 -device x3130-upstream,id=up,bus=rp0 \
+  -device xio3130-downstream,id=dn,bus=up,chassis=3 \
+  -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,bus=dn >/tmp/q.log 2>&1 &
+Q=$!; waitfor "userver: the UDP echo" 60
+assert "pci: the bridge 00:01\.0 numbered \(no firmware\): buses 1\.\.3" "pci-bridges: the root port numbered (no firmware), its subordinate covers the switch below"
+assert "virtio-net: the instance 0 — PCI 03:00\.0 " "pci-bridges: the card is found three buses down"
+R=$(udp BRIDGEBR); [ "$R" = BRIDGEBR ] || { sleep 2; R=$(udp BRIDGEBR); }
+[ "$R" = BRIDGEBR ] && ok "pci-bridges: the UDP echo through the bridges' windows the kernel opened" || bad "pci-bridges: the echo (got '$R')"
+refute "$BAD" "pci-bridges: no trap"
+stopq
+
+EFI=kernel/uefi-stub/target/aarch64-unknown-uefi/release/talaria-uefi-stub.efi
+FW=/usr/share/edk2/aarch64/QEMU_EFI.silent.fd
+if [ -f "/w/$EFI" ] && [ -f "$FW" ] && [ "/w/$EFI" -nt "/w/${IMG%.img}" ]; then
+  NICDEV=virtio-net-pci KERNEL="/w/$EFI" FWOPT="-bios $FW" bootn 1 "talaria.mode=userver talaria.pci=1"; waitfor "userver: the UDP echo" 200
+  assert "pci: ECAM 0x[0-9a-f]+ \(MCFG\)" "uefi-virtio-pci: the bus from the ACPI MCFG"
+  assert "virtio-net: the instance 0 — PCI 00:[0-9a-f]+\.0 1af4:10(00|41) \(the virtio-pci transport" "uefi-virtio-pci: the card behind the firmware path (its BARs)"
+  R=$(udp UEFIUEFI); [ "$R" = UEFIUEFI ] || { sleep 2; R=$(udp UEFIUEFI); }
+  [ "$R" = UEFIUEFI ] && ok "uefi-virtio-pci: the UDP echo behind edk2 (the gate's UEFI path has a NIC)" || bad "uefi-virtio-pci: the echo (got '$R')"
+  refute "$BAD" "uefi-virtio-pci: no trap"
+  stopq
+else
+  echo "== virtio-pci under edk2: SKIPPED — no fresh arm64 stub or no edk2 =="
+fi
+
+echo "== the zero-syscall cell on arm64: fastflood and fastapp (the rings between core 1 and ring 3) =="
+# The datapath cell on core 1 bridges the card and two SPSC rings in shared memory; ring 3
+# polls the rings with no syscall. fastflood fills the TX ring 100 000 times; fastapp
+# reflects UDP and the cell counts the syscalls and faults per packet (zero).
+bootn 2 "talaria.mode=fastflood talaria.fast=1"; waitfor "cell-diag: tx=100000" 200
+assert "talaria: the zero-syscall cell on core 1" "fast: the cell runs on core 1 (not the bring-up's idle loop)"
+assert "fastflood: 100000 frames" "fastflood: 100k frames through the cell's TX ring"
+assert "cell-diag: tx=100000 [^k]*kicks=[0-9]{1,4} " "fastflood: the kick is amortised by the batch (<10% of the frames)"
+refute "$BAD" "fastflood: no trap"
+stopq
+bootn 2 "talaria.mode=fast talaria.fast=1"; waitfor "fastapp: the zero-syscall echo is up" 120; sleep 1
+R=$(printf FASTFAST | timeout 4 socat -T3 - udp:10.0.0.2:7777 2>/dev/null); [ "$R" = FASTFAST ] || { sleep 2; R=$(printf FASTFAST | timeout 4 socat -T3 - udp:10.0.0.2:7777 2>/dev/null); }
+[ "$R" = FASTFAST ] && ok "fastapp: the UDP echo through the rings, ring 3 polling" || bad "fastapp: the echo (got '$R')"
+waitfor "hotpath enforce: packets=1 " 10
+assert "hotpath enforce: packets=1 Δsyscalls=0 Δfaults=0 -> OK zero-syscall" "fastapp: zero syscalls and zero faults per packet on the hot path"
+refute "$BAD" "fastapp: no trap"
+stopq
 
 echo "NET TOTAL: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]

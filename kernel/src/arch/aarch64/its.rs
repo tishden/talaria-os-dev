@@ -115,7 +115,9 @@ unsafe fn push(c: [u64; 4]) {
     let w = r64(base + GITS_CWRITER) & 0xF_FFE0;
     for (i, v) in c.iter().enumerate() { core::ptr::write_volatile((q + w + 8 * i as u64) as *mut u64, *v); }
     // The ITS reads the queue as memory: the words must be there before the pointer moves.
-    core::sync::atomic::fence(Ordering::SeqCst);
+    // It is not one of the cores — a `dmb ish` (`fence`) does not order for it; `dsb st`
+    // completes the stores for every observer before the MMIO write (Linux: `its_flush_cmd`).
+    core::arch::asm!("dsb st", options(nostack, preserves_flags));
     w64(base + GITS_CWRITER, (w + 32) % CMDQ_BYTES);
 }
 /// Wait until the ITS has consumed everything written (it is synchronous under QEMU and
@@ -267,13 +269,16 @@ pub fn msi(devid: u32, event: u32, nvec: u32, cpu: usize, vector: Option<u16>) -
                     if n >= MAX_LPI { return None; }
                     NEXT_LPI.store(n as u32 + 1, Ordering::Relaxed);
                     LPI_SRC[n].store(src, Ordering::Relaxed);
+                    // The vector before the mapping: the first LPI may arrive the moment
+                    // the ITS has the MAPTI, and `on_lpi` must find where to go.
+                    if let Some(v) = vector { LPI_VEC[n].store(v, Ordering::Release); }
                     push([0x0A | (devid as u64) << 32, event as u64 | (LPI_BASE as u64 + n as u64) << 32, cpu as u64, 0]); // MAPTI
                     core::ptr::write_volatile((PROP.load(Ordering::Relaxed) + n as u64) as *mut u8, CFG_ON);
                     push([0x0C | (devid as u64) << 32, event as u64, 0, 0]);                         // INV
                     n
                 }
             };
-            if let Some(v) = vector { LPI_VEC[idx].store(v, Ordering::Relaxed); }
+            if let Some(v) = vector { LPI_VEC[idx].store(v, Ordering::Release); }
             push([0x05, 0, rd, 0]);                                                                  // SYNC
             if !drain() { return None; }
             Some((translater(), event))
@@ -289,7 +294,7 @@ pub fn on_lpi(intid: u32, cpu: usize) {
     if cpu < LPIS.len() { LPIS[cpu].fetch_add(1, Ordering::Relaxed); }
     let i = (intid - LPI_BASE) as usize;
     if i >= MAX_LPI { return; }
-    let v = LPI_VEC[i].load(Ordering::Relaxed);
+    let v = LPI_VEC[i].load(Ordering::Acquire);
     if v == u16::MAX { return; }
     if let Some(h) = super::idt::handler_of(v as u32) { h(); }
 }

@@ -1,6 +1,6 @@
 //! The allocator of physical frames from the PVH memory map (hvm_start_info.memmap).
 //! A bump allocator over the largest RAM region above the kernel's image.
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 const FRAME: u64 = 4096;
 const KERNEL_TOP: u64 = 32 * 1024 * 1024; // the historical minimum: the image+stack+tables below 32 MB
@@ -25,9 +25,18 @@ static END: AtomicU64 = AtomicU64::new(0);
 // the per-node areas are, and it serves the same consumers: the workload's memory (heaps,
 // stacks, lazy and COW pages) through `alloc_contig_node`, and the ENA rings (`alloc_high`
 // — a Nitro device accepts them only above 4 GB, see ena.rs). 0 — there is no such area.
-static HIGH_BASE: AtomicU64 = AtomicU64::new(0);
-static HIGH_NEXT: AtomicU64 = AtomicU64::new(0);
-static HIGH_END: AtomicU64 = AtomicU64::new(0);
+// Up to MAX_HIGH pieces, the largest first: a machine whose RAM above 4 GB has holes (MMIO
+// windows between banks, another node's area in the middle) gets all of them, not only the
+// largest — the first version took one and left the rest unseen.
+use crate::memspan::MAX_HIGH;
+static HIGH_BASE: [AtomicU64; MAX_HIGH] = [const { AtomicU64::new(0) }; MAX_HIGH];
+static HIGH_NEXT: [AtomicU64; MAX_HIGH] = [const { AtomicU64::new(0) }; MAX_HIGH];
+static HIGH_END: [AtomicU64; MAX_HIGH] = [const { AtomicU64::new(0) }; MAX_HIGH];
+/// The areas that exist, as (index, base, end); a base of 0 ends the list.
+fn high_areas() -> impl Iterator<Item = (usize, u64, u64)> {
+    (0..MAX_HIGH).map(|i| (i, HIGH_BASE[i].load(Ordering::Relaxed), HIGH_END[i].load(Ordering::Relaxed)))
+        .take_while(|&(_, b, _)| b != 0)
+}
 
 #[repr(C)]
 struct MemEntry { addr: u64, size: u64, typ: u32, _r: u32 }
@@ -110,7 +119,7 @@ pub fn init(start_info: u64) {
 /// other nodes' areas (the bump extents, not what is left).
 fn seen_bytes() -> u64 {
     let mut s = END.load(Ordering::Relaxed).saturating_sub(ALLOC_BASE.load(Ordering::Relaxed));
-    s += HIGH_END.load(Ordering::Relaxed).saturating_sub(HIGH_BASE.load(Ordering::Relaxed));
+    for (_, b, e) in high_areas() { s += e - b; }
     for n in 0..MAX_NODES {
         s += NODE_END[n].load(Ordering::Relaxed).saturating_sub(NODE_BASE[n].load(Ordering::Relaxed));
     }
@@ -123,8 +132,9 @@ fn seen_bytes() -> u64 {
 /// writing a frame at its identity address under that AS, would write into the heap.
 fn ident_ceiling() -> u64 { crate::user::PROC_HEAP_BASE }
 
-/// Build the main node's high area: the largest piece of RAM above 4 GB (and below
-/// `ident_ceiling`) that no other node's area holds, mapped identity by 1 GB at once.
+/// Build the main node's high areas: the largest pieces of RAM above 4 GB (and below
+/// `ident_ceiling`) that no other node's area holds — up to `memspan::MAX_HIGH`, the
+/// largest first (`memspan::pick_high`) — mapped identity by 1 GB at once.
 ///
 /// WHY IT IS NEEDED. The main allocator stops at 4 GB (A2 above), and that was the whole
 /// machine's memory as far as a workload could tell: 850 MB of a `c7g.large`'s 3995 (its
@@ -142,46 +152,38 @@ fn high_init() {
     let main = MAIN_NODE.load(Ordering::Relaxed) as u8;
     let ceil = ident_ceiling();
     let nram = (RAM_N.load(Ordering::Relaxed) as usize).min(MAX_RAM);
-    let (mut best_b, mut best_e) = (0u64, 0u64);
+    let mut ram = [(0u64, 0u64); MAX_RAM];
     for k in 0..nram {
-        let (rb, rl) = unsafe {
+        ram[k] = unsafe {
             (core::ptr::read_volatile(core::ptr::addr_of!(RAM_BASE[k])),
              core::ptr::read_volatile(core::ptr::addr_of!(RAM_LEN[k])))
         };
-        // A region may straddle 4 GB (QEMU's `virt` puts RAM at 1 GB, so 4 GB of it ends
-        // at 5): the part below belongs to the main allocator, the part above is ours.
-        let mut b = (rb.max(4u64 << 30).max(kernel_top()) + FRAME - 1) & !(FRAME - 1);
-        let e = (rb + rl).min(ceil) & !(FRAME - 1);
-        // The runs between the other nodes' areas.
-        while b < e {
-            let mut run_end = e;
-            let mut inside = 0u64;
-            for n in 0..MAX_NODES {
-                let (nb, ne) = (NODE_BASE[n].load(Ordering::Relaxed), NODE_END[n].load(Ordering::Relaxed));
-                if ne <= nb { continue; }
-                if b >= nb && b < ne { inside = ne; break; }
-                if nb > b && nb < run_end { run_end = nb; }
-            }
-            if inside != 0 { b = (inside + FRAME - 1) & !(FRAME - 1); continue; }
-            // With an SRAT the piece must be the main node's: a foreign one would hand the
-            // main node's workload remote memory under the name of its own.
-            let own = |a: u64| { let n = crate::acpi::node_of_phys(a); n == 255 || n == main || main == 255 };
-            if run_end - b > best_e - best_b && own(b) && own(run_end - 1) { best_b = b; best_e = run_end; }
-            b = run_end;
-        }
     }
-    if best_e > best_b {
+    let taken: [(u64, u64); MAX_NODES] = core::array::from_fn(|n|
+        (NODE_BASE[n].load(Ordering::Relaxed), NODE_END[n].load(Ordering::Relaxed)));
+    // With an SRAT a piece must be the main node's: a foreign one would hand the main
+    // node's workload remote memory under the name of its own.
+    let own = |a: u64| { let n = crate::acpi::node_of_phys(a); n == 255 || n == main || main == 255 };
+    let runs = crate::memspan::pick_high(&ram[..nram], &taken, (4u64 << 30).max(kernel_top()), ceil, FRAME, own);
+    let mut k = 0usize;
+    for &(best_b, best_e) in runs.iter() {
+        if best_e <= best_b { continue; }
         // Mapped AT ONCE, for the reason `numa_init` gives; a piece that cannot be mapped is
         // not slow memory but a guaranteed fault, so it is dropped whole.
         let mut g = best_b & !((1u64 << 30) - 1);
         let mut ok = true;
         while g < best_e { if crate::paging::map_ram_1g(g) == 0 { ok = false; break; } g += 1 << 30; }
         if ok {
-            HIGH_BASE.store(best_b, Ordering::Relaxed);
-            HIGH_NEXT.store(best_b, Ordering::Relaxed);
-            HIGH_END.store(best_e, Ordering::Relaxed);
-            crate::println!("mem: the high area {:#x}..{:#x} ({} MB) — the workload's memory above 4 GB",
-                best_b, best_e, (best_e - best_b) / 1048576);
+            HIGH_BASE[k].store(best_b, Ordering::Relaxed);
+            HIGH_NEXT[k].store(best_b, Ordering::Relaxed);
+            HIGH_END[k].store(best_e, Ordering::Relaxed);
+            if k == 0 {
+                crate::println!("mem: the high area {:#x}..{:#x} ({} MB) — the workload's memory above 4 GB",
+                    best_b, best_e, (best_e - best_b) / 1048576);
+            } else {
+                crate::println!("mem: another high area (#{}) {:#x}..{:#x} ({} MB)", k, best_b, best_e, (best_e - best_b) / 1048576);
+            }
+            k += 1;
         } else {
             crate::println!("mem: the high area {:#x}..{:#x} is NOT mapped — it is dropped", best_b, best_e);
         }
@@ -201,7 +203,8 @@ fn high_init() {
 
 /// The top of everything the allocators hand out (the refcount table must reach it).
 fn alloc_top() -> u64 {
-    let mut t = END.load(Ordering::Relaxed).max(HIGH_END.load(Ordering::Relaxed));
+    let mut t = END.load(Ordering::Relaxed);
+    for (_, _, e) in high_areas() { t = t.max(e); }
     for n in 0..MAX_NODES { t = t.max(NODE_END[n].load(Ordering::Relaxed)); }
     t
 }
@@ -387,8 +390,14 @@ pub fn cap_low_mb(mb: u64) {
     }
 }
 
-/// The main node's high area as it was built (the gate `highmem`; (0, 0) — there is none).
-pub fn high_area() -> (u64, u64) { (HIGH_BASE.load(Ordering::Relaxed), HIGH_END.load(Ordering::Relaxed)) }
+/// The main node's high area `i` as it was built, the largest first (the gate `highmem`;
+/// (0, 0) — there is none).
+pub fn high_area_n(i: usize) -> (u64, u64) {
+    if i >= MAX_HIGH { return (0, 0); }
+    (HIGH_BASE[i].load(Ordering::Relaxed), HIGH_END[i].load(Ordering::Relaxed))
+}
+/// The largest high area.
+pub fn high_area() -> (u64, u64) { high_area_n(0) }
 
 /// What the workload may NOT take of the low memory when it has a high area to spend: the
 /// kernel's own structures (the page tables of its processes above all) live there and have
@@ -399,21 +408,20 @@ const LOW_RESERVE_FRAMES: u64 = 64 * 256; // 64 MB
 
 /// May the workload's allocation of `n` frames fall back to the low allocator.
 fn low_for_workload(n: u64) -> bool {
-    HIGH_BASE.load(Ordering::Relaxed) == 0 || free_low_frames() >= n + LOW_RESERVE_FRAMES
+    HIGH_BASE[0].load(Ordering::Relaxed) == 0 || free_low_frames() >= n + LOW_RESERVE_FRAMES
 }
 
 /// The main node's frames for the workload: the high area, then the low allocator (above
 /// its reserve, when a high area exists).
 fn alloc_main(n: u64) -> Option<u64> {
     if n == 0 { return None; }
-    let (hb, he) = (HIGH_BASE.load(Ordering::Relaxed), HIGH_END.load(Ordering::Relaxed));
-    if hb != 0 {
+    for (i, hb, he) in high_areas() {
         if let Some(a) = fl_node_take(n, hb, he) { crate::metrics::add_frames(n); return Some(a); }
         loop {
-            let base = HIGH_NEXT.load(Ordering::Relaxed);
+            let base = HIGH_NEXT[i].load(Ordering::Relaxed);
             let end = base + n * FRAME;
             if end > he { break; }
-            if HIGH_NEXT.compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
+            if HIGH_NEXT[i].compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
             crate::metrics::add_frames(n);
             return Some(base);
         }
@@ -427,15 +435,14 @@ fn alloc_main(n: u64) -> Option<u64> {
 /// alone took them from the low memory only.
 pub fn alloc_workload_aligned(n: u64, align: u64) -> Option<u64> {
     if n == 0 { return None; }
-    let (hb, he) = (HIGH_BASE.load(Ordering::Relaxed), HIGH_END.load(Ordering::Relaxed));
-    if hb != 0 {
+    for (i, hb, he) in high_areas() {
         if let Some(a) = fl_node_take_aligned(n, align, hb, he) { crate::metrics::add_frames(n); return Some(a); }
         loop {
-            let base = HIGH_NEXT.load(Ordering::Relaxed);
+            let base = HIGH_NEXT[i].load(Ordering::Relaxed);
             let a = (base + align - 1) & !(align - 1);
             let end = a + n * FRAME;
             if end > he { break; }
-            if HIGH_NEXT.compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
+            if HIGH_NEXT[i].compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
             // The alignment's gap goes into the area's free list rather than being lost.
             if a > base { fl_node_put(base, (a - base) / FRAME); }
             crate::metrics::add_frames(n);
@@ -479,8 +486,7 @@ static mut FLN_N: usize = 0;
 
 /// Does the address lie in the area of some node or in the high area (not in the main allocator).
 fn in_node_area(addr: u64) -> bool {
-    let hb = HIGH_BASE.load(Ordering::Relaxed);
-    if hb != 0 && addr >= hb && addr < HIGH_END.load(Ordering::Relaxed) { return true; }
+    if high_areas().any(|(_, b, e)| addr >= b && addr < e) { return true; }
     for n in 0..MAX_NODES {
         let b = NODE_BASE[n].load(Ordering::Relaxed);
         if b != 0 && addr >= b && addr < NODE_END[n].load(Ordering::Relaxed) { return true; }
@@ -552,17 +558,21 @@ fn fl_node_put(addr: u64, n: u64) {
 /// alignment align (in bytes). None — there is no such memory. It is used for the ENA rings
 /// and the grown refcount table; the area is mapped already (`high_init`).
 pub fn alloc_high(pages: u64, align: u64) -> Option<u64> {
-    let cur = loop {
-        let base = HIGH_NEXT.load(Ordering::Relaxed);
-        if base == 0 { return None; }
-        let cur = (base + align - 1) & !(align - 1);
-        let end = cur + pages * FRAME;
-        if end > HIGH_END.load(Ordering::Relaxed) { return None; }
-        // A CAS, not a store: the workload's frames come from the same bump (`alloc_main`).
-        if HIGH_NEXT.compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_ok() { break cur; }
-    };
-    unsafe { core::ptr::write_bytes(cur as *mut u8, 0, (pages * FRAME) as usize) };
-    Some(cur)
+    for (i, _, he) in high_areas() {
+        let got = loop {
+            let base = HIGH_NEXT[i].load(Ordering::Relaxed);
+            let cur = (base + align - 1) & !(align - 1);
+            let end = cur + pages * FRAME;
+            if end > he { break None; }
+            // A CAS, not a store: the workload's frames come from the same bump (`alloc_main`).
+            if HIGH_NEXT[i].compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_ok() { break Some(cur); }
+        };
+        if let Some(cur) = got {
+            unsafe { core::ptr::write_bytes(cur as *mut u8, 0, (pages * FRAME) as usize) };
+            return Some(cur);
+        }
+    }
+    None
 }
 
 /// Allocate one physical frame of 4 KB. None — exhausted.
@@ -671,9 +681,14 @@ static RES_END: AtomicU64 = AtomicU64::new(0);
 pub fn reserve(base: u64, len: u64) {
     let b = base & !(FRAME - 1);
     let e = (base + len + FRAME - 1) & !(FRAME - 1);
+    // The pair under the list's lock, where the allocators read it: an ELF load on one core
+    // while another allocates could otherwise be seen as the new base with the old end, and
+    // the `re > rb` check would let frames of the image's window out.
+    fl_lock();
     RES_BASE.store(b, Ordering::Relaxed); RES_END.store(e, Ordering::Relaxed);
-    let n = NEXT.load(Ordering::Relaxed);
-    if n >= b && n < e { NEXT.store(e, Ordering::Relaxed); }
+    fl_unlock();
+    // Past the region by a CAS: a plain store could undo a concurrent bump's advance.
+    let _ = NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| if n >= b && n < e { Some(e) } else { None });
 }
 
 /// Return a contiguous block into the free list (coalescing with the adjoining blocks).
@@ -741,9 +756,7 @@ static ALLOC_BASE: AtomicU64 = AtomicU64::new(0);
 pub fn free_frames() -> u64 {
     let left = |n: u64, e: u64| if e > n { (e - n) / FRAME } else { 0 };
     let mut s = left(NEXT.load(Ordering::Relaxed), END.load(Ordering::Relaxed));
-    if HIGH_BASE.load(Ordering::Relaxed) != 0 {
-        s += left(HIGH_NEXT.load(Ordering::Relaxed), HIGH_END.load(Ordering::Relaxed));
-    }
+    for (i, _, he) in high_areas() { s += left(HIGH_NEXT[i].load(Ordering::Relaxed), he); }
     for n in 0..MAX_NODES {
         if NODE_BASE[n].load(Ordering::Relaxed) != 0 {
             s += left(NODE_NEXT[n].load(Ordering::Relaxed), NODE_END[n].load(Ordering::Relaxed));
@@ -834,23 +847,48 @@ fn rc_table() -> (*mut u8, usize) {
 /// How many frames the refcount table covers (for the check at the bring-up).
 pub fn rc_capacity_frames() -> u64 { rc_table().1 as u64 }
 
-/// Set a frame's refcount (the number of COW references).
-pub fn rc_set(phys: u64, v: u8) {
+/// A frame's counter as an atomic. The counters are changed from any core with no lock — a
+/// fork sharing (2 -> 3) in one process while a child's COW fault drops (2 -> 1) in another,
+/// two threads of one process unmapping — and the read-then-write of before lost one of the
+/// two: a counter at 1 with two owners left, and the "sole owner" then wrote in place into
+/// the other's memory. None — outside the table.
+#[inline]
+fn rc_cell(phys: u64) -> Option<&'static AtomicU8> {
     let i = (phys >> 12) as usize;
     let (t, len) = rc_table();
-    if i < len { unsafe { core::ptr::write_volatile(t.add(i), v); } }
+    // SAFETY: inside the table; a u8 has no alignment, and every access to a counter goes
+    // through this view.
+    if i < len { Some(unsafe { AtomicU8::from_ptr(t.add(i)) }) } else { None }
+}
+/// Set a frame's refcount (the number of COW references).
+pub fn rc_set(phys: u64, v: u8) {
+    if let Some(c) = rc_cell(phys) { c.store(v, Ordering::Release); }
 }
 /// Get the refcount. OUTSIDE the table it is "shared" (2) rather than "free" (0): see the header.
 pub fn rc_get(phys: u64) -> u8 {
-    let i = (phys >> 12) as usize;
-    let (t, len) = rc_table();
-    if i < len { unsafe { core::ptr::read_volatile(t.add(i)) } }
-    else { RC_OUTSIDE.fetch_add(1, core::sync::atomic::Ordering::Relaxed); 2 }
+    match rc_cell(phys) {
+        Some(c) => c.load(Ordering::Acquire),
+        None => { RC_OUTSIDE.fetch_add(1, core::sync::atomic::Ordering::Relaxed); 2 }
+    }
 }
 /// +1 reference (for a fork). If it was 0 -> it becomes 2 (the parent+the child).
-pub fn rc_share(phys: u64) { let c = rc_get(phys); rc_set(phys, if c == 0 { 2 } else { c.saturating_add(1) }); }
-/// -1 reference, return the new value.
-pub fn rc_drop(phys: u64) -> u8 { let c = rc_get(phys); let n = c.saturating_sub(1); rc_set(phys, n); n }
+pub fn rc_share(phys: u64) {
+    if let Some(c) = rc_cell(phys) {
+        let _ = c.try_update(Ordering::AcqRel, Ordering::Relaxed, |v| Some(if v == 0 { 2 } else { v.saturating_add(1) }));
+    }
+}
+/// One owner lets go of the frame: true — it was the LAST one, and the frame is the
+/// caller's to free (the counter is left 0). The check and the decrement are one atomic
+/// step: two owners letting go at once on two cores must not both think "another one is
+/// left" (a leak) or both think "I am the last" (a double free). The Release of the
+/// decrement and the Acquire of the last one order an owner's reads of the frame before
+/// another's reuse of it. Outside the table: never the last (the frame leaks, see the header).
+pub fn rc_release(phys: u64) -> bool {
+    let Some(c) = rc_cell(phys) else { RC_OUTSIDE.fetch_add(1, core::sync::atomic::Ordering::Relaxed); return false; };
+    match c.try_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(1))) {
+        Ok(v) | Err(v) => v <= 1,
+    }
+}
 
 // ── The accounting of the workload's identity mmap regions (the kernel-AS modes: run_disk/run_disk_threaded) ──
 // An anonymous mmap in identity mode takes frames with alloc_contig; munmap returns them, but

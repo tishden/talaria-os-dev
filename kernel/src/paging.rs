@@ -1316,7 +1316,11 @@ fn shootdown_impl(start: u64, pages: u64, only_cr3: Option<u64>) {
 #[cfg(target_arch = "aarch64")]
 fn shootdown_impl(start: u64, pages: u64, _only_cr3: Option<u64>) {
     // SAFETY: P4 — the entries were changed before the call; this makes every core forget them.
-    unsafe { flush_range(start, pages); }
+    // A large range or "everything" (pages == 0) is the broadcast full flush: `flush_range`
+    // would take the LOCAL one for it (and nothing at all for 0).
+    unsafe {
+        if pages == 0 || pages > INVLPG_MAX { mmu::flush_all_is(); } else { flush_range(start, pages); }
+    }
 }
 
 /// MOVE A MAPPING WITHOUT COPYING THE DATA (`mremap`).
@@ -1483,6 +1487,24 @@ pub fn any_mapped(vaddr: u64, pages: u64) -> bool {
 
 /// MADV_DONTNEED: return the range's frames into the allocator and make the pages
 /// LAZY again — the next access will give ZEROES (Linux's semantics for anonymous memory).
+/// Frames whose last owner let go, given back to the allocator only AFTER the translations
+/// to them are gone on every core. Freed in the walk, a frame could be handed out (and
+/// zeroed, and written) by another core while a sibling thread's TLB — or, for a 2 MB leaf,
+/// the entry itself — still pointed at it (both machines). Full -> the caller's flush of the
+/// range, then the frees, and the walk goes on.
+struct Deferred { f: [(u64, u64); 64], n: usize }
+impl Deferred {
+    const fn new() -> Self { Deferred { f: [(0, 0); 64], n: 0 } }
+    fn put(&mut self, phys: u64, cnt: u64, flush: &dyn Fn()) {
+        if self.n == self.f.len() { flush(); self.free(); }
+        self.f[self.n] = (phys, cnt); self.n += 1;
+    }
+    fn free(&mut self) {
+        for &(p, c) in &self.f[..self.n] { crate::mem::free_contig(p, c); }
+        self.n = 0;
+    }
+}
+
 /// The rights (LAZY_W/LAZY_X) are preserved from the former entry.
 pub fn relazy_pages(vaddr: u64, pages: u64) {
     // SAFETY: P1 + P2 + P4 — the frames are returned to the allocator and the entries become lazy
@@ -1491,6 +1513,9 @@ pub fn relazy_pages(vaddr: u64, pages: u64) {
         let mut a = vaddr & !0xFFF;
         let end = a + pages * 4096;
         let mut touched = false;
+        let first = vaddr & !0xFFF;
+        let flush = || { flush_range(first, pages); shootdown_range_auto(first, pages); };
+        let mut dfr = Deferred::new();
         while a < end {
             if a & 0x1F_FFFF == 0 && end - a >= 0x20_0000 {
                 if let Some(pde) = pde_ptr_existing(a) {   // a whole huge page
@@ -1501,8 +1526,7 @@ pub fn relazy_pages(vaddr: u64, pages: u64) {
                         if e & PTE_RW != 0 { ne |= LAZY_W; }
                         if e & PTE_NX == 0 { ne |= LAZY_X; }
                         pte_w(pde, ne);
-                        if crate::mem::rc_get(phys) > 1 { crate::mem::rc_drop(phys); }
-                        else { crate::mem::rc_set(phys, 0); crate::mem::free_contig(phys, 512); }
+                        if crate::mem::rc_release(phys) { dfr.put(phys, 512, &flush); }
                         touched = true;
                         a += 0x20_0000;
                         continue;
@@ -1522,16 +1546,13 @@ pub fn relazy_pages(vaddr: u64, pages: u64) {
                 if e & PTE_RW != 0 || e & PTE_COW != 0 { ne |= LAZY_W; }
                 if e & PTE_NX == 0 { ne |= LAZY_X; }
                 if e & PTE_PNONE != 0 { ne |= PTE_PNONE; }
-                release_priv_frame(e & ADDR_MASK);
                 pte_w(pte, ne);
+                if crate::mem::rc_release(e & ADDR_MASK) { dfr.put(e & ADDR_MASK, 1, &flush); }
                 touched = true;
             }
         }
-        if touched {
-            let first = vaddr & !0xFFF;
-            flush_range(first, pages);
-            shootdown_range_auto(first, pages);
-        }
+        if touched { flush(); }
+        dfr.free();
     }
 }
 
@@ -2254,6 +2275,10 @@ fn user_gb() -> usize { (crate::mem::kernel_lo() >> 30) as usize }
 
 /// The current CR3 (the active PML4's physical address + the flags).
 pub fn kernel_cr3() -> u64 { KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed) }
+/// Where the kernel's root is kept: a secondary arm64 core reads it with its MMU (and so its
+/// caches) off, and the boot core cleans the word to the point of coherency first.
+#[cfg(target_arch = "aarch64")]
+pub fn kernel_cr3_word() -> u64 { core::ptr::addr_of!(KERNEL_PML4) as u64 }
 
 pub fn current_cr3() -> u64 { mmu::root() }
 
@@ -2384,6 +2409,10 @@ pub fn fork_cow_space(src: u64) -> u64 {
         }
         flush_tlb(); // src is active: the removal of RW must get into the TLB
     }
+    // ...and into the TLBs of the parent's OTHER threads on other cores: a writable entry
+    // cached there would let their writes after the fork land in the frame the child now
+    // shares (both machines; the local flush above was all there was).
+    shootdown_range_user(0, 0);
     dst
 }
 
@@ -2407,16 +2436,26 @@ pub fn cow_fault(vaddr: u64) -> bool {
                 let keep = e & (PTE_US | PTE_NX | PTE_PRIV); // preserve US/NX/PRIV
                 if crate::mem::rc_get(phys) <= 1 {
                     // the last co-owner -> we make it writable IN PLACE (without a copy, without an orphan)
-                    pte_w(pte, phys | PTE_P | PTE_RW | keep);
-                    crate::mem::rc_set(phys, 0);
+                    // (a sibling thread faulting on the same page at once: the CAS lets one install)
+                    if pte_cas(pte, e, phys | PTE_P | PTE_RW | keep) { crate::mem::rc_set(phys, 0); }
                 } else {
                     // there are other co-owners -> a private copy, the original has one reference less.
                     // The copy comes from the node OF THE ONE WHO WRITES: the page moves to it forever.
                     let np = crate::mem::alloc_contig_node(1, crate::affinity::my_node()).expect("cow: page");
                     core::ptr::copy_nonoverlapping(phys as *const u8, np as *mut u8, 4096);
                     if keep & PTE_NX == 0 { crate::arch::icache::sync(np, 4096); }   // an executable page: fetch must see the copy
-                    pte_w(pte, (np & ADDR_MASK) | PTE_P | PTE_RW | keep);
-                    crate::mem::rc_drop(phys);
+                    // The copy is installed by a CAS over the entry the decision was made on: two
+                    // threads of one process faulting on the same page used to both install
+                    // (the second overwrote the first's copy, and the writes made into it were
+                    // lost) and both drop a reference for ONE mapping. The loser gives its copy
+                    // back and returns: the instruction re-runs on the winner's page.
+                    if !pte_cas(pte, e, (np & ADDR_MASK) | PTE_P | PTE_RW | keep) {
+                        crate::mem::free_contig(np, 1);
+                        return true;
+                    }
+                    // The other owners may have let go meanwhile (a child's own copy, an exit):
+                    // then the original is nobody's and goes back to the allocator.
+                    if crate::mem::rc_release(phys) { crate::mem::free_contig(phys, 1); }
                     COW_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
                 mmu::flush_page(a);
@@ -2466,6 +2505,8 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
         // 69 on one — that is, more than half of the call's time went into collecting
         // the acknowledgements of a flush that was not required.
         let mut present_gone = false;
+        let flush = || { flush_range(vaddr & !0xFFF, pages); shootdown_range_user(vaddr & !0xFFF, pages); };
+        let mut dfr = Deferred::new();
         while a < end {
             // A whole huge page: free 2 MB in one piece rather than
             // splitting it into 512 entries only to throw them away at once.
@@ -2481,14 +2522,13 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
                         // bits are empty. After that those frames were handed out to the workload —
                         // and it got memory on top of which everything
                         // else lies. From the outside that is "random" corruption after minutes.
+                        // Instead of a hole there is the original identity leaf without U/S (see ident_leaf).
+                        pte_w(pde, ident_leaf_2m(a));
                         if e & PTE_LAZY == 0 && (e & PTE_P != 0 || e & PTE_PNONE != 0) {
                             if e & PTE_P != 0 { present_gone = true; }
                             let phys = e & ADDR_MASK;
-                            if crate::mem::rc_get(phys) > 1 { crate::mem::rc_drop(phys); }
-                            else { crate::mem::rc_set(phys, 0); crate::mem::free_contig(phys, 512); }
+                            if crate::mem::rc_release(phys) { dfr.put(phys, 512, &flush); }
                         }
-                        // Instead of a hole there is the original identity leaf without U/S (see ident_leaf).
-                        pte_w(pde, ident_leaf_2m(a));
                         a += 0x20_0000;
                         continue;
                     }
@@ -2503,11 +2543,11 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
                 else if e & (PTE_P | PTE_PNONE) != 0 { // present OR PROT_NONE (there is a frame behind it)
                     if e & PTE_P != 0 { present_gone = true; }
                     let phys = e & ADDR_MASK;
-                    if e & PTE_PRIV != 0 { release_priv_frame(phys); }
                     // In the identity window it is the return of a supervisor leaf (the kernel will still need the frame at
                     // this address), above the window it is the former non-present stub,
                     // by which protect()/unguard() will give a mapping again.
                     pte_w(pte, ident_leaf(a));
+                    if e & PTE_PRIV != 0 && crate::mem::rc_release(phys) { dfr.put(phys, 1, &flush); }
                 }
                 a += 0x1000;
                 if a & 0x3_FFFF == 0 { tlb_service(); } // the walk goes with IF=0 — once every 64 pages serve the neighbours' mailbox
@@ -2524,15 +2564,12 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
             UNMAP_FLUSH_TSC.fetch_add(t2.wrapping_sub(t1), core::sync::atomic::Ordering::Relaxed);
             UNMAP_SHOOT_TSC.fetch_add(t3.wrapping_sub(t2), core::sync::atomic::Ordering::Relaxed);
         }
+        dfr.free(); // after the flush: no core translates to these frames any more
     }
 }
 /// Release a private frame: the co-owners (COW/shared RO after a fork) -> the reference -1, otherwise into the free list.
 fn release_priv_frame(phys: u64) {
-    if crate::mem::rc_get(phys) > 1 { crate::mem::rc_drop(phys); }
-    else {
-        crate::mem::rc_set(phys, 0);
-        crate::mem::free_contig(phys, 1);
-    }
+    if crate::mem::rc_release(phys) { crate::mem::free_contig(phys, 1); }
 }
 /// Find the vaddr at which phys is mapped by a PRIV 4K leaf in the AS pml4 (the diagnostics of a double ownership).
 #[allow(dead_code)]
@@ -2583,8 +2620,7 @@ unsafe fn free_pd(pd: u64) {
             // frames at all.
             if e2 & PTE_PRIV != 0 && (e2 & PTE_P != 0 || e2 & PTE_PNONE != 0) {
                 let phys = e2 & ADDR_MASK;
-                if crate::mem::rc_get(phys) > 1 { crate::mem::rc_drop(phys); }
-                else { crate::mem::rc_set(phys, 0); crate::mem::free_contig(phys, 512); }
+                if crate::mem::rc_release(phys) { crate::mem::free_contig(phys, 512); }
             }
             continue;
         }

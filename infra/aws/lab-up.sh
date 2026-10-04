@@ -70,15 +70,26 @@ aws ec2 create-placement-group --group-name talaria-v11-cpg --strategy cluster >
 AMI=$(aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
   --query 'Parameters[0].Value' --output text)
 echo "== Amazon Linux AMI: $AMI"
+# The neighbour runs the architecture of ITS type: a Graviton peer (c7g) for a Graviton node
+# is the like-for-like Linux baseline (docs/ARM64-PLAN.md §10.8 — the first arm64 RTT was
+# taken from an x86 neighbour). The builder stays x86 (it only dd's an image).
+PEER_ARCH=$(aws ec2 describe-instance-types --instance-types "$PEER_TYPE" \
+  --query 'InstanceTypes[0].ProcessorInfo.SupportedArchitectures[0]' --output text)
+PEER_AMI=$AMI
+if [ "$PEER_ARCH" = arm64 ]; then
+  PEER_AMI=$(aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64 \
+    --query 'Parameters[0].Value' --output text)
+  echo "== the neighbour is arm64 ($PEER_TYPE): Amazon Linux AMI $PEER_AMI"
+fi
 
-run_instance() { # $1 = type, $2 = name, $3 = extra block-device json ("" — none), $4 = 1 -> into the placement group
+run_instance() { # $1 = type, $2 = name, $3 = extra block-device json ("" — none), $4 = 1 -> into the placement group, $5 = the AMI (default $AMI)
   local extra=()
   [ -n "$3" ] && extra=(--block-device-mappings "$3")
   # not all types support a cluster placement group (t3 does not), and the builder
   # does not need it: it is the node under test and the neighbour that must share a rack.
   local place="AvailabilityZone=$AZ"
   [ "${4:-0}" = 1 ] && place="GroupName=talaria-v11-cpg,AvailabilityZone=$AZ"
-  aws ec2 run-instances --image-id "$AMI" --instance-type "$1" --key-name talaria-v11 \
+  aws ec2 run-instances --image-id "${5:-$AMI}" --instance-type "$1" --key-name talaria-v11 \
     --security-group-ids "$SG" --subnet-id "$SUBNET" --associate-public-ip-address \
     --placement "$place" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Project,Value=talaria-v11},{Key=Name,Value=$2}]" \
@@ -92,7 +103,7 @@ run_instance() { # $1 = type, $2 = name, $3 = extra block-device json ("" — no
 BUILDER_VOL=${BUILDER_VOL:-8}
 BUILDER=$(run_instance t3.small talaria-builder \
   "[{\"DeviceName\":\"/dev/sdf\",\"Ebs\":{\"VolumeSize\":${BUILDER_VOL},\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}}]" 0)
-PEER=$(run_instance "$PEER_TYPE" talaria-peer "" 1)
+PEER=$(run_instance "$PEER_TYPE" talaria-peer "" 1 "$PEER_AMI")
 echo "builder=$BUILDER peer=$PEER — waiting for running"
 aws ec2 wait instance-running --instance-ids "$BUILDER" "$PEER"
 ip_of() { aws ec2 describe-instances --instance-ids "$1" --query "$2" --output text; }

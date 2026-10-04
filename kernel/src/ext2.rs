@@ -1125,7 +1125,12 @@ pub static WB_DEFERRED: core::sync::atomic::AtomicU64 = core::sync::atomic::Atom
 /// SAFETY: E1 — under the FS lock, which is what makes the claim a claim: the check and
 /// the store of `WB_DEFER_TASK` are one critical section, so exactly one task wins.
 unsafe fn wb_defer_claim() -> bool {
-    if WB_DEFER_TASK >= 0 { return false; }
+    if core::ptr::read_volatile(core::ptr::addr_of!(WB_DEFER_TASK)) >= 0 { return false; }
+    // The -1 was stored by `wb_defer_finish` WITHOUT the FS lock, so the lock does not order
+    // its earlier `CWB` clears before what this claim does next: the fence pairs with its
+    // Release (a late clear landing over this claim's new `CWB` mark would let a second
+    // write of the same block go to the device beside the deferred one).
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
     WB_DEFER_TASK = crate::sched::current_id() as i64;
     true
 }
@@ -1152,8 +1157,11 @@ unsafe fn wb_defer_finish() {
     if DEFER_K == 0 { return; }
     if !crate::fs::blk_defer_wait() { crate::println!("ext2: an error of the deferred write of the data"); }
     for i in 0..DEFER_K { core::ptr::write_volatile(addr_of_mut!(CWB[DEFER_SLOTS[i] as usize]), false); }
-    DEFER_K = 0;
-    WB_DEFER_TASK = -1;                  // the claim is removed together with the portion
+    // The clears above, then the claim's end — in that order for another core (and for the
+    // compiler, which may move a plain store of a `static mut` above volatile ones).
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+    core::ptr::write_volatile(addr_of_mut!(DEFER_K), 0);
+    core::ptr::write_volatile(addr_of_mut!(WB_DEFER_TASK), -1); // the claim is removed together with the portion
 }
 /// It returns (the blocks written, whether anything selected WAS LEFT unwalked).
 ///

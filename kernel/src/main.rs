@@ -86,6 +86,7 @@ mod placement;
 mod syscall;
 mod user;
 mod mem;
+mod memspan;  // which pieces of the RAM above 4 GB the workload gets (host-tested)
 mod acpi;
 use arch::smp;
 mod sync;
@@ -135,7 +136,7 @@ use arch::pmu;
 mod cellman;
 use arch::cat;
 mod netdev;   // the network device model: the NetDev trait + the driver table
-mod virtnet;  // a driver: virtio-net (MMIO)
+mod virtnet;  // a driver: virtio-net (MMIO and PCI)
 mod nicloop;  // a driver: the loopback NIC (the device model's gate)
 mod ena;
 mod nvme;

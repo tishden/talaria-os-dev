@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
+#include "tal_arch.h"
 
 #define FN 256
 #define FSLOT 2048
@@ -15,12 +16,6 @@
 static inline volatile uint32_t* PROD(char* b, long r){ return (volatile uint32_t*)(b + r); }
 static inline volatile uint32_t* CONS(char* b, long r){ return (volatile uint32_t*)(b + r + 64); }
 static inline char* SLOT(char* b, long r, uint32_t i){ return b + r + 128 + (uint64_t)(i & (FN-1)) * SLOT_SZ; }
-
-static inline uint64_t fastmap(void){
-    uint64_t ret;
-    __asm__ volatile("syscall" : "=a"(ret) : "a"(1000UL) : "rcx","r11","memory");
-    return ret;
-}
 
 static void swap(uint8_t* a, uint8_t* b, int n){ for(int i=0;i<n;i++){ uint8_t t=a[i]; a[i]=b[i]; b[i]=t; } }
 
@@ -37,7 +32,7 @@ static void reflect(uint8_t* p, uint32_t len){
 }
 
 int main(void){
-    char* b = (char*)fastmap();
+    char* b = (char*)tal_fastmap();
     const char* m = "fastapp: the zero-syscall echo is up (ring 3, the polling of the rings)\n";
     write(1, m, strlen(m));
     uint32_t rc = *CONS(b, RX_OFF);

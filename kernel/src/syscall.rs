@@ -37,7 +37,7 @@
 //! - **S4. `asm!` touches THIS core's machine state** (the MSRs at `init`, the
 //!   FPU area, the segment bases). The `options(...)` on each block say what the
 //!   compiler may assume.
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub static EXITED: AtomicBool = AtomicBool::new(false);
 /// A diagnostic toggle: switch the TLB shootdown off (talaria.noshoot=1).
@@ -116,6 +116,20 @@ static mut NULL_CTR: [u64; NULL_N] = [0; NULL_N];   // eventfd: the counter; tim
 static mut NULL_IVL: [u64; NULL_N] = [0; NULL_N];   // timerfd: the interval (ns)
 static mut NULL_FL: [u8; NULL_N] = [0; NULL_N];     // bit0 nonblock, bit1 EFD_SEMAPHORE, bit2 timerfd CLOCK_REALTIME
 static mut NULL_GEN: [u64; NULL_N] = [0; NULL_N];   // eventfd: the generation — it grows at every write (an edge for EPOLLET)
+/// An eventfd's counter and generation as atomics: a write on one core and a read on another
+/// change them at once (threads, or two processes sharing the descriptor). They were a plain
+/// read-modify-write each — an increment lost under a concurrent read — and on arm64 the
+/// reader had no Acquire to see the data the writer published before `eventfd_write`.
+fn ev_ctr(i: usize) -> &'static AtomicU64 {
+    // SAFETY: S2 — the row is the descriptor's from the CAS in `null_alloc_kind`; the word
+    // is a naturally aligned u64 in a static, and every concurrent access to an eventfd's
+    // counter goes through this view.
+    unsafe { AtomicU64::from_ptr(core::ptr::addr_of_mut!(NULL_CTR[i])) }
+}
+fn ev_gen(i: usize) -> &'static AtomicU64 {
+    // SAFETY: as `ev_ctr`.
+    unsafe { AtomicU64::from_ptr(core::ptr::addr_of_mut!(NULL_GEN[i])) }
+}
 /// The readiness of an eventfd/timerfd/signalfd for epoll/poll (EPOLLIN=1, EPOLLOUT=4). Other null fds: OUT.
 /// THE GENERATION of a null fd's readiness for EPOLLET: it changes at every edge
 /// (a write into an eventfd; another firing of a timerfd). 0 — this kind has no
@@ -125,7 +139,7 @@ pub fn nullfd_gen(fd: i64) -> u64 {
     // SAFETY: S2 — the pseudo-fd table (`NULL_*`): a row belongs to the descriptor's owner from the
     // CAS in `null_alloc_kind` until `null_free`.
     unsafe { match NULL_KIND[i] {
-        4 => NULL_GEN[i],
+        4 => ev_gen(i).load(Ordering::Acquire),
         5 => { let d = NULL_CTR[i]; if d == 0 { return 1; } let now = crate::tsc::mono_ns(); let iv = NULL_IVL[i];
                if now < d || iv == 0 { d } else { d + ((now - d) / iv) * iv } }
         _ => 0,
@@ -136,7 +150,7 @@ pub fn nullfd_readiness(fd: i64) -> u32 {
     // SAFETY: S2 — the pseudo-fd table (`NULL_*`): a row belongs to the descriptor's owner from the
     // CAS in `null_alloc_kind` until `null_free`.
     unsafe { match NULL_KIND[i] {
-        4 => (if NULL_CTR[i] > 0 { 1 } else { 0 }) | 4,
+        4 => (if ev_ctr(i).load(Ordering::Acquire) > 0 { 1 } else { 0 }) | 4,
         5 => if NULL_CTR[i] != 0 && crate::tsc::mono_ns() >= NULL_CTR[i] { 1 } else { 0 },
         6 => if crate::proc::pending_in(NULL_CTR[i]) { 1 } else { 0 },
         7 | 8 => 1 | 4,
@@ -634,9 +648,15 @@ fn do_read(fd: i64, buf: *mut u8, len: usize, flags: u64) -> i64 {
                 loop {
                     // SAFETY: S2 — the pseudo-fd table (`NULL_*`): a row belongs to the descriptor's
                     // owner from the CAS in `null_alloc_kind` until `null_free`.
-                    let c = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(NULL_CTR[i])) };
-                    if c > 0 { let v = if unsafe { NULL_FL[i] } & 2 != 0 { 1 } else { c }; unsafe { NULL_CTR[i] = c - v;
-                        core::ptr::write_unaligned(buf as *mut u64, v); } return 8; }
+                    let c = ev_ctr(i).load(Ordering::Acquire);
+                    if c > 0 {
+                        let v = if unsafe { NULL_FL[i] } & 2 != 0 { 1 } else { c };
+                        // Take exactly what was seen: a write in between fails the exchange,
+                        // and the loop reads the new count.
+                        if ev_ctr(i).compare_exchange(c, c - v, Ordering::AcqRel, Ordering::Acquire).is_err() { continue; }
+                        unsafe { core::ptr::write_unaligned(buf as *mut u64, v); }
+                        return 8;
+                    }
                     if unsafe { NULL_FL[i] } & 1 != 0 { return -11; }
                     if crate::proc::sig_pending() { return -4; }
                     wait_window();
@@ -710,8 +730,12 @@ fn do_write(fd: i64, buf: *const u8, len: usize, flags: u64) -> i64 {
         let i = (fd - NULL_BASE) as usize;
         // SAFETY: S2 — the pseudo-fd table (`NULL_*`): a row belongs to the descriptor's owner from
         // the CAS in `null_alloc_kind` until `null_free`.
-        if unsafe { NULL_KIND[i] } == 4 && len >= 8 { let v = unsafe { core::ptr::read_unaligned(buf as *const u64) }; unsafe {
-            NULL_CTR[i] = NULL_CTR[i].saturating_add(v); NULL_GEN[i] += 1; } return 8; } // eventfd
+        if unsafe { NULL_KIND[i] } == 4 && len >= 8 { // eventfd
+            let v = unsafe { core::ptr::read_unaligned(buf as *const u64) };
+            let _ = ev_ctr(i).try_update(Ordering::Release, Ordering::Relaxed, |c| Some(c.saturating_add(v)));
+            ev_gen(i).fetch_add(1, Ordering::Release);
+            return 8;
+        }
         len as i64
     }
     else if crate::proc::pipe_is(fd) { crate::proc::pipe_write(fd, buf, len) }
@@ -2367,9 +2391,16 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 let enc = f.a6 as u32; let oparg = ((enc >> 12) & 0xfff) as i32; let oparg = if (enc >> 28) & 8 != 0 { 1 << oparg } else { oparg };
                 // SAFETY: S1 — the pointer argument was validated by `uaccess::gate` before this
                 // dispatch.
-                let u2 = f.a5 as *mut i32; let old = unsafe { core::ptr::read_volatile(u2) };
-                let new = match (enc >> 28) & 7 { 0 => oparg, 1 => old.wrapping_add(oparg), 2 => old | oparg, 3 => old & !oparg, 4 => old ^ oparg, _ => old };
-                unsafe { core::ptr::write_volatile(u2, new); }
+                let u2 = f.a5 as *mut i32;
+                if u2 as usize & 3 != 0 { return (-22i64) as u64; } // a futex word is aligned (EINVAL, as Linux)
+                // The op is ATOMIC on the user word, as Linux's: another thread updating it
+                // with its own atomics on another core must not lose its update (a plain
+                // read-then-write did) — and the wake below must see the new value published.
+                // SAFETY: S1 — validated by `uaccess::gate`, aligned (checked above).
+                let w = unsafe { core::sync::atomic::AtomicI32::from_ptr(u2) };
+                let op4 = (enc >> 28) & 7;
+                let old = w.try_update(Ordering::SeqCst, Ordering::SeqCst, |old| Some(match op4 { 0 => oparg, 1 => old.wrapping_add(oparg),
+                    2 => old | oparg, 3 => old & !oparg, 4 => old ^ oparg, _ => old })).unwrap_or_else(|v| v);
                 let mut n = crate::sync::wake_addr(f.a1, f.a3 as usize, leader, false);
                 let cmparg = (enc & 0xfff) as i32;
                 let cond = match (enc >> 24) & 0xf { 0 => old == cmparg, 1 => old != cmparg, 2 => old < cmparg, 3 => old <= cmparg, 4 => old > cmparg,

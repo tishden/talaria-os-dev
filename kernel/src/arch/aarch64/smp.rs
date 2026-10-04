@@ -124,7 +124,10 @@ pub fn start_ap(apic_id: u32) -> bool {
     if rc != psci::SUCCESS && rc != psci::ALREADY_ON { return false; }
     let t0 = cpu::counter();
     let lim = timer::ticks_for_ns(2_000_000_000);
-    while crate::percpu::ONLINE.load(Ordering::SeqCst) & (1 << l) == 0 {
+    // A cell's core never enters ONLINE (`kmain::rust_ap_main`); its report is AP_UP.
+    let cell = crate::runmode::CELL_AP.load(Ordering::SeqCst);
+    while crate::percpu::ONLINE.load(Ordering::SeqCst) & (1 << l) == 0
+        && !(cell && super::kmain::AP_UP[l].load(Ordering::Acquire) != 0) {
         if cpu::counter().wrapping_sub(t0) > lim { return false; }
         core::hint::spin_loop();
     }

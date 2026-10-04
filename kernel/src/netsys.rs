@@ -196,7 +196,11 @@ impl Drop for NetGuard {
         let last = NET_DEPTH.fetch_sub(1, AcqRel) == 1;
         if last {
             note_released();               // the holding time belongs only to the OUTER ownership
-            NET_OWNER.store(-1, Release);
+            // SeqCst: the store and the load of `NIC_PENDING` below are one half of a Dekker
+            // pair with `nic_irq` (its flag, then its retry of the lock). With Release here the
+            // load could be satisfied before the store is visible — the handler's try fails
+            // on the old owner, our load misses its flag, and the frame waits for the ceiling.
+            NET_OWNER.store(-1, SeqCst);
         }
         if cpu < crate::smp::MAXCPU { NET_HELD[cpu].fetch_sub(1, AcqRel); }
         // THE PASS'S DEBT IS PAID BY THE ONE WHO RELEASED THE LOCK. The line's handler takes
@@ -208,7 +212,7 @@ impl Drop for NetGuard {
         // thousands of "Aborted connection ... error reading communication packets".
         // Paying the debt is cheapest right here: we have just left the section, the stack
         // is free, and the pass will cost one entry by recursion.
-        if last && NIC_PENDING.load(Acquire) {
+        if last && NIC_PENDING.load(SeqCst) {
             NIC_PENDING_RUN.fetch_add(1, Relaxed);
             poll_forced();
         }
@@ -460,7 +464,12 @@ pub extern "C" fn nic_irq() {
     poll_forced();
     if NET_SKIPS.load(Relaxed) != before {
         NIC_IRQ_BUSY.fetch_add(1, Relaxed);
-        NIC_PENDING.store(true, core::sync::atomic::Ordering::Release); // somebody must finish the pass
+        NIC_PENDING.store(true, core::sync::atomic::Ordering::SeqCst); // somebody must finish the pass
+        // ...and if the holder released between our failed try and the flag, it may have
+        // read the flag before we set it: try once more — the other half of the pair in
+        // `NetGuard::drop` (either it sees the flag, or this try sees the lock free).
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        poll_forced();
     }
     if let Some(f) = ifopt(0) { f.dev.arm_intr(); }
     IN_NIC_IRQ[cpu].fetch_sub(1, Relaxed);
@@ -1393,7 +1402,11 @@ fn poll_gated(force: bool) {
     nw_ph(PH_PASS);
     // The debt of a missed interrupt is extinguished by ANY pass that took place: it
     // will parse the same ring (see NIC_PENDING).
-    NIC_PENDING.store(false, core::sync::atomic::Ordering::Release);
+    // A swap, not a store: a plain store does not order this pass's ring loads after it,
+    // and a handler's `true` landing just before could be erased by a `false` that the
+    // ring read did not cover. The RMW reads the handler's flag (Acquire) and the reads of
+    // the ring follow it. Read first, so the common path writes no shared line.
+    if NIC_PENDING.load(core::sync::atomic::Ordering::Relaxed) { NIC_PENDING.swap(false, core::sync::atomic::Ordering::AcqRel); }
     // We count the passes by the debt THAT TOOK PLACE: counting them before the lock is not allowed, the lock
     // may not be given.
     if stale { POLL_HARD_RUNS.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }

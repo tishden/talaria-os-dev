@@ -4,7 +4,7 @@
 //! per-task), the current directory (cwd) and the normalisation of paths. A process = the scheduler's
 //! leader task (sched::proc_of); the threads share the leader's tables.
 use core::ptr::{addr_of, addr_of_mut};
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 pub const NT: usize = crate::sched::NTASKS;
 pub const FDN: usize = 256;               // user fds per process (the kernel's memory < 32 MB)
@@ -49,9 +49,9 @@ pub fn init_proc(p: usize) {
     for i in 0..FDN { t[i] = -1; }
     t[0] = 0; t[1] = 1; t[2] = 2;
     unsafe {
-        INITED[p] = true; NOTIFIED[p] = false;
+        INITED[p] = true; NOTIFIED[p].store(false, Ordering::Relaxed);
         for s in 0..65 { SA_HANDLER[p][s] = 0; SA_FLAGS[p][s] = 0; SA_MASK[p][s] = 0; SA_RESTORER[p][s] = 0; }
-        PPEND[p] = 0;
+        PPEND[p].store(0, Ordering::Relaxed);
         CWD[p][0] = b'/'; CWDL[p] = 1;
         MMAP_NEXT[p] = MMAP_BASE;
     }
@@ -75,7 +75,7 @@ pub fn exec_reset(p: usize) {
 /// A reset of all the tables (a restart of the workload by the supervisor).
 pub fn reset_all() {
     unsafe {
-        for p in 0..NT { INITED[p] = false; PENDING[p] = 0; PPEND[p] = 0; SIGMASK[p] = 0; NOTIFIED[p] = false; }
+        for p in 0..NT { INITED[p] = false; PENDING[p].store(0, Ordering::Relaxed); PPEND[p].store(0, Ordering::Relaxed); SIGMASK[p] = 0; NOTIFIED[p].store(false, Ordering::Relaxed); }
         for h in 0..HMAX { HREF[h] = 0; }
         for i in 0..NPIPE { PR[i] = false; PW[i] = false; }
     }
@@ -185,35 +185,58 @@ pub fn fork_into(parent: usize, child: usize) {
         INITED[child] = true;
         for s in 0..65 { SA_HANDLER[child][s] = SA_HANDLER[parent][s]; SA_FLAGS[child][s] = SA_FLAGS[parent][s]; SA_MASK[child][s] = SA_MASK[parent][s];
             SA_RESTORER[child][s] = SA_RESTORER[parent][s]; }
-        SIGMASK[child] = SIGMASK[parent]; PENDING[child] = 0; PPEND[child] = 0; NOTIFIED[child] = false;
+        SIGMASK[child] = SIGMASK[parent]; PENDING[child].store(0, Ordering::Relaxed); PPEND[child].store(0, Ordering::Relaxed);
+        NOTIFIED[child].store(false, Ordering::Relaxed);
         CWD[child] = CWD[parent]; CWDL[child] = CWDL[parent];
         MMAP_NEXT[child] = MMAP_NEXT[parent];
     }
 }
 /// The end of a process: close all its descriptors (the references), notify the parent with a SIGCHLD.
 pub fn exit_cleanup(p: usize) {
-    if !unsafe { INITED[p] } { if p < NT { unsafe { NOTIFIED[p] = true; } } return; }
+    if !unsafe { INITED[p] } { if p < NT { NOTIFIED[p].store(true, Ordering::Release); } return; }
     let t = fdt(p);
     for i in 0..FDN { let h = t[i]; if h >= 0 { t[i] = -1; href_dec_close(h as i64); } }
     let pp = crate::sched::ppid_of(p);
     if pp >= 0 { send_proc(pp as usize, 17); } // a SIGCHLD to the parent (the process)
-    unsafe { core::ptr::write_volatile(addr_of_mut!(NOTIFIED[p]), true); }
+    NOTIFIED[p].store(true, Ordering::Release);
 }
 /// The process HAS FINISHED FINISHING: the threads are stopped, the files are closed, the parent has been notified with a SIGCHLD.
 /// Only after that is `wait4` entitled to give out its status: otherwise the parent,
 /// having got the core while the dying process waits for its threads to stop or
 /// flushes the FS cache, saw a zombie before the SIGCHLD (sigtest: "SIGCHLD delivered
 /// to parent" failed exactly like that).
-static mut NOTIFIED: [bool; NT] = [false; NT];
-pub fn exit_notified(p: usize) -> bool { p < NT && unsafe { core::ptr::read_volatile(addr_of!(NOTIFIED[p])) } }
+///
+/// Release on the set, Acquire on the read: `wait4` on the parent's core must see what the
+/// exit did before it (the descriptors closed, the SIGCHLD bit) — on arm64 a plain flag may
+/// be seen ahead of them.
+static NOTIFIED: [AtomicBool; NT] = [const { AtomicBool::new(false) }; NT];
+pub fn exit_notified(p: usize) -> bool { p < NT && NOTIFIED[p].load(Ordering::Acquire) }
 
 // ── pipe ────────────────────────────────────────────────────────────────────────
 const NPIPE: usize = 32;
 const PBUF: usize = 4096;
 pub const PIPE_BASE: i64 = 2400;
 static mut PB: [[u8; PBUF]; NPIPE] = [[0; PBUF]; NPIPE];
-static mut PHEAD: [usize; NPIPE] = [0; NPIPE];
-static mut PCNT: [usize; NPIPE] = [0; NPIPE];
+/// The ring is single-producer/single-consumer with an index per side: the READER alone
+/// moves `PHEAD` (bytes taken since creation), the WRITER alone moves `PTAIL` (bytes put),
+/// the count is their difference. Each publishes with Release after its bytes and reads the
+/// other's with Acquire before touching the buffer. It used to be one count (`PCNT`) both
+/// ends read, changed and wrote back with plain stores: on two cores one end's update was
+/// lost (a reader's `c - n` over a writer's `c + n` — bytes vanished or were read twice),
+/// and on arm64 the reader could see the count before the bytes.
+static PHEAD: [AtomicUsize; NPIPE] = [const { AtomicUsize::new(0) }; NPIPE];
+static PTAIL: [AtomicUsize; NPIPE] = [const { AtomicUsize::new(0) }; NPIPE];
+/// One reader and one writer at a time per pipe (threads, or a forked child, may share an
+/// end): a spin lock per END, so that the two ends never wait for each other.
+static PLOCK: [[AtomicBool; 2]; NPIPE] = [const { [const { AtomicBool::new(false) }; 2] }; NPIPE];
+fn pipe_lock(i: usize, e: usize) {
+    while PLOCK[i][e].compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() { core::hint::spin_loop(); }
+}
+fn pipe_unlock(i: usize, e: usize) { PLOCK[i][e].store(false, Ordering::Release); }
+/// Bytes in the pipe as this side sees them.
+fn pipe_count(i: usize) -> usize {
+    PTAIL[i].load(Ordering::Acquire).wrapping_sub(PHEAD[i].load(Ordering::Acquire))
+}
 static mut PR: [bool; NPIPE] = [false; NPIPE];  // the reading end is open
 static mut PW: [bool; NPIPE] = [false; NPIPE];  // the writing end is open
 static mut PNB: [[bool; 2]; NPIPE] = [[false; 2]; NPIPE];
@@ -244,7 +267,8 @@ pub fn pipe_create(nonblock: bool) -> Option<(i64, i64)> {
     unsafe {
         for i in 0..NPIPE {
             if !PR[i] && !PW[i] {
-                PR[i] = true; PW[i] = true; PHEAD[i] = 0; PCNT[i] = 0; PNB[i] = [nonblock; 2];
+                PR[i] = true; PW[i] = true; PNB[i] = [nonblock; 2];
+                PHEAD[i].store(0, Ordering::Relaxed); PTAIL[i].store(0, Ordering::Relaxed);
                 return Some((PIPE_BASE + 2 * i as i64, PIPE_BASE + 2 * i as i64 + 1));
             }
         }
@@ -253,7 +277,10 @@ pub fn pipe_create(nonblock: bool) -> Option<(i64, i64)> {
 }
 pub fn pipe_close(h: i64) {
     let (i, e) = pidx(h);
-    unsafe { if e == 0 { PR[i] = false; } else { PW[i] = false; } }
+    // Release: a reader that sees the end closed must also see the bytes written before
+    // (it re-reads `PTAIL` behind an Acquire fence — `pipe_read`).
+    core::sync::atomic::fence(Ordering::Release);
+    unsafe { if e == 0 { core::ptr::write_volatile(addr_of_mut!(PR[i]), false); } else { core::ptr::write_volatile(addr_of_mut!(PW[i]), false); } }
     pipe_bump(i); // an EOF/EPIPE is an event too: a waiter is bound to wake up at once
 }
 pub fn pipe_set_nonblock(h: i64, on: bool) { let (i, e) = pidx(h); unsafe { PNB[i][e] = on; } }
@@ -266,16 +293,28 @@ pub fn pipe_read(h: i64, buf: *mut u8, len: usize) -> i64 {
         // that came between the check and the falling asleep is then not lost — the word is already
         // not equal to the snapshot, and the waiter will not fall asleep at all.
         let seq = PSEQ[i].load(core::sync::atomic::Ordering::SeqCst);
+        pipe_lock(i, 0);
+        let hd = PHEAD[i].load(Ordering::Relaxed);
+        let c = PTAIL[i].load(Ordering::Acquire).wrapping_sub(hd);
+        if c > 0 {
+            let n = c.min(len);
+            // SAFETY: the bytes [hd, hd+c) are the writer's, published by its Release on
+            // PTAIL; `buf` was validated by `uaccess::gate`.
+            unsafe { for k in 0..n { *buf.add(k) = PB[i][(hd + k) % PBUF]; } }
+            PHEAD[i].store(hd.wrapping_add(n), Ordering::Release); // the room, after the bytes are read
+            pipe_unlock(i, 0);
+            pipe_bump(i);                      // room has been freed — for the writer
+            return n as i64;
+        }
+        pipe_unlock(i, 0);
         unsafe {
-            let c = core::ptr::read_volatile(addr_of!(PCNT[i]));
-            if c > 0 {
-                let n = c.min(len);
-                for k in 0..n { *buf.add(k) = PB[i][(PHEAD[i] + k) % PBUF]; }
-                PHEAD[i] = (PHEAD[i] + n) % PBUF; core::ptr::write_volatile(addr_of_mut!(PCNT[i]), c - n);
-                pipe_bump(i);                      // room has been freed — for the writer
-                return n as i64;
+            if !core::ptr::read_volatile(addr_of!(PW[i])) {
+                // The writer may have put its last bytes and closed on another core: what
+                // it wrote before the close is visible after this fence.
+                core::sync::atomic::fence(Ordering::Acquire);
+                if PTAIL[i].load(Ordering::Acquire) != hd { continue; }
+                return 0; // EOF
             }
-            if !PW[i] { return 0; } // EOF
             if PNB[i][0] { return -11; }
         }
         if sig_pending() { return -4; }
@@ -295,17 +334,20 @@ pub fn pipe_write(h: i64, buf: *const u8, len: usize) -> i64 {
     let mut done = 0usize;
     loop {
         unsafe {
-            if !PR[i] { return if done > 0 { done as i64 } else { -32 }; } // EPIPE
-            let c = core::ptr::read_volatile(addr_of!(PCNT[i]));
-            let space = PBUF - c;
+            if !core::ptr::read_volatile(addr_of!(PR[i])) { return if done > 0 { done as i64 } else { -32 }; } // EPIPE
+            pipe_lock(i, 1);
+            let tl = PTAIL[i].load(Ordering::Relaxed);
+            let space = PBUF - tl.wrapping_sub(PHEAD[i].load(Ordering::Acquire));
             if space > 0 {
                 let n = space.min(len - done);
-                for k in 0..n { PB[i][(PHEAD[i] + c + k) % PBUF] = *buf.add(done + k); }
-                core::ptr::write_volatile(addr_of_mut!(PCNT[i]), c + n);
+                for k in 0..n { PB[i][(tl + k) % PBUF] = *buf.add(done + k); }
+                PTAIL[i].store(tl.wrapping_add(n), Ordering::Release); // the bytes, then the index
+                pipe_unlock(i, 1);
                 done += n;
                 if n > 0 { pipe_bump(i); }         // data has appeared — for the reader
                 if done >= len { return done as i64; }
             } else {
+                pipe_unlock(i, 1);
                 if PNB[i][1] { return if done > 0 { done as i64 } else { -11 }; }
             }
         }
@@ -318,8 +360,8 @@ pub fn pipe_write(h: i64, buf: *const u8, len: usize) -> i64 {
 pub fn pipe_readiness(h: i64) -> u32 {
     let (i, e) = pidx(h);
     unsafe {
-        if e == 0 { let mut m = 0; if PCNT[i] > 0 { m |= 1; } if !PW[i] { m |= 1 | 0x10; } m }
-        else { let mut m = 0; if PCNT[i] < PBUF { m |= 4; } if !PR[i] { m |= 8; } m }
+        if e == 0 { let mut m = 0; if pipe_count(i) > 0 { m |= 1; } if !PW[i] { m |= 1 | 0x10; } m }
+        else { let mut m = 0; if pipe_count(i) < PBUF { m |= 4; } if !PR[i] { m |= 8; } m }
     }
 }
 
@@ -328,10 +370,13 @@ static mut SA_HANDLER: [[u64; 65]; NT] = [[0; 65]; NT];
 static mut SA_FLAGS: [[u64; 65]; NT] = [[0; 65]; NT];
 static mut SA_RESTORER: [[u64; 65]; NT] = [[0; 65]; NT];
 static mut SA_MASK: [[u64; 65]; NT] = [[0; 65]; NT];
-static mut PENDING: [u64; NT] = [0; NT];   // per-task (tkill/tgkill)
+// The pending sets are set from any core (a `kill` on one, the target's `take` on another):
+// an atomic OR/AND, Release on the send and Acquire on the take, so that two senders, or a
+// send racing a take, lose no signal (the plain read-or-write of before did, on both machines).
+static PENDING: [AtomicU64; NT] = [const { AtomicU64::new(0) }; NT];   // per-task (tkill/tgkill)
 // per-process (kill/SIGCHLD): the leader's index; it is taken by any thread for
 // which the signal is not masked (sigwait and the like)
-static mut PPEND: [u64; NT] = [0; NT];
+static PPEND: [AtomicU64; NT] = [const { AtomicU64::new(0) }; NT];
 static mut SIGMASK: [u64; NT] = [0; NT];   // per-task
 
 /// rt_sigaction(sig, act*, oldact*): kernel struct {handler, flags, restorer, mask}.
@@ -371,7 +416,7 @@ pub fn sigprocmask(how: u64, set: u64, old: u64) -> i64 {
 }
 pub fn sigmask_of(t: usize) -> u64 { unsafe { SIGMASK[t] } }
 /// clone(CLONE_VM): the thread inherits the creator's mask, it has no pending signals.
-pub fn thread_inherit_sigmask(parent: usize, child: usize) { unsafe { SIGMASK[child] = SIGMASK[parent]; PENDING[child] = 0; } }
+pub fn thread_inherit_sigmask(parent: usize, child: usize) { unsafe { SIGMASK[child] = SIGMASK[parent]; } PENDING[child].store(0, Ordering::Relaxed); }
 pub fn set_sigmask(t: usize, m: u64) { unsafe { SIGMASK[t] = m; } }
 /// Is the signal IGNORED by the process `p` for a recipient with the mask `mask` — Linux's
 /// `sig_ignored`: the disposition is SIG_IGN, or SIG_DFL for a signal whose default is to
@@ -392,13 +437,11 @@ fn sig_ignored(p: usize, sig: u64, mask: u64) -> bool {
 /// Put a signal to the task t (pending).
 pub fn send(t: usize, sig: u64) { if t < NT && (1..=64).contains(&sig) {
     if sig_ignored(crate::sched::proc_of(t), sig, sigmask_of(t)) { return; }
-    unsafe { let v = core::ptr::read_volatile(addr_of!(PENDING[t])) | (1u64 << (sig - 1));
-    core::ptr::write_volatile(addr_of_mut!(PENDING[t]), v); } } }
+    PENDING[t].fetch_or(1u64 << (sig - 1), Ordering::Release); } }
 /// A signal to a PROCESS (the leader p): any of its threads for which it is not masked will take it.
 pub fn send_proc(p: usize, sig: u64) { if p < NT && (1..=64).contains(&sig) {
     if sig_ignored(p, sig, sigmask_of(p)) { return; }
-    unsafe {
-    let v = core::ptr::read_volatile(addr_of!(PPEND[p])) | (1u64 << (sig - 1)); core::ptr::write_volatile(addr_of_mut!(PPEND[p]), v); } } }
+    PPEND[p].fetch_or(1u64 << (sig - 1), Ordering::Release); } }
 /// A SIGTERM to all the live processes (by their leaders) — the regular stop of the machine. It returns the number of processes.
 pub fn term_all() -> usize {
     let mut n = 0;
@@ -443,31 +486,33 @@ pub fn tkill(tid: i64, sig: u64) -> i64 {
 pub fn sig_pending() -> bool {
     let t = crate::sched::current_id(); let p = crate::sched::proc_of(t);
     if !crate::sched::task_alive(t) { return true; }
-    unsafe { (core::ptr::read_volatile(addr_of!(PENDING[t])) | core::ptr::read_volatile(addr_of!(PPEND[p]))) & !SIGMASK[t] != 0 }
+    (PENDING[t].load(Ordering::Acquire) | PPEND[p].load(Ordering::Acquire)) & !unsafe { SIGMASK[t] } != 0
 }
 /// Whether the TASK t has a deliverable signal (for the scheduler: to wake one sleeping on a futex).
 pub fn sig_pending_t(t: usize) -> bool {
     let p = crate::sched::proc_of(t);
     if !crate::sched::task_alive(t) { return true; }
-    unsafe { (core::ptr::read_volatile(addr_of!(PENDING[t])) | core::ptr::read_volatile(addr_of!(PPEND[p]))) & !SIGMASK[t] != 0 }
+    (PENDING[t].load(Ordering::Acquire) | PPEND[p].load(Ordering::Acquire)) & !unsafe { SIGMASK[t] } != 0
 }
 /// Take and return the lowest deliverable signal of the current task (None — there is none).
 pub fn take_pending() -> Option<u64> { take_pending_in(!0u64 & !sigmask_of(crate::sched::current_id())) }
 /// Whether there is a pending signal from the set `set` (signalfd readiness).
-pub fn pending_in(set: u64) -> bool { let t = crate::sched::current_id(); let p = crate::sched::proc_of(t); unsafe {
-    (core::ptr::read_volatile(addr_of!(PENDING[t])) | core::ptr::read_volatile(addr_of!(PPEND[p]))) & set != 0 } }
+pub fn pending_in(set: u64) -> bool { let t = crate::sched::current_id(); let p = crate::sched::proc_of(t);
+    (PENDING[t].load(Ordering::Acquire) | PPEND[p].load(Ordering::Acquire)) & set != 0 }
 /// Take and return the lowest pending signal from the set `set` (sigtimedwait; the mask is not taken into account).
 pub fn take_pending_in(set: u64) -> Option<u64> {
     let t = crate::sched::current_id(); let p = crate::sched::proc_of(t);
-    unsafe {
-        let own = core::ptr::read_volatile(addr_of!(PENDING[t])) & set;
-        if own != 0 { let s = own.trailing_zeros() as u64; core::ptr::write_volatile(addr_of_mut!(PENDING[t]),
-            core::ptr::read_volatile(addr_of!(PENDING[t])) & !(1u64 << s)); return Some(s + 1); }
-        let pp = core::ptr::read_volatile(addr_of!(PPEND[p])) & set;
-        if pp != 0 { let s = pp.trailing_zeros() as u64; core::ptr::write_volatile(addr_of_mut!(PPEND[p]),
-            core::ptr::read_volatile(addr_of!(PPEND[p])) & !(1u64 << s)); return Some(s + 1); }
-        None
+    // The bit is TAKEN by the atomic AND: a sibling thread taking from the same process set
+    // at once gets the bit only if it was still there (the old value says), else looks again.
+    for w in [&PENDING[t], &PPEND[p]] {
+        loop {
+            let v = w.load(Ordering::Acquire) & set;
+            if v == 0 { break; }
+            let b = 1u64 << v.trailing_zeros();
+            if w.fetch_and(!b, Ordering::AcqRel) & b != 0 { return Some(b.trailing_zeros() as u64 + 1); }
+        }
     }
+    None
 }
 /// The parameters of the signal handler (handler, flags, restorer, mask) of the current process.
 pub fn handler_of(sig: u64) -> (u64, u64, u64, u64) {

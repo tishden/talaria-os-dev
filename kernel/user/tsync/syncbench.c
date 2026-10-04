@@ -4,6 +4,7 @@
 // Plus the microbenches: the wait/wake RTT, an uncontended mutex, the condvar RTT.
 // The build: musl-gcc -O2 -static -no-pie -Wl,-Ttext-segment=0x10000000 -o syncbench syncbench.c tsync.c
 #define _GNU_SOURCE
+#include "../tal_arch.h"
 #include "tsync.h"
 #include <pthread.h>
 #include <stdio.h>
@@ -15,7 +16,7 @@
 #include <sched.h>
 #include <sys/syscall.h>
 
-static inline uint64_t rdtsc(void) { unsigned lo, hi; __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi)); return (uint64_t)hi << 32 | lo; }
+static inline uint64_t rdtsc(void) { return tal_ticks(); } /* the TSC / CNTVCT_EL0 (tal_arch.h) */
 static void to_ap(void) { cpu_set_t s; CPU_ZERO(&s); CPU_SET(1, &s); syscall(SYS_sched_setaffinity, 0, sizeof(s), &s); }
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 static double tsc_ns;
@@ -45,7 +46,7 @@ static void spin_push(uint64_t v) {
     uint64_t t = atomic_load_explicit(&sq.tail, memory_order_relaxed);
     if (t - sq.cached_head >= SCAP) {
         while ((sq.cached_head = atomic_load_explicit(&sq.head, memory_order_acquire)), t - sq.cached_head >= SCAP)
-            __asm__ volatile("pause");
+            tal_relax();
     }
     sq.buf[t & (SCAP - 1)] = v;
     atomic_store_explicit(&sq.tail, t + 1, memory_order_release);
@@ -73,11 +74,11 @@ static void *consumer(void *arg) {
     (void)arg; to_ap();
     for (;;) {
         int m = mode;
-        if (m == 1) { uint64_t v; uint64_t n = 0; while (n < TPUT_N) { if (!spin_pop(&v)) n++; else __asm__ volatile("pause"); } consumed = n; }
-        else if (m == 2) { uint64_t v; for (int i = 0; i < LATN; i++) { while (spin_pop(&v)) __asm__ volatile("pause"); atomic_store(&pop_ts[v], rdtsc()); } consumed = LATN; }
+        if (m == 1) { uint64_t v; uint64_t n = 0; while (n < TPUT_N) { if (!spin_pop(&v)) n++; else tal_relax(); } consumed = n; }
+        else if (m == 2) { uint64_t v; for (int i = 0; i < LATN; i++) { while (spin_pop(&v)) tal_relax(); atomic_store(&pop_ts[v], rdtsc()); } consumed = LATN; }
         else if (m == 3) { uint64_t n = 0; while (n < TPUT_N) { tsync_spsc_pop(&tq); n++; } consumed = n; }
         else if (m == 4) { for (int i = 0; i < LATN; i++) { uint64_t v = tsync_spsc_pop(&tq); atomic_store(&pop_ts[v], rdtsc()); } consumed = LATN; }
-        else if (m == 6) { uint64_t v; uint64_t n = 0; while (n < TPUT_N) { if (!tsync_spsc_try_pop(&tq, &v)) n++; else __asm__ volatile("pause"); } consumed = n; }
+        else if (m == 6) { uint64_t v; uint64_t n = 0; while (n < TPUT_N) { if (!tsync_spsc_try_pop(&tq, &v)) n++; else tal_relax(); } consumed = n; }
         else if (m == 5) return 0;
         mode = 0;
         while (mode == 0) ; // busy: the next phase starts quickly
@@ -93,7 +94,7 @@ static void run_latency(int m, const char *name, void (*push)(uint64_t)) {
         uint64_t t0 = rdtsc();
         push(i);
         lat[i] = t0; // the time of the push; the latency = pop_ts - t0
-        while (rdtsc() - t0 < gap) __asm__ volatile("pause");
+        while (rdtsc() - t0 < gap) tal_relax();
     }
     while (consumed != LATN) ;
     for (int i = 0; i < LATN; i++) lat[i] = atomic_load(&pop_ts[i]) - lat[i];

@@ -193,6 +193,24 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
   assertnot "$BAD"                                                           'shmrace: no trap, no unknown syscall'
   boot 90 "talaria.test=shmrace talaria.shmdelay=2000 talaria.shmlock=0"
   assert 'shmrace: FAIL one name -> one object'                               'shmrace A/B: with the tables lock off the same program gets TWO objects for one name'
+  # libtsync's fibers (an AArch64 context switch: x19-x30, d8-d15, sp) and its benches.
+  # `tsync` itself is NOT here: without a user-mode monitor tier (x86's umwait/mwaitx) every
+  # wait goes to the kernel's tier 2, whose MPSC path stalls now and then on BOTH machines
+  # (x86 with the tier 1 compiled out stalls the same way) — docs/ARM64-PLAN.md §10.10.
+  boot 120 "talaria.test=fiber"
+  assert 'FIBER: ALL OK'                                                      'fiber: green threads on arm64 — the switch, the condvar handoff, an SPSC of 500k in order'
+  assertnot "$BAD"                                                           'fiber: no trap'
+  boot 200 "talaria.test=syncbench talaria.futexhang=3"
+  assert 'SYNCBENCH: ALL OK'                                                  'syncbench: the RTT, the mutex, the spin and tsync SPSC phases finish on arm64'
+  assertnot "$BAD|\[futex\] IT HAS HUNG"                                      'syncbench: no trap, no hung waiter'
+  # The process cycle of the freestanding `launcher` (raw svc: clone(SIGCHLD) -> execve -> wait4).
+  bootd 90 "talaria.mode=procdemo"
+  assert '\[launcher\] child exited, code=5'                                  'procdemo: fork (clone) + execve(/mhello) + wait4 from a freestanding ring-3 program — the exit code comes back'
+  assert '\[launcher\] full process cycle .fork\+execve\+wait4. on Talaria OK' 'procdemo: the launcher finishes'
+  boot 200 "talaria.test=piperace"
+  assert 'piperace: the pipe carried 4194304 bytes in order across cores'     'piperace: a pipe between threads on two cores carries 4 MB byte-exact'
+  assert 'piperace: the eventfd summed 300000 increments from 3 threads exactly' 'piperace: an eventfd written from three cores loses no increment'
+  assertnot "$BAD"                                                           'piperace: no trap'
   boot 120 "talaria.test=smp2"
   if [ "$KVM" = 1 ]; then
     assert 'SMP2: the parallel speedup [12]\.[0-9]+ .the thread on an AP, the syscalls from the AP. ALL OK' 'smp2: sched_setaffinity migrates a thread onto a secondary, the speedup is ~2x'

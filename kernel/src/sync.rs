@@ -301,10 +301,14 @@ fn ready_now(t: usize) -> bool {
 /// On which word the task is sleeping (0 — it is not sleeping). It is needed by `ps`/`top`: "the thread stands still" and
 /// "the thread waits for this very address" are different diagnoses, while in the fact of "not on the processor"
 /// they are indistinguishable.
+///
+/// SeqCst loads: `netsys::wake_owner` decides by it whether to wake, after its SeqCst bump of
+/// the word — the load half of a Dekker pair whose other half is the sleeper's registration
+/// + fence + re-read (a plain `mov` on x86, an `ldar` on arm64).
 pub fn waiting_on(t: usize) -> u64 {
     if t >= NTASKS { return 0; }
-    if WOKEN[t].load(Ordering::Relaxed) != 0 { return 0; }
-    WADDR[t].load(Ordering::Relaxed)
+    if WOKEN[t].load(Ordering::SeqCst) != 0 { return 0; }
+    WADDR[t].load(Ordering::SeqCst)
 }
 
 pub fn blocked_for_sched(t: usize) -> bool {

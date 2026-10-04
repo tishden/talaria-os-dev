@@ -69,7 +69,11 @@ pub fn wall_stats() -> (i32, i64, u32, u32, u32, u32) {
 }
 
 fn publish(base_tsc: u64, base_ns: u64, hz: u64) {
-    SEQ.fetch_add(1, Ordering::AcqRel); // odd — a write is in progress
+    SEQ.fetch_add(1, Ordering::Relaxed); // odd — a write is in progress
+    // The data stores must not become visible BEFORE the odd count (a reader would see
+    // even/even around a half-written base): the RMW's own ordering does not keep LATER
+    // stores after it — the standard seqlock writer's fence does.
+    core::sync::atomic::fence(Ordering::Release);
     PUB_TSC.store(base_tsc, Ordering::Relaxed);
     PUB_NS.store(base_ns, Ordering::Relaxed);
     PUB_HZ.store(hz, Ordering::Relaxed);
