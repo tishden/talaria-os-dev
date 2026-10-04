@@ -1,0 +1,13 @@
+diff --git a/kernel/build.rs b/kernel/build.rs
+index 908f9e4..4ce2c38 100644
+--- a/kernel/build.rs
++++ b/kernel/build.rs
+@@ -30,7 +30,7 @@ fn main() {
+             for e in rd.filter_map(|e| e.ok()) {
+                 let Ok(n) = e.file_name().into_string() else { continue };
+                 if e.path().is_file() { names.push(n); }
+-                else if e.path().is_dir() {
++                else if e.path().is_dir() && false { // A/B: no tsync/ in the image
+                     println!("cargo:rerun-if-changed={}", e.path().display());
+                     if let Ok(sub) = std::fs::read_dir(e.path()) {
+                         for f in sub.filter_map(|f| f.ok()).filter(|f| f.path().is_file()) {

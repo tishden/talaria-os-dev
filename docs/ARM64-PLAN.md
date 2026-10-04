@@ -1763,6 +1763,57 @@ The databases, the JVM and ClickHouse still need the arm64 builder (`c7g` + dock
 Gates after both steps: arm64 `test-aarch64.sh` **307/0** under TCG (the services and
 `dirtyprot` included), x86 `test.sh` **497/0** + host 22/0; clippy clean on both.
 
+### 10.13. Phase 7, the second step: the databases and the JVM without a builder (2026-10-05)
+
+**No arm64 builder was needed.** The plan's builder (a `c7g` with docker) was for compiling
+the services; but MongoDB, the JVM and ClickHouse are ready-made binaries on x86 too, and the
+distributions ship aarch64 builds of PostgreSQL and MariaDB as well. `apk --arch aarch64
+--root DIR --no-scripts` in an x86 Alpine container unpacks the aarch64 packages with their
+dependency closure without executing anything (`services/build-aarch64-db.sh`): PostgreSQL
+16.14 and MariaDB 10.11.18 from Alpine 3.20, MongoDB 4.0.5 from Alpine 3.9 (x86's release),
+Temurin 21.0.12.1 for alpine-linux aarch64 (x86's build). The data directories PostgreSQL and
+MariaDB need an `initdb` the host cannot run; they are the x86 builds' — the same bytes on
+both machines (little-endian, MAXALIGN 8; `pg_control` checks exactly that). The clients are
+Python (`pgprobe.py` is new), so the arm64 stand runs the gate unchanged.
+
+`kernel/test-aarch64-db.sh` (the arm64 twin of `validate.sh` B10-B11) under TCG: **12/0** —
+PostgreSQL (a table written by one forked backend, read by a second), MariaDB (InnoDB through
+a connection's thread), MongoDB (a dynamic ELF with 18 shared objects, WiredTiger, OP_MSG
+insert/find/count), the JVM (start, interpreter and JIT, a cross-thread park); zero unknown
+syscalls. The dynamic loader needed nothing: `talaria.test=dyn` (a PIE through ld-musl-aarch64,
+dlopen of libz) passed on its first boot.
+
+**What the real programs found** (`docs/ENGINEERING-NOTES.md` items 34-37):
+* `AT_HWCAP`'s CPUID bit promised an emulation of EL0 `mrs` of the ID registers that did not
+  exist — OpenSSL reads `MIDR_EL1` at load and PostgreSQL died with a SIGILL.
+  `trap::emulate_id_read` answers as Linux's `emulate_mrs` (MIDR, MPIDR as 0x80000000, the
+  ID_AA64 registers without SVE/SME/MTE/PAC); `talaria.test=idregs`.
+* `MAP_FIXED_NOREPLACE` was honoured only beside `MAP_FIXED`: HotSpot's 64 probes for an
+  encodable compressed-class-space base all came back elsewhere and Temurin refused to start
+  (both machines; on x86 the heap's fallback hid it).
+* Without a NIC every `epoll_wait`/`poll` timeout was zero (`netsys::HZ`'s placeholder).
+* Under TCG an idle PostgreSQL is six processes spinning `epoll_pwait` on sets with a
+  signalfd: `select 1` took 0-147 s. `talaria.netmix=<ns>` (off by default; the TCG gate turns
+  it on) parks a non-polling waiter of a mixed set; a pipe's bytes, an eventfd's write and a
+  signal made pending kick the waiters (`netsys::mix_kick`, Dekker's order on `NW_IN`).
+  `talaria.test=mixwait` (both machines): the parked one is woken by each producer within
+  2 ms; with the kicks removed it wakes at its 2 s ceiling (1970 ms) and the gate fails.
+
+**ClickHouse is the one left, and it is not a port item.** Its official arm64 binary is an
+ET_EXEC at 0x200000..0x1CA9_7310 (458 MB). Every process of this kernel shares the kernel's
+identity map, and there it is the devices on `virt` (the GIC at 0x0800_0000, the UART,
+virtio-mmio, the 32-bit PCIe window) and RAM on a Graviton (GB0 is RAM from 5 MiB). x86 had
+the same collision with RAM and moved the kernel above the binary
+(`services/clickhouse/build-kernel.sh`). The plan for arm64, in this order:
+1. the kernel's devices off the low addresses: the bases the tree and ACPI name (GIC, ITS,
+   UART, virtio windows, RTC, the 32-bit BARs the kernel assigns) are used through an alias
+   at a fixed high VA (one L0 slot, Device blocks) instead of their identity — the drivers
+   keep their pointers, only where the address is first read changes;
+2. a process whose ELF asks for GB0 gets a user table there instead of the Device block;
+3. on a Graviton, `talaria.lowres=` keeps RAM below the binary's end out of the allocator
+   (x86's high-base kernel in one knob).
+Step 1 alone runs ClickHouse on `virt`, i.e. on the KVM stand.
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its

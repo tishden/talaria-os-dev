@@ -35,6 +35,19 @@ there), into `kernel/target/a64-services/`; `kernel/test-aarch64.sh` runs them w
 there. Redis on arm64 runs as a process (`talaria.mode=proc`, `ext2-redis.img` with a
 manifest): at start-up it forks to check the kernel for the arm64 dirty-bit-across-fork bug.
 
+The large ones on arm64 are the distributions' own aarch64 builds, unmodified:
+`services/build-aarch64-db.sh` unpacks Alpine's packages (PostgreSQL 16, MariaDB 10.11 from
+3.20; MongoDB 4.0.5 from 3.9 — x86's release) with `apk --arch aarch64 --no-scripts` in an
+x86 container (nothing is executed, so no emulation and no arm64 builder), takes Temurin 21
+for alpine-linux aarch64 (x86's build of the same release) and packs ext2 volumes with
+manifests. The PostgreSQL and MariaDB data directories are the x86 builds' (both machines are
+little-endian with the same alignment; `pg_control` checks it). `kernel/test-aarch64-db.sh`
+is the arm64 twin of `validate.sh` B10-B11: each server from its volume in
+`talaria.mode=proc`, answered by a Python client (`postgresql/pgprobe.py`,
+`mariadb/mysqlprobe.py`, `mongodb/mongoprobe.py` — no x86 binary, so the arm64 stand runs it
+too). ClickHouse is not there yet: its arm64 ET_EXEC wants the low 458 MB of the address
+space, where this kernel keeps its identity map (`docs/ARM64-PLAN.md` §10.13).
+
 ## Results
 
 - **mongoose:** serves HTTP over TCP with method/URI/Host parsing and keep-alive.

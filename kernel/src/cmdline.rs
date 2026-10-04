@@ -313,6 +313,7 @@ pub const KNOBS: &[Knob] = &[
     many("talaria.net", Kind::Text, "an address rule by interface name"),
     once("talaria.netidle", Kind::Flag, "sleeping on the receive ring"),
     once("talaria.netirq", Kind::Check(netirq_ok), "the NIC's line: 0 off / 1 / all / GSI / a-b (the default is polling)"),
+    once("talaria.netmix", Kind::Num, "a waiter with a non-socket in its set parks too, with this ceiling, ns (0 — it spins)"),
     once("talaria.netpark", Kind::Num, "the ceiling on parking a waiter, ns (0 — polling)"),
     once("talaria.netpause", Kind::Num, "pauses between stack passes for a network waiter (default 32)"),
     once("talaria.netprof", Kind::Num, "a profile of the datapath's stages, a summary every N turns"),

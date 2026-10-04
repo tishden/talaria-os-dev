@@ -782,6 +782,7 @@ fn do_write(fd: i64, buf: *const u8, len: usize, flags: u64) -> i64 {
             let v = unsafe { core::ptr::read_unaligned(buf as *const u64) };
             let _ = ev_ctr(i).try_update(Ordering::Release, Ordering::Relaxed, |c| Some(c.saturating_add(v)));
             ev_gen(i).fetch_add(1, Ordering::Release);
+            crate::netsys::mix_kick(); // an eventfd in an epoll set (`talaria.netmix=`)
             return 8;
         }
         len as i64
@@ -2113,7 +2114,14 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             let pages = f.a2.div_ceil(4096);
             let in_proc = crate::sched::task_cr3(crate::sched::current_id()) != 0;
             let mut shared = f.a4 & 0x01 != 0; // MAP_SHARED
-            let fixed = f.a4 & 0x10 != 0;  // MAP_FIXED
+            // MAP_FIXED, or MAP_FIXED_NOREPLACE alone (0x100000) — Linux's "exactly here or
+            // EEXIST" needs no MAP_FIXED beside it. Read as MAP_FIXED only, a NOREPLACE probe
+            // fell to the bump region and came back at another address: HotSpot gave the
+            // address back and tried the next — 64 candidates on aarch64, where the compressed
+            // class space must sit at an encodable base and has no "anywhere" fallback, and
+            // Temurin 21 died with "Could not allocate compressed class space" (x86's heap has
+            // that fallback, so the probes there failed silently).
+            let fixed = f.a4 & (0x10 | 0x10_0000) != 0;
             // A file MAP_SHARED FOR READING ONLY that did not fit into the block cache
             // is given as a private copy. The reason: a shared mapping with us is the pages
             // of the ext2 cache (8 MB), while the JVM maps `lib/modules` (136 MB) that way and got

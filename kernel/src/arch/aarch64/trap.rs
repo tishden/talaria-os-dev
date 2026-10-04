@@ -635,6 +635,59 @@ unsafe extern "C" {
     fn rust_schedule(cur_sp: u64) -> u64;
 }
 
+/// A fault "handled" by a retry that does not move: the same thread, pc, address and
+/// syndrome again and again. A handler that answers "already resolved" while the core keeps
+/// faulting (a stale TLB entry, an entry the walker sees and the hardware does not) is an
+/// endless loop in which the thread looks alive to every other instrument — it is on the
+/// core, at a plausible pc. Said once per 2^16 repeats, with what the tables hold.
+fn note_retry(f: &Frame) {
+    static LAST: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+    static RUN: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+    let cpu = cpu::cpu_index().min(63);
+    let key = f.pc ^ f.far.rotate_left(17) ^ f.esr.rotate_left(41) ^ (crate::sched::current_id() as u64).rotate_left(56);
+    if LAST[cpu].swap(key, Ordering::Relaxed) != key { RUN[cpu].store(0, Ordering::Relaxed); return; }
+    let n = RUN[cpu].fetch_add(1, Ordering::Relaxed) + 1;
+    if n & 0xFFFF == 0 {
+        let root = crate::sched::task_cr3(crate::sched::current_id()) & 0x0000_ffff_ffff_f000;
+        crate::println!("[fault] a retry that does not move: t{} pc={:#x} far={:#x} esr={:#x} x{} on core {}; the tables: {:#x?}",
+            crate::sched::current_id(), f.pc, f.far, f.esr, n, cpu, crate::paging::phys_of_in(root, f.far));
+    }
+}
+
+/// An EL0 `mrs` of the ID registers, answered as Linux's `emulate_mrs` does — the promise
+/// `HWCAP_CPUID` (bit 11 of `AT_HWCAP`) makes. A library that sees the bit reads `MIDR_EL1`
+/// and the `ID_AA64*` registers directly (OpenSSL's armcap does, at load: PostgreSQL from
+/// Alpine died on its first instruction with a SIGILL), and the read traps to EL1 by the
+/// architecture. The space is op0=3, op1=0, CRn=0: `MIDR`/`REVIDR` as they are, `MPIDR` as
+/// Linux shows it (no topology), the feature registers with the fields this kernel does not
+/// give a process cleared — SVE and SME (their state is not saved), MTE, pointer
+/// authentication (no keys), the AMU/MPAM/RAS/GIC — and every other register of the space
+/// as zero. `true` — the register is written and the instruction skipped.
+fn emulate_id_read(f: &mut Frame) -> bool {
+    let iss = f.esr & 0x01FF_FFFF;
+    let (op0, op2, op1, crn, rt, crm, read) =
+        ((iss >> 20) & 3, (iss >> 17) & 7, (iss >> 14) & 7, (iss >> 10) & 0xF, ((iss >> 5) & 0x1F) as usize, (iss >> 1) & 0xF, iss & 1 == 1);
+    if !(op0 == 3 && op1 == 0 && crn == 0 && read) { return false; }
+    macro_rules! rd { ($r:literal) => {{ let v: u64; unsafe { core::arch::asm!(concat!("mrs {}, ", $r), out(reg) v, options(nomem, nostack)); } v }} }
+    // clr(v, [lo..]): the 4-bit fields at those offsets cleared
+    let clr = |v: u64, fields: &[u32]| fields.iter().fold(v, |v, &lo| v & !(0xF << lo));
+    let v = match (crm, op2) {
+        (0, 0) => rd!("midr_el1"),
+        (0, 5) => 1 << 31,                                   // MPIDR: the RES1 bit only
+        (0, 6) => rd!("revidr_el1"),
+        (4, 0) => clr(rd!("id_aa64pfr0_el1"), &[24, 28, 32, 36, 40, 44, 52]), // GIC RAS SVE SEL2 MPAM AMU RME
+        (4, 1) => rd!("id_aa64pfr1_el1") & 0xFF,             // PFR1: BT and SSBS only (no MTE, no SME)
+        (6, 0) => rd!("id_aa64isar0_el1"),
+        (6, 1) => clr(rd!("id_aa64isar1_el1"), &[4, 8, 24, 28]), // APA API GPA GPI
+        (6, 2) => clr(rd!("s3_0_c0_c6_2"), &[8, 12]),         // ISAR2: GPA3 APA3
+        (7, 2) => rd!("id_aa64mmfr2_el1") & (0xF << 32),     // MMFR2: AT (the LSE2 alignment) only
+        _ => 0,
+    };
+    if rt != 31 { f.set_x(rt, v); }
+    f.pc += 4;
+    true
+}
+
 /// A workload's fault at EL0, in the order the x86 handler takes (`idt::rust_exception`):
 /// a write to a COW page is a copy and a retry; a first touch of a reserved page is a frame
 /// and a retry; anything else is a SYNCHRONOUS SIGNAL — delivered to the process's handler
@@ -649,9 +702,10 @@ fn user_fault(f: &mut Frame) -> bool {
     let far = f.far;
     if abort {
         if ec == 0x24 { crate::metrics::inc_page_fault(); }
-        if ec == 0x24 && write && !no_page && crate::paging::cow_fault(far) { crate::metrics::inc_cow_fault(); return true; }
-        if no_page && crate::paging::lazy_fault(far) { return true; }
+        if ec == 0x24 && write && !no_page && crate::paging::cow_fault(far) { crate::metrics::inc_cow_fault(); note_retry(f); return true; }
+        if no_page && crate::paging::lazy_fault(far) { note_retry(f); return true; }
     }
+    if ec == 0x18 && emulate_id_read(f) { return true; }
     let sig = match ec {
         0x20 | 0x21 | 0x24 | 0x25 => 11,    // an abort -> SIGSEGV
         0x00 | 0x0E | 0x18 | 0x19 => 4,     // an unknown/illegal instruction, a trapped system access, SVE -> SIGILL

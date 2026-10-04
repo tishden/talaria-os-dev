@@ -126,6 +126,14 @@ else
   echo "== NO kernel/user/aarch64 here (make -C kernel/user aarch64): the gate will skip ring 3, the soak will not run =="
 fi
 
+# The large services' volumes (services/build-aarch64-db.sh on the dev box: the PostgreSQL and
+# MariaDB data come from the x86 builds there) travel as sparse files, compressed.
+DBIMGS=$(cd "$REPO/kernel/target" 2>/dev/null && ls a64-services/ext2-pg.img a64-services/ext2-mdb.img a64-services/ext2-mongo.img a64-services/ext2-jvm.img 2>/dev/null | tr '\n' ' ')
+if [ -n "$DBIMGS" ]; then
+  echo "== uploading the services' volumes: $DBIMGS =="
+  tar -C "$REPO/kernel/target" -cSzf - $DBIMGS | ssh $SSH_OPTS ec2-user@"$IP" 'mkdir -p talaria/kernel/target && tar -xSzf - -C talaria/kernel/target'
+fi
+
 echo "== the arm64 stand image, built natively (fedora:40 pulls its arm64 variant) =="
 rrun image 1200 'cd talaria && docker build -t talaria-qemu-aarch64 -f services/docker/Dockerfile.qemu-aarch64 services/docker' || { echo "the image did not build — $LOGD/image.log"; tail -5 "$LOGD/image.log"; exit 1; }
 
@@ -149,6 +157,17 @@ rrun gate 3600 'cd talaria && TAL_KVM=1 kernel/test-aarch64.sh' || true
 grep -E 'FAIL|TOTAL|SKIP' "$LOGD/gate.log" || true
 # The consoles of the boots that failed a check come home too.
 ssh $SSH_OPTS ec2-user@"$IP" 'tar -C talaria/kernel/target -c a64-fail 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || true
+
+# The large services under KVM (kernel/test-aarch64-db.sh, validate.sh B10-B11's arm64 twin):
+# with the product's default wait (a mixed epoll set spins) and with `talaria.netmix=`.
+if [ -n "$DBIMGS" ]; then
+  echo "== the large services under KVM: PostgreSQL, MariaDB, MongoDB, the JVM (default wait, then netmix) =="
+  rrun db 3600 'cd talaria && for app in "" "talaria.netmix=1000000"; do echo "## TAL_DBAPP=$app"; \
+    docker run --rm --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN -v "$PWD:/w" -w /w -e TAL_KVM=1 \
+      -e TAL_ACCEL="-enable-kvm -cpu host" -e TAL_DBAPP="$app" talaria-qemu-aarch64 bash kernel/test-aarch64-db.sh; done' || true
+  grep -E "##|PASS|FAIL|TOTAL" "$LOGD/db.log" | cut -c1-200 || true
+  ssh $SSH_OPTS ec2-user@"$IP" 'tar -C talaria/kernel/target -c a64-fail-db 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || true
+fi
 
 # The network numbers: the guest on a tap with vhost, the meters (the arm64 builds of
 # udp_ping/tcp_bench) next to it in the stand image.
@@ -217,8 +236,8 @@ ssh $SSH_OPTS ec2-user@"$IP" 'tar -C /tmp -c soak 2>/dev/null' | tar -x -C "$LOG
 # The parallel race detector of §10.5: PAR copies of one boot at once, more vCPUs than the
 # host has cores — the three races of the shared code that session found never showed on a
 # quiet host and did in 1 of 60-160 boots this way.
-echo "== the parallel race detector: ${PARN:-96} boots of forkap/shmrace/memrace/piperace, ${PAR:-24} at a time =="
-rrun par 2400 "cd talaria && PAR=${PAR:-24} MODES='forkap shmrace memrace piperace' kernel/soak-aarch64.sh ${PARN:-96} /tmp/par" || true
+echo "== the parallel race detector: ${PARN:-96} boots of forkap/shmrace/memrace/piperace/futexlat/syncbench, ${PAR:-24} at a time =="
+rrun par 2400 "cd talaria && PAR=${PAR:-24} MODES='forkap shmrace memrace piperace futexlat syncbench' kernel/soak-aarch64.sh ${PARN:-96} /tmp/par" || true
 grep -E 'soak:' "$LOGD/par.log" || true
 ssh $SSH_OPTS ec2-user@"$IP" 'tar -C /tmp -c par 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || true
 

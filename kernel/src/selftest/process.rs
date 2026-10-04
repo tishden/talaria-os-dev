@@ -214,6 +214,23 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             println!("talaria: the piperace test, {} bytes (a pipe and an eventfd across cores)", PR.len());
             unsafe { crate::user::run_threaded(PR); }
         }
+        // arm64: MIDR/MPIDR/ID_AA64* read from EL0 — the emulation HWCAP_CPUID promises
+        // (`arch::aarch64::trap::emulate_id_read`).
+        #[cfg(target_arch = "aarch64")]
+        "idregs" => {
+            static IR: &[u8] = user_elf!("idregs");
+            println!("talaria: the idregs test, {} bytes (the ID registers from EL0)", IR.len());
+            unsafe { crate::user::run_processes(&[IR]); }
+        }
+        // Two waiters in epoll_wait on sets that are not only sockets, one of them parked by
+        // `talaria.netmix=`: a pipe's write, an eventfd's and a signal must wake the parked one
+        // at once, not at the park's ceiling (`netsys::mix_kick`).
+        "mixwait" => {
+            crate::smp::start_from_cmdline(cmdline);
+            static MW: &[u8] = user_elf!("mixwait");
+            println!("talaria: the mixwait test, {} bytes (mixed epoll sets parked, woken by their events)", MW.len());
+            unsafe { crate::user::run_threaded(MW); }
+        }
         "threads" => {
             unsafe {
                 let kmain = crate::mem::alloc_contig(4).unwrap() + 4 * 4096;

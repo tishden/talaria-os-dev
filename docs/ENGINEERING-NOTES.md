@@ -683,6 +683,38 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     and Redis on the old kernel says "Your kernel has a bug". **A workload's own sanity
     check is a test someone else already wrote** — run the real program before writing the
     gate, and when it refuses, read why before reaching for its "ignore" switch.
+34. **"A promise in the auxiliary vector."** arm64's `AT_HWCAP` had bit 11, `HWCAP_CPUID`,
+    copied from a Graviton's list — and that bit is not a feature of the core but a promise
+    of the kernel: "a `mrs` of the ID registers from EL0 traps, and I answer it" (Linux's
+    `emulate_mrs`). OpenSSL's armcap believes it at load, so Alpine's PostgreSQL died with
+    a SIGILL on its first instruction past `main`'s prologue. The emulation is in
+    `trap::emulate_id_read` (`talaria.test=idregs`); the built-in test binaries' auxv had
+    no `AT_HWCAP` at all. **Every bit handed to a process is a contract** — before copying
+    a capability word, read what each bit obliges the kernel to do.
+35. **"A flag read only together with its sibling."** `mmap` took `MAP_FIXED_NOREPLACE`
+    (0x100000) into account only when `MAP_FIXED` (0x10) was set too — Linux needs no
+    `MAP_FIXED` beside it. A NOREPLACE probe fell to the bump region and returned another
+    address; HotSpot gave it back and tried the next. On x86 the probes are for the heap,
+    which has an "anywhere" fallback, so they failed silently for two months; on aarch64
+    the compressed class space must sit at an encodable base, and Temurin 21 died with
+    "Could not allocate compressed class space" after 64 refused candidates. **A silent
+    fallback in the workload hides a kernel defect on one machine and shows it on the next.**
+36. **"A placeholder that was a number."** `netsys`'s counter rate `HZ` is set when the
+    first card is added and was `1` before that; `ms_to_cycles` divided it by 1000. On a
+    machine with no NIC every `epoll_wait`/`poll` timeout was zero cycles — a 5-second wait
+    returned 0 at once (both machines; a test of mixed epoll sets found it). Timeouts now
+    take the counter's rate from `tsc::hz()` when the card has not set one.
+37. **"The emulator multiplies the design's price."** Every PostgreSQL process waits in
+    `epoll_pwait` on a set with its latch's signalfd (Alpine's build; x86's self-built one has
+    a self-pipe there — the same class), and a waiter whose set is not only sockets SPINS
+    (`yield_window`: the product's model is a dedicated core per waiter). Under TCG six
+    such spinners left a backend 26 % of an emulated core and 18 thousand address-space
+    switches a second (each a full soft-TLB flush in QEMU): `select 1` took 0 s or 147 s
+    depending on how they met — which read for an hour as a lost wakeup. `talaria.top=`
+    showed it in one snapshot. The knob `talaria.netmix=<ns>` parks the non-polling ones
+    (the producers of a pipe's, an eventfd's and a signal's readiness kick them); it is off
+    by default, the TCG gate turns it on. **Before diagnosing a hang under an emulator, ask
+    `top` who is eating the cores.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

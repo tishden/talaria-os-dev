@@ -13,7 +13,7 @@ LDF  := -static -no-pie -Wl,-Ttext-segment=0x10000000
 
 # C (musl-gcc), the binary's name = the name of the .c
 CBINS := connect_test efault epsrv execmt fastapp fastflood forksrv fputest fsbig fsinfo fsread fsyncconc futexlat \
-         forktls idleshoot mapshared mbench memhog memrace memtest mtsrv netshoot pthreads schedapi schedbal schedpin schedspread \
+         forktls idleshoot mapshared mbench memhog memrace memtest mixwait mtsrv netshoot pthreads schedapi schedbal schedpin schedspread \
          piperace rqwait shmrace sigtest smp2 smp4 srv stealbal sysbench tcp_bench tickcmd udp_ping userver wvsock
 # C with a source name that does not match
 mhello_SRC  := mh.c
@@ -90,7 +90,8 @@ LDFA64 := -static -no-pie -Wl,-Ttext-segment=0x50000000
 # assembler); fastapp/fastflood take the machine's call and spin hint from tal_arch.h.
 # The `.s` files (but hello) and libtsync's fibers are not ported yet.
 A64CBINS := $(filter-out sysbench,$(CBINS))
-A64 := $(addprefix aarch64/,$(A64CBINS) mhello mprintf hello.elf crashme profdeep launcher)
+A64 := $(addprefix aarch64/,$(A64CBINS) mhello mprintf hello.elf crashme profdeep launcher idregs)
+# idregs: arm64 only (the EL0 reads of the ID registers, HWCAP_CPUID)
 # The C++ set needs a g++ whose libstdc++ was built against musl for aarch64: the
 # `aarch64-linux-musl-cross` toolchain (musl.cc; unpack it and put its bin/ on the PATH, or
 # name the compiler: `make aarch64 CXXA64=/path/aarch64-linux-musl-g++`). Without it the

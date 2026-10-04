@@ -1779,6 +1779,19 @@ for i in $(seq 1 120); do sleep 0.5; grep -aq "piperace: ALL OK\|piperace: FAILU
 assert "piperace: the pipe carried 4194304 bytes in order across cores" "piperace: a pipe between threads on two cores carries 4 MB byte-exact"
 assert "piperace: the eventfd summed 300000 increments from 3 threads exactly" "piperace: an eventfd written from three cores loses no increment"
 stopq $q4
+# A WAITER OF A MIXED EPOLL SET, PARKED (`talaria.netmix=`, docs/ARM64-PLAN.md §10.13): a pipe,
+# an eventfd and a signalfd in the set; one of two waiters is the stack's poller, the other
+# parks with a 2 s ceiling, and the producers must kick it — a kernel without the kicks wakes
+# it at 1970 ms. Also the epoll_wait timeout with no NIC (it was zero cycles: an instant 0).
+rm -f /tmp/o.log
+qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 4 -m 1024 \
+  -kernel "/w/$K" -append "console=ttyS0 talaria.test=mixwait talaria.smp=4 talaria.netmix=2000000000" \
+  -display none -serial file:/tmp/o.log -no-reboot >/tmp/q.log 2>&1 &
+q4=$!; qstarted mixwait
+for i in $(seq 1 120); do sleep 0.5; grep -aq "mixed-set waiters parked\|mixwait: FAILURES\|panic" /tmp/o.log 2>/dev/null && break; done
+assert "mixwait: ALL OK" "mixwait: a parked mixed-set waiter is woken by a pipe, an eventfd and a signal at once, not by its 2 s ceiling"
+assert "mixed-set waiters parked [1-9][0-9]* \(woken [1-9][0-9]*, by the ceiling 0\)" "mixwait: the waiters really parked, and no park ended by the ceiling"
+stopq $q4
 
 # THE ISOLATION OF THE MEMORY. The identity window GB0 (32 MB-1 GB of the physical memory)
 # in a process's AS was marked U/S: from ring 3 the page tables, the kernel stacks and the
