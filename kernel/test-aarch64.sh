@@ -375,7 +375,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
         bootp 120 "${PCI}talaria.test=journal1$JM" "$TD/fs.img" $DEV 'journal1: COMMITTED|PANIC|\[trap\]'
         assert 'journal1: COMMITTED'                                          "journal ($DEV${JM:+, journal=data}): the transaction is committed, then the power is CUT (no checkpoint)"
         bootp 120 "${PCI}talaria.test=journal2$JM" "$TD/fs.img" $DEV
-        assert 'journal2: .*RECOVERED OK'                                     "journal ($DEV${JM:+, journal=data}): after the cut the replay of the journal restores the ${JM:+file's DATA and the }metadata"
+        assert 'journal2: .*RECOVERED OK'                                     "journal ($DEV${JM:+, journal=data}): after the cut the replay of the journal restores the ${JM:+DATA of the file and the }metadata"
         if command -v e2fsck >/dev/null 2>&1; then
           if e2fsck -fn "$REPO/$TD/fs.img" >/dev/null 2>&1; then echo "  PASS  journal ($DEV${JM:+, journal=data}) (host): e2fsck -fn is clean after the replay"; PASS=$((PASS+1)); else echo "  FAIL  journal ($DEV${JM:+, journal=data}) (host): e2fsck -fn found errors after the replay"; FAIL=$((FAIL+1)); fi
         fi
