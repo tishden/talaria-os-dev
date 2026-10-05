@@ -16,7 +16,10 @@
 #   --args "..."      workload arguments (argv[1..])
 #   --env "K=V;K=V"   workload environment variables
 #   --restart N       restarts on failure (the supervisor), 0 = do not restart
-#   --type TYPE       instance type (default c6i.large; *.metal — bare metal)
+#   --type TYPE       instance type (default c6i.large; *.metal — bare metal; a Graviton
+#                     type — c7g.large, m7g.*, c8g.* — selects arm64)
+#   --arch ARCH       x86_64 or arm64 (default: from the binary's e_machine, else from --type);
+#                     arm64 boots UEFI through the aarch64 stub (EC2's arm64 is UEFI-only)
 #   --smp N           how many cores to give the workload (BSP + N-1 APs); 1 = BSP only
 #   --net dhcp|none   network (ENA + DHCP) or no network
 #   --mode MODE       kernel mode (default cell; proc — the process model with
@@ -44,7 +47,10 @@
 #
 # The boot chain is chosen by instance type: `*.metal` can only do BIOS, so there
 # it uses our own loader (`tools/mk-tboot.sh`); on virtual instances it works
-# exactly the same way, so it is used everywhere — one path instead of two.
+# exactly the same way, so it is used everywhere — one path instead of two. arm64 is the
+# exception by necessity: a Graviton boots UEFI only, so there the image is an ESP with the
+# aarch64 stub (`tools/mk-ami.sh`, `kernel/uefi-stub/build.sh aarch64` after the kernel build),
+# and the console works (the 16550 behind PCI) — no disk trace is needed or laid.
 #
 # What is needed: the aws cli with EC2 permissions, the talaria-v11 key (created
 # automatically), a default VPC with a public subnet. A t3.small helper comes up for
@@ -56,7 +62,7 @@ W=${WORKDIR:-$HOME/.talaria-lab}
 export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-1}
 
 APP=""; ARGS=""; ENVS=""; RESTART=3; TYPE=c6i.large; SMP=1; NET=dhcp; MODE=cell; USERDATA=0
-STOP_AFTER=""; EXTRA=""; DISK_GB=""; DATA=""; NAME=""; DRY=0; AMI_ONLY=0; DOT=true
+STOP_AFTER=""; EXTRA=""; DISK_GB=""; DATA=""; NAME=""; DRY=0; AMI_ONLY=0; DOT=true; ARCH=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --app) APP=$2; shift 2;;
@@ -64,6 +70,7 @@ while [ $# -gt 0 ]; do
     --env) ENVS=$2; shift 2;;
     --restart) RESTART=$2; shift 2;;
     --type) TYPE=$2; shift 2;;
+    --arch) ARCH=$2; shift 2;;
     --smp) SMP=$2; shift 2;;
     --net) NET=$2; shift 2;;
     --mode) MODE=$2; shift 2;;
@@ -76,13 +83,24 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1; shift;;
     --ami-only) AMI_ONLY=1; shift;;
     --keep-disk) DOT=false; shift;;
-    -h|--help) sed -n '2,46p' "$0"; exit 0;;
+    -h|--help) sed -n '2,54p' "$0"; exit 0;;
     *) echo "unknown argument: $1 (see --help)"; exit 1;;
   esac
 done
 [ -n "$APP" ] || [ -n "$DATA" ] || { echo "need --app <binary> or --data <data image>"; exit 1; }
 NAME=${NAME:-talaria-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$W"
+# The architecture: said, else the binary's own e_machine (0xB7 AArch64, 0x3E x86-64), else
+# the instance type's family (a "g" after the generation: c7g, m6g, c8g, r7gd...). A binary of
+# one machine on an instance of the other cannot run, so a mismatch stops here.
+if [ -z "$ARCH" ] && [ -n "$APP" ] && [ -f "$APP" ]; then
+  case "$(od -An -tx1 -j18 -N2 "$APP" | tr -d ' ')" in b700) ARCH=arm64;; 3e00) ARCH=x86_64;; esac
+fi
+if [ -z "$ARCH" ]; then case "$TYPE" in [a-z]*[0-9]g*.*) ARCH=arm64;; *) ARCH=x86_64;; esac; fi
+case "$ARCH" in aarch64) ARCH=arm64;; arm64|x86_64) ;; *) echo "--arch: x86_64 or arm64, not $ARCH"; exit 1;; esac
+[ "$ARCH" = arm64 ] && [ "$TYPE" = c6i.large ] && TYPE=c7g.large
+case "$TYPE" in [a-z]*[0-9]g*.*) TARCH=arm64;; *) TARCH=x86_64;; esac
+[ "$TARCH" = "$ARCH" ] || { echo "the workload is $ARCH, the instance type $TYPE is $TARCH"; exit 1; }
 
 # ── 1. data image: the workload + the manifest ──────────────────────────────
 IMGDATA="$W/$NAME-data.img"
@@ -103,7 +121,11 @@ fi
 # the ONLY channel: the instance console shows neither COM1 nor the screen there, and
 # without the trace debugging looks like "the instance is silent". The area for it is
 # reserved by mk-tboot itself and costs nothing.
-CMDLINE="console=ttyS0 talaria.pci=1 talaria.trace=2048 talaria.mode=$MODE"
+if [ "$ARCH" = arm64 ]; then
+  CMDLINE="talaria.pci=1 talaria.mode=$MODE"   # the console is the SPCR's 16550; no trace area on an ESP image
+else
+  CMDLINE="console=ttyS0 talaria.pci=1 talaria.trace=2048 talaria.mode=$MODE"
+fi
 [ "$NET" = dhcp ] && CMDLINE="$CMDLINE talaria.ip=dhcp"
 [ "$USERDATA" = 1 ] && CMDLINE="$CMDLINE talaria.userdata=1"
 [ "$SMP" -gt 1 ] && CMDLINE="$CMDLINE talaria.smp=$SMP"
@@ -112,12 +134,16 @@ CMDLINE="console=ttyS0 talaria.pci=1 talaria.trace=2048 talaria.mode=$MODE"
 IMG="$W/$NAME.img"
 echo "== boot image: $IMG"
 echo "   cmdline: $CMDLINE"
-"$REPO/tools/mk-tboot.sh" "$IMG" "$IMGDATA" "$CMDLINE" | sed 's/^/   /'
+if [ "$ARCH" = arm64 ]; then
+  ARCH=arm64 "$REPO/tools/mk-ami.sh" "$IMG" "$IMGDATA" "$CMDLINE" | sed 's/^/   /'
+else
+  "$REPO/tools/mk-tboot.sh" "$IMG" "$IMGDATA" "$CMDLINE" | sed 's/^/   /'
+fi
 IMG_B=$(stat -c%s "$IMG")
 DISK_GB=${DISK_GB:-$(( (IMG_B + 1073741823) / 1073741824 ))}
 [ "$DISK_GB" -lt 1 ] && DISK_GB=1
 if [ "$DRY" = 1 ]; then
-  echo "== dry-run: the image is built, the volume would be ${DISK_GB} GiB, type $TYPE"
+  echo "== dry-run: the image is built ($ARCH), the volume would be ${DISK_GB} GiB, type $TYPE"
   exit 0
 fi
 
@@ -226,9 +252,11 @@ aws ec2 wait volume-available --volume-ids "$VOL" >/dev/null 2>&1 || true
 aws ec2 delete-volume --volume-id "$VOL" >/dev/null 2>&1 \
   || echo "WARNING: volume $VOL not deleted — remove it by hand"
 VOL=""
-AMI=$(aws ec2 register-image --name "$NAME" --architecture x86_64 \
-  --root-device-name /dev/xvda --boot-mode legacy-bios --ena-support --virtualization-type hvm \
-  --sriov-net-support simple --imds-support v2.0 \
+# arm64: UEFI only; the Intel VF flag (sriov simple) is x86's — a Graviton has only the ENA.
+BOOTMODE=legacy-bios; SRIOV="--sriov-net-support simple"; [ "$ARCH" = arm64 ] && { BOOTMODE=uefi; SRIOV=""; }
+AMI=$(aws ec2 register-image --name "$NAME" --architecture "$ARCH" \
+  --root-device-name /dev/xvda --boot-mode "$BOOTMODE" --ena-support --virtualization-type hvm \
+  $SRIOV --imds-support v2.0 \
   --block-device-mappings "[{\"DeviceName\":\"/dev/xvda\",\"Ebs\":{\"SnapshotId\":\"$SNAP\",\"DeleteOnTermination\":$DOT,\"VolumeType\":\"gp3\"}}]" \
   --query ImageId --output text)
 echo "== AMI $AMI (the volume with the instance: DeleteOnTermination=$DOT)"
@@ -268,7 +296,7 @@ cat <<EOF
    cmdline  : $CMDLINE
 
 Next:
-   kernel log (also on disk)    infra/aws/read-disk-trace.sh $IID 2048 2047   (only with --keep-disk)
-   console (empty on metal)     aws ec2 get-console-output --instance-id $IID --latest --output text
+   kernel log (also on disk)    infra/aws/read-disk-trace.sh $IID 2048 2047   (x86, only with --keep-disk)
+   console (empty on x86 metal) aws ec2 get-console-output --instance-id $IID --latest --output text
    terminate                    aws ec2 terminate-instances --instance-ids $IID
 EOF
