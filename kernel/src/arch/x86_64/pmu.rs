@@ -292,3 +292,7 @@ pub use crate::perfsample::{configure_from_cmdline, note_here, note_tick, ipi_ch
 
 /// arm64's check of a 32-bit counter widened across its wrap; x86's counters are 48 bits wide.
 pub fn selftest_wrap() -> Option<(u64, u64)> { None }
+/// arm64's probe of the counters across idle periods (`talaria.test=pmu`); x86 has none.
+pub fn selftest_idle() {}
+/// arm64's probe of a chained counter pair; x86 has none.
+pub fn selftest_chain() {}

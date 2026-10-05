@@ -36,6 +36,13 @@ impl Sample {
             tsc: self.tsc.wrapping_sub(prev.tsc),
         }
     }
+    /// Whether a DIFFERENCE of two snapshots of one core is one a core can produce: no more
+    /// than 16 cycles per tick of the counter (the TSC, or the generic timer at 1 GHz+ — no core
+    /// runs sixteen times faster), no more than 8 instructions per cycle (the widest retire of
+    /// either machine). A counter that went back between the two shows here as a huge value.
+    pub fn plausible(&self) -> bool {
+        (self.tsc == 0 || self.cycles <= self.tsc.saturating_mul(16)) && self.instrs <= self.cycles.saturating_mul(8).max(1_000)
+    }
     /// The IPC in hundredths (231 = 2.31). 0 — there is nothing to compute it from.
     pub fn ipc100(&self) -> u64 { if self.cycles > 0 { self.instrs * 100 / self.cycles } else { 0 } }
     /// The share of LLC misses in hundredths of a percent.
@@ -110,6 +117,16 @@ pub fn note_here() {
     if !crate::pmu::available() { return; }
     let c = crate::percpu::cpu_id();
     if c >= MAXCPU { return; }
+    // A seqlock writer, with this core's interrupts masked: `top` takes its own core's
+    // snapshot from the console's thread, and the tick on that core used to land in the
+    // middle of it — the slot then held one moment's cycles and another's instructions, and
+    // a reader on another core read the fields while they were being written. Both made a
+    // core's cycles go BACK between two reads; the 64-bit wrap of that difference, summed
+    // with a neighbour's, printed an IPC of 6.8e7 on a Graviton (`docs/ENGINEERING-NOTES.md` 44).
+    let f = crate::arch::cpu::irq_flags();
+    unsafe { crate::arch::cpu::irq_disable(); }
+    S_SEQ[c].fetch_add(1, Ordering::Relaxed);              // odd: being written
+    core::sync::atomic::fence(Ordering::Release);
     let s = crate::pmu::sample();
     S_CYC[c].store(s.cycles, Ordering::Relaxed);
     S_INS[c].store(s.instrs, Ordering::Relaxed);
@@ -119,7 +136,8 @@ pub fn note_here() {
     S_BRM[c].store(s.br_miss, Ordering::Relaxed);
     S_BRR[c].store(s.br_ret, Ordering::Relaxed);
     S_TSC[c].store(s.tsc, Ordering::Relaxed);
-    S_SEQ[c].fetch_add(1, Ordering::Release);
+    S_SEQ[c].fetch_add(1, Ordering::Release);              // even: whole
+    unsafe { crate::arch::cpu::irq_restore(f); }
 }
 /// The same from the scheduler's tick — no more often than once per `TICK_IV_NS` per core.
 /// The timestamp is taken from THE SNAPSHOT ITSELF (`S_TSC`), so no separate
@@ -182,8 +200,21 @@ pub fn refresh_all() {
 /// The last snapshot of the core `c` and its sequence number (0 — there were no snapshots).
 pub fn last(c: usize) -> (Sample, u64) {
     if c >= MAXCPU { return (Sample::default(), 0); }
-    let seq = S_SEQ[c].load(Ordering::Acquire);
-    (Sample {
+    // The seqlock's reader (the writer is `note_here`): a slot read while its core writes it
+    // is read again. A few tries; a core that keeps writing (it cannot — one snapshot per
+    // 20 ms) would give the last read, as before.
+    let mut out = (Sample::default(), 0);
+    for _ in 0..4 {
+        let seq = S_SEQ[c].load(Ordering::Acquire);
+        if seq & 1 != 0 { core::hint::spin_loop(); continue; }
+        out = (read_slot(c), seq);
+        core::sync::atomic::fence(Ordering::Acquire);
+        if S_SEQ[c].load(Ordering::Relaxed) == seq { break; }
+    }
+    out
+}
+fn read_slot(c: usize) -> Sample {
+    Sample {
         cycles: S_CYC[c].load(Ordering::Relaxed),
         instrs: S_INS[c].load(Ordering::Relaxed),
         ref_cycles: S_REF[c].load(Ordering::Relaxed),
@@ -192,7 +223,7 @@ pub fn last(c: usize) -> (Sample, u64) {
         br_miss: S_BRM[c].load(Ordering::Relaxed),
         br_ret: S_BRR[c].load(Ordering::Relaxed),
         tsc: S_TSC[c].load(Ordering::Relaxed),
-    }, seq)
+    }
 }
 
 /// Ask the core `c` to take its counters RIGHT NOW (one IPI). true —
@@ -210,7 +241,8 @@ pub fn poke(c: usize) -> bool {
     let hz = crate::tsc::calibrate_cached().max(1);
     let deadline = crate::tsc::rdtsc() + hz / 1000;
     while crate::tsc::rdtsc() < deadline {
-        if S_SEQ[c].load(Ordering::Acquire) != before { return true; }
+        let now = S_SEQ[c].load(Ordering::Acquire);
+        if now != before && now & 1 == 0 { return true; }   // a new snapshot, and a whole one
         core::hint::spin_loop();
     }
     WANT.fetch_and(!(1u64 << c), Ordering::AcqRel);

@@ -403,6 +403,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 println!("pmu: across the 32-bit wrap: instrs={} cycles={} — {}", ins, cyc,
                     if ok { "the widening holds" } else { "FAIL (the widening missed the wrap)" });
             }
+            crate::pmu::selftest_idle();
+            crate::pmu::selftest_chain();
             if cycles > 0 { println!("pmu: OK (cycles={} source={})", cycles, source); }
             else { println!("pmu: FAIL (a zero counter)"); }
             crate::suite::park()

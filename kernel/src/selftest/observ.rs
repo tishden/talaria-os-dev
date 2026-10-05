@@ -83,6 +83,13 @@ fn statics() -> bool {
     let w = crate::pmu::Sample { cycles: 5, ..crate::pmu::Sample::ZERO }
         .delta(&crate::pmu::Sample { cycles: u64::MAX - 4, ..crate::pmu::Sample::ZERO });
     check(&mut ok, w.cycles == 10, "the difference across the counter's wrap");
+    // A core whose cycles went BACK between two snapshots (a torn or interleaved slot): the
+    // difference is ~2^64 and must be refused, not summed (a Graviton printed IPC 6.8e7).
+    let back = crate::pmu::Sample { cycles: 1000, instrs: 5000, tsc: 2000, ..crate::pmu::Sample::ZERO }
+        .delta(&crate::pmu::Sample { cycles: 1500, instrs: 1000, tsc: 1000, ..crate::pmu::Sample::ZERO });
+    let fine = crate::pmu::Sample { cycles: 2500, instrs: 5000, tsc: 2000, ..crate::pmu::Sample::ZERO }
+        .delta(&crate::pmu::Sample { cycles: 500, instrs: 1000, tsc: 1000, ..crate::pmu::Sample::ZERO });
+    check(&mut ok, !back.plausible() && fine.plausible(), "a counter that went back is refused, a real difference kept");
 
     // THE UNWINDING OF THE STACK — on a synthetic chain of frames (see `obs::unwind`).
     if !crate::obs::unwind::selftest() { ok = false; }

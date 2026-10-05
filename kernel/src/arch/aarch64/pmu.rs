@@ -105,6 +105,14 @@ const MAXCPU: usize = crate::percpu::MAXCPU;
 /// per core and logical event. Touched by the owning core only, with interrupts masked.
 static LO: [[AtomicU32; NL]; MAXCPU] = [const { [const { AtomicU32::new(0) }; NL] }; MAXCPU];
 static HI: [[AtomicU64; NL]; MAXCPU] = [const { [const { AtomicU64::new(0) }; NL] }; MAXCPU];
+/// `talaria.pmuchain=1`: use a declared CHAIN. Off by default: a Graviton VM (`c7g.large`)
+/// declares it and its odd counter does not carry at the low half's natural wrap — the high half
+/// stays 0 while the low wraps (a raw probe: five wraps in ten seconds, no carry), and `top` summed
+/// the 2^32 drop into an IPC of 6.8e7 (`docs/ENGINEERING-NOTES.md` item 44). A carry check at boot
+/// does not tell: just after a write to the counter the pair DID carry. The reader's widening is
+/// correct on any machine as long as a core reads its counters once per wrap (the tick does, every
+/// 20 ms), and it leaves the second counter of each pair to another event.
+pub static USE_CHAIN: AtomicBool = AtomicBool::new(false);
 
 macro_rules! sysreg_rw {
     ($rd:ident, $wr:ident, $name:literal) => {
@@ -232,7 +240,8 @@ pub fn init_cpu() -> bool {
     NCTR.store(n, Ordering::Relaxed);
     let usable = n.min(MAXCTR);
     // The width (the module doc): PMUv3p5 is PMUVer >= 6.
-    let width = if NARROW.load(Ordering::Relaxed) { 3 } else if ver >= 6 { 1 } else if has_event(EV_CHAIN) { 2 } else { 3 };
+    let width = if NARROW.load(Ordering::Relaxed) { 3 } else if ver >= 6 { 1 }
+        else if has_event(EV_CHAIN) && USE_CHAIN.load(Ordering::Relaxed) { 2 } else { 3 };
     let per = if width == 2 { 2 } else { 1 };
     let want = [
         pick(EV_INST_RETIRED, NONE),
@@ -302,6 +311,7 @@ pub fn init() -> bool {
         match WIDTH.load(Ordering::Relaxed) {
             1 => "64-bit counters (PMUv3p5)",
             2 => "chained pairs (CHAIN)",
+            _ if has_event(EV_CHAIN) => "32-bit, widened by the reader (CHAIN declared, not trusted — talaria.pmuchain=1 uses it)",
             _ => "32-bit, widened by the reader (no CHAIN: a core unread for a wrap loses it)",
         });
     crate::println!("talaria: the PMU: cycles=ccnt instructions={} LLC-miss={} LLC-ref={} branches={} predictor-miss={} (- — there is no counter)",
@@ -371,4 +381,83 @@ pub fn selftest_wrap() -> Option<(u64, u64)> {
     let (c1, i1) = (pmccntr_r(), read_logical(L_INS));
     unsafe { super::cpu::irq_restore(f); }
     Some((i1.wrapping_sub(i0), c1.wrapping_sub(c0)))
+}
+
+/// `talaria.test=pmu` on a chained pair: ten seconds of back-to-back raw reads of the pair on a
+/// busy core, every carry of the high half and every read whose 64-bit value went BACK printed
+/// with the raw halves around it — the hardware's own account of how the odd counter follows
+/// the even one's wrap (a Graviton VM's `top` saw the count go back by 2^32 - delta).
+pub fn selftest_chain() {
+    let i = IDX[L_INS].load(Ordering::Relaxed);
+    if !available() || i == NONE || WIDTH.load(Ordering::Relaxed) != 2 { return; }
+    let hz = crate::tsc::calibrate_cached();
+    let f = super::cpu::irq_flags();
+    unsafe { super::cpu::irq_disable(); }
+    let rd = || { let h = evcnt_r(i + 1) & 0xFFFF_FFFF; let l = evcnt_r(i) & 0xFFFF_FFFF; let h2 = evcnt_r(i + 1) & 0xFFFF_FFFF; (h, l, h2) };
+    let (mut ph, mut pl, _) = rd();
+    let (mut reads, mut carries, mut backs, mut said) = (0u64, 0u32, 0u32, 0u32);
+    let t0 = crate::tsc::rdtsc();
+    while crate::tsc::rdtsc().wrapping_sub(t0) < 10 * hz {
+        // Each read of a PMU register is an exit to the hypervisor on a VM (~2 us): reading
+        // back to back the count never reaches a wrap. Work between reads while the low half
+        // is far from it (a chunk is ~1.2 M instructions), read densely in its last 4 M — a read
+        // itself retires only some twenty at EL1, the exit's own time is EL2's and not counted.
+        if (1u64 << 32) - pl > 4_000_000 {
+            let mut x = 0u64;
+            for k in 0..200_000u64 { x = core::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(k)); }
+        }
+        let (h, l, h2) = rd();
+        reads += 1;
+        let (v, pv) = (h << 32 | l, ph << 32 | pl);
+        if h != ph { carries += 1; }
+        if v < pv { backs += 1; }
+        if (h != ph || v < pv || h2 != h) && said < 24 {
+            said += 1;
+            crate::println!("pmu-chain: read {}: prev hi={:#x} lo={:#010x} -> hi={:#x} lo={:#010x} hi2={:#x}{}",
+                reads, ph, pl, h, l, h2, if v < pv { " BACK" } else { "" });
+        }
+        ph = h; pl = l;
+    }
+    unsafe { super::cpu::irq_restore(f); }
+    crate::println!("pmu-chain: {} reads in 10 s, {} carries of the high half, {} reads went back", reads, carries, backs);
+}
+
+/// `talaria.test=pmu`, the part for a hypervisor: the counters RAW across a busy stretch and an
+/// idle one in `wfi`, ten rounds. A Graviton VM (`c7g.large`) showed `top`'s IPC at 6.8e7 every
+/// second interval — a difference of instructions near 2^32 over a few cycles — and only
+/// there; the question is which register jumps and when: the cycle counter, the chained pair's
+/// low or high half, at the busy stretch or across the idle one.
+pub fn selftest_idle() {
+    if !available() { return; }
+    let i = IDX[L_INS].load(Ordering::Relaxed);
+    let raw = || (pmccntr_r(), if i == NONE { 0 } else { evcnt_r(i) & 0xFFFF_FFFF },
+                  if i == NONE || WIDTH.load(Ordering::Relaxed) != 2 { 0 } else { evcnt_r(i + 1) & 0xFFFF_FFFF });
+    let hz = crate::tsc::calibrate_cached();
+    // The idle is the timer's: interrupts masked, the core's own timer armed 100 ms ahead,
+    // `wfi` until it fires (a pending interrupt wakes it whatever PSTATE.I says), the timer
+    // stopped and, after the rounds, put back as the tick had it.
+    let (ctl, cval): (u64, u64);
+    unsafe { core::arch::asm!("mrs {}, cntv_ctl_el0", "mrs {}, cntv_cval_el0", out(reg) ctl, out(reg) cval, options(nomem, nostack)); }
+    let f = super::cpu::irq_flags();
+    unsafe { super::cpu::irq_disable(); }
+    let mut p = raw();
+    let mut pl = read_logical(L_INS);
+    for round in 0..10 {
+        let mut x = 0u64;
+        for k in 0..2_000_000u64 { x = core::hint::black_box(x.wrapping_add(k)); }
+        let b = raw(); let bl = read_logical(L_INS);
+        let t0 = crate::tsc::rdtsc();
+        super::timer::arm(100_000_000);
+        while crate::tsc::rdtsc().wrapping_sub(t0) < hz / 10 { unsafe { core::arch::asm!("wfi", options(nomem, nostack)); } }
+        super::timer::stop();
+        let w = raw(); let wl = read_logical(L_INS);
+        crate::println!("pmu-idle: round {}: busy dcyc={} dlo={} dhi={} dins={} | idle 100 ms dcyc={} dlo={} dhi={} dins={}",
+            round, b.0.wrapping_sub(p.0), (b.1 as u32).wrapping_sub(p.1 as u32), b.2.wrapping_sub(p.2) as i64, bl.wrapping_sub(pl),
+            w.0.wrapping_sub(b.0), (w.1 as u32).wrapping_sub(b.1 as u32), w.2.wrapping_sub(b.2) as i64, wl.wrapping_sub(bl));
+        p = w; pl = wl;
+    }
+    unsafe {
+        core::arch::asm!("msr cntv_cval_el0, {}", "msr cntv_ctl_el0, {}", "isb", in(reg) cval, in(reg) ctl & 1, options(nomem, nostack));
+        super::cpu::irq_restore(f);
+    }
 }
