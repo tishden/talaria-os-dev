@@ -32,6 +32,8 @@ macro_rules! println {
 pub mod cellman;
 #[path = "../../kernel/src/clock.rs"]
 pub mod clock;
+#[path = "../../kernel/src/ntp.rs"]
+pub mod ntp;
 #[path = "../../kernel/src/cmdline.rs"]
 pub mod cmdline;
 #[path = "../../kernel/src/ext2hash.rs"]
