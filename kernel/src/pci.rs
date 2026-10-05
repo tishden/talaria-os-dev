@@ -110,7 +110,7 @@ pub fn present() -> bool {
                 }
             }
             ECAM_BUSN.store(crate::acpi::ecam_bus_end() as usize, Ordering::Relaxed);
-            ECAM.store(mcfg, Ordering::Relaxed);
+            ECAM.store(crate::arch::mmio_va(mcfg), Ordering::Relaxed); // the kernel's pointer (arm64: a low ECAM goes through the devices' alias)
         } else {
             // A9: without an MCFG we first try THE LEGACY PORTS, and only then the default
             // ECAM. The order used to be the other way round, and that is dangerous on exactly bare metal:
@@ -239,7 +239,9 @@ pub fn bar(bus: u8, dev: u8, func: u8, idx: u16) -> (u64, u64) {
     // command: memory space enable + bus master
     let cmd = rd(bus, dev, func, 4);
     wr(bus, dev, func, 4, cmd | 0x6);
-    (base, size)
+    // the BAR holds the physical address; the caller gets the kernel's pointer (arm64: a BAR in
+    // GB0 goes through the devices' alias, `mmu::DEV_SLOT`; x86: the identity)
+    (crate::arch::mmio_va(base), size)
 }
 
 /// A config dword for a driver that walks the space itself (virtio-pci's vendor capabilities).
@@ -323,6 +325,7 @@ fn probe_func(bus: u8, dev: u8, func: u8) {
     if vendor == 0x1af4 && device == 0x1110 {
         let (b, s) = bar(bus, dev, func, 2);
         if b != 0 {
+            let b = crate::arch::mmio_pa(b); // a window handed to ring 3 by its identity (`syscall`'s shm path)
             IVSHMEM_BASE.store(b, Ordering::SeqCst); IVSHMEM_SIZE.store(s, Ordering::SeqCst);
             crate::println!("pci: ivshmem BAR2 -> {:#x} ({} KB) — the host's shared memory", b, s / 1024);
         }

@@ -69,6 +69,7 @@ pub fn init(start_info: u64) {
                 total_ram += e.size;
                 let k = RAM_N.load(Ordering::Relaxed) as usize;
                 if k < MAX_RAM { RAM_BASE[k] = e.addr; RAM_LEN[k] = e.size; RAM_N.store(k as u64 + 1, Ordering::Relaxed); }
+                fc_set_base(e.addr); // the frame ledger's origin: the lowest RAM
                 // THE BOUNDARY IS ROUNDED UP TO 2 MB rather than taken tight against the
                 // end of the image. The reason is not tidiness but memory protection:
                 // GB0 is mapped BY 2 MB LEAVES (`paging::init`), and the leaf
@@ -357,12 +358,13 @@ pub fn main_node() -> u8 { MAIN_NODE.load(Ordering::Relaxed) as u8 }
 /// The main node's memory is its high area first and the low allocator after it: the
 /// callers are the workload's pages, and the low memory is what the kernel's own
 /// structures cannot do without (`high_init`).
+#[track_caller]
 pub fn alloc_contig_node(n: u64, node: u8) -> Option<u64> {
     let idx = node as usize;
     if node == 255 || idx >= MAX_NODES || node == main_node() { return alloc_main(n); }
     // This node's free blocks (returned by free_contig) come before the bump.
     if let Some(a) = fl_node_take(n, NODE_BASE[idx].load(Ordering::Relaxed), NODE_END[idx].load(Ordering::Relaxed)) {
-        crate::metrics::add_frames(n);
+        crate::metrics::add_frames(n); fc_alloc(a, n);
         return Some(a);
     }
     loop {
@@ -374,7 +376,7 @@ pub fn alloc_contig_node(n: u64, node: u8) -> Option<u64> {
         // There is NOTHING to map here: the whole area is mapped in `numa_init`, before
         // the first process address space is created (see there — why
         // it cannot be deferred).
-        crate::metrics::add_frames(n);
+        crate::metrics::add_frames(n); fc_alloc(base, n);
         return Some(base);
     }
 }
@@ -413,16 +415,17 @@ fn low_for_workload(n: u64) -> bool {
 
 /// The main node's frames for the workload: the high area, then the low allocator (above
 /// its reserve, when a high area exists).
+#[track_caller]
 fn alloc_main(n: u64) -> Option<u64> {
     if n == 0 { return None; }
     for (i, hb, he) in high_areas() {
-        if let Some(a) = fl_node_take(n, hb, he) { crate::metrics::add_frames(n); return Some(a); }
+        if let Some(a) = fl_node_take(n, hb, he) { crate::metrics::add_frames(n); fc_alloc(a, n); return Some(a); }
         loop {
             let base = HIGH_NEXT[i].load(Ordering::Relaxed);
             let end = base + n * FRAME;
             if end > he { break; }
             if HIGH_NEXT[i].compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
-            crate::metrics::add_frames(n);
+            crate::metrics::add_frames(n); fc_alloc(base, n);
             return Some(base);
         }
     }
@@ -433,10 +436,11 @@ fn alloc_main(n: u64) -> Option<u64> {
 /// The workload's ALIGNED frames (a 2 MB page): the high area, then the low allocator above
 /// its reserve. `paging::lazy_fault` takes its huge pages here — `alloc_contig_aligned`
 /// alone took them from the low memory only.
+#[track_caller]
 pub fn alloc_workload_aligned(n: u64, align: u64) -> Option<u64> {
     if n == 0 { return None; }
     for (i, hb, he) in high_areas() {
-        if let Some(a) = fl_node_take_aligned(n, align, hb, he) { crate::metrics::add_frames(n); return Some(a); }
+        if let Some(a) = fl_node_take_aligned(n, align, hb, he) { crate::metrics::add_frames(n); fc_alloc(a, n); return Some(a); }
         loop {
             let base = HIGH_NEXT[i].load(Ordering::Relaxed);
             let a = (base + align - 1) & !(align - 1);
@@ -445,7 +449,7 @@ pub fn alloc_workload_aligned(n: u64, align: u64) -> Option<u64> {
             if HIGH_NEXT[i].compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
             // The alignment's gap goes into the area's free list rather than being lost.
             if a > base { fl_node_put(base, (a - base) / FRAME); }
-            crate::metrics::add_frames(n);
+            crate::metrics::add_frames(n); fc_alloc(a, n);
             return Some(a);
         }
     }
@@ -557,6 +561,7 @@ fn fl_node_put(addr: u64, n: u64) {
 /// Allocate n contiguous zeroed frames from the high area (RAM ABOVE 4 GB) with the
 /// alignment align (in bytes). None — there is no such memory. It is used for the ENA rings
 /// and the grown refcount table; the area is mapped already (`high_init`).
+#[track_caller]
 pub fn alloc_high(pages: u64, align: u64) -> Option<u64> {
     for (i, _, he) in high_areas() {
         let got = loop {
@@ -568,6 +573,7 @@ pub fn alloc_high(pages: u64, align: u64) -> Option<u64> {
             if HIGH_NEXT[i].compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_ok() { break Some(cur); }
         };
         if let Some(cur) = got {
+            fc_alloc(cur, pages);
             unsafe { core::ptr::write_bytes(cur as *mut u8, 0, (pages * FRAME) as usize) };
             return Some(cur);
         }
@@ -576,11 +582,13 @@ pub fn alloc_high(pages: u64, align: u64) -> Option<u64> {
 }
 
 /// Allocate one physical frame of 4 KB. None — exhausted.
+#[track_caller]
 pub fn alloc_frame() -> Option<u64> { alloc_contig(1) }
 
 /// Allocate n contiguous frames aligned to `align` bytes (a power of two).
 /// It is needed for 2M pages: the physical base of a 2M leaf must be a multiple of 2 MB.
 /// If it did not work out to align — None (the caller will fall back to 4K pages).
+#[track_caller]
 pub fn alloc_contig_aligned(n: u64, align: u64) -> Option<u64> {
     if n == 0 || align < FRAME { return alloc_contig(n); }
     // The free list: we look for a block inside which an aligned piece fits.
@@ -607,7 +615,7 @@ pub fn alloc_contig_aligned(n: u64, align: u64) -> Option<u64> {
                 if tail_pages > 0 && FL_N < FL_MAX { FL_ADDR[FL_N] = tail_addr; FL_PAGES[FL_N] = tail_pages; FL_N += 1; }
                 fl_unlock();
                 crate::paging::unguard(a, n * FRAME);
-                crate::metrics::add_frames(n);
+                crate::metrics::add_frames(n); fc_alloc(a, n);
                 return Some(a);
             }
         }
@@ -624,12 +632,13 @@ pub fn alloc_contig_aligned(n: u64, align: u64) -> Option<u64> {
         }
         if end > END.load(Ordering::Relaxed) { return None; }
         if NEXT.compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
-        crate::metrics::add_frames(n);
+        crate::metrics::add_frames(n); fc_alloc(a, n);
         return Some(a);
     }
 }
 
 /// Allocate n contiguous frames: first a first-fit in the free list (reclaim), otherwise the bump.
+#[track_caller]
 pub fn alloc_contig(n: u64) -> Option<u64> {
     if n == 0 { return None; }
     fl_lock();
@@ -655,7 +664,7 @@ pub fn alloc_contig(n: u64) -> Option<u64> {
                 // The frame may have been extinguished by a munmap guard: return present for the kernel's needs
                 // (the page tables/DMA access it at its identity address).
                 crate::paging::unguard(addr, n * FRAME);
-                crate::metrics::add_frames(n);
+                crate::metrics::add_frames(n); fc_alloc(addr, n);
                 return Some(addr);
             }
         }
@@ -671,7 +680,7 @@ pub fn alloc_contig(n: u64) -> Option<u64> {
             continue;
         }
         if NEXT.compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
-        if end <= END.load(Ordering::Relaxed) { crate::metrics::add_frames(n); return Some(base); } else { return None; }
+        if end <= END.load(Ordering::Relaxed) { crate::metrics::add_frames(n); fc_alloc(base, n); return Some(base); } else { return None; }
     }
 }
 static RES_BASE: AtomicU64 = AtomicU64::new(0);
@@ -692,8 +701,10 @@ pub fn reserve(base: u64, len: u64) {
 }
 
 /// Return a contiguous block into the free list (coalescing with the adjoining blocks).
+#[track_caller]
 pub fn free_contig(addr: u64, n: u64) {
     if n == 0 || addr == 0 { return; }
+    fc_free(addr, n);
     // A frame from a foreign node is returned into ITS OWN list: in the common one it would go to
     // the very first alloc_contig — to code that expects memory below 4 GB with 4K leaves.
     if in_node_area(addr) { fl_node_put(addr, n); return; }
@@ -947,4 +958,64 @@ pub fn mreg_reset_free() -> (u64, u64) {
     }
     MREG_OVF.store(false, core::sync::atomic::Ordering::Relaxed);
     (nr, np)
+}
+
+// ── THE FRAME LEDGER: a bit per frame, set while the frame is handed out ─────────────────
+//
+// A frame handed out twice has two owners, and the one that writes second wins silently: a
+// thread's stack word becomes zero, a kernel stack's saved frame becomes somebody's data.
+// Nothing in the allocator noticed it — `free_contig` merges whatever it is given, so a block
+// freed twice sits in the free list twice and goes to two callers. Found by a ClickHouse
+// thread whose own stack local read back as 0 (arm64 under TCG, about every second run).
+// Every leaf of the allocator sets the bits of what it hands out and `free_contig` clears
+// them; a bit already set at a hand-out or already clear at a free is a defect, counted and
+// said with the caller (`#[track_caller]` through the public entry points). The window is
+// 64 GiB from the lowest RAM; frames above it are not checked.
+const FC_FRAMES: usize = 16 << 20;              // 64 GiB of 4 KB frames
+static FC_BITS: [AtomicU64; FC_FRAMES / 64] = [const { AtomicU64::new(0) }; FC_FRAMES / 64];
+static FC_BASE: AtomicU64 = AtomicU64::new(u64::MAX);
+pub static FC_DOUBLE_ALLOC: AtomicU64 = AtomicU64::new(0);
+pub static FC_DOUBLE_FREE: AtomicU64 = AtomicU64::new(0);
+/// The ledger's origin: the lowest RAM base (`init`).
+fn fc_set_base(b: u64) { let _ = FC_BASE.fetch_min(b & !(FRAME - 1), Ordering::Relaxed); }
+fn fc_idx(phys: u64) -> Option<usize> {
+    let b = FC_BASE.load(Ordering::Relaxed);
+    if b == u64::MAX || phys < b { return None; }
+    let i = ((phys - b) / FRAME) as usize;
+    if i < FC_FRAMES { Some(i) } else { None }
+}
+/// Is the frame handed out (the ledger's bit), None outside the window.
+#[allow(dead_code)] // a tool for a hunt
+pub fn fc_handed(phys: u64) -> Option<bool> { fc_idx(phys).map(|i| FC_BITS[i / 64].load(Ordering::Relaxed) & (1u64 << (i % 64)) != 0) }
+/// `n` frames from `addr` are handed out.
+#[track_caller]
+fn fc_alloc(addr: u64, n: u64) {
+    for k in 0..n {
+        let Some(i) = fc_idx(addr + k * FRAME) else { return };
+        let bit = 1u64 << (i % 64);
+        if FC_BITS[i / 64].fetch_or(bit, Ordering::AcqRel) & bit != 0 {
+            let c = FC_DOUBLE_ALLOC.fetch_add(1, Ordering::Relaxed);
+            if c < 8 {
+                let l = core::panic::Location::caller();
+                crate::println!("mem: A FRAME HANDED OUT TWICE: {:#x} (in a block of {} at {:#x}) to {}:{} — it was never freed",
+                    addr + k * FRAME, n, addr, l.file(), l.line());
+            }
+        }
+    }
+}
+/// `n` frames from `addr` come back.
+#[track_caller]
+fn fc_free(addr: u64, n: u64) {
+    for k in 0..n {
+        let Some(i) = fc_idx(addr + k * FRAME) else { return };
+        let bit = 1u64 << (i % 64);
+        if FC_BITS[i / 64].fetch_and(!bit, Ordering::AcqRel) & bit == 0 {
+            let c = FC_DOUBLE_FREE.fetch_add(1, Ordering::Relaxed);
+            if c < 8 {
+                let l = core::panic::Location::caller();
+                crate::println!("mem: A FRAME FREED THAT IS NOT HANDED OUT: {:#x} (in a block of {} at {:#x}) by {}:{}",
+                    addr + k * FRAME, n, addr, l.file(), l.line());
+            }
+        }
+    }
 }

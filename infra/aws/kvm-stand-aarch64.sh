@@ -109,7 +109,7 @@ echo "== provisioning (docker, git, binutils, python3, the pinned nightly + aarc
 PIN=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$REPO/kernel/rust-toolchain.toml")
 # Provisioning is idempotent, so it goes detached too (the second stand of 2026-10-02 lost
 # its ssh here, "timed out during banner exchange", and was destroyed for it).
-rrun provision 1200 "sudo dnf install -y -q docker git gcc binutils python3 tar e2fsprogs gdb && \
+rrun provision 1200 "sudo dnf install -y -q docker git gcc binutils python3 tar e2fsprogs gdb rsync && \
   sudo systemctl enable --now docker && sudo usermod -aG docker ec2-user && sudo chmod 666 /dev/kvm && \
   curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none -q && . \$HOME/.cargo/env && \
   rustup toolchain install $PIN --profile minimal -c rust-src -c clippy >/dev/null && \
@@ -130,8 +130,18 @@ fi
 # MariaDB data come from the x86 builds there) travel as sparse files, compressed.
 DBIMGS=$(cd "$REPO/kernel/target" 2>/dev/null && ls a64-services/ext2-pg.img a64-services/ext2-mdb.img a64-services/ext2-mongo.img a64-services/ext2-jvm.img 2>/dev/null | tr '\n' ' ')
 if [ -n "$DBIMGS" ]; then
+  # A FILE AND A RESUMABLE COPY, not a pipe: the first try streamed ~600 MB of tar through one
+  # ssh, the connection blinked ("client_loop: send disconnect: Broken pipe") and `set -e`
+  # destroyed a stand that had been provisioned for 40 minutes. A failed upload now costs the
+  # db step only.
   echo "== uploading the services' volumes: $DBIMGS =="
-  tar -C "$REPO/kernel/target" -cSzf - $DBIMGS | ssh $SSH_OPTS ec2-user@"$IP" 'mkdir -p talaria/kernel/target && tar -xSzf - -C talaria/kernel/target'
+  DBTGZ="$REPO/kernel/target/a64-services/volumes.tgz"
+  tar -C "$REPO/kernel/target" -cSzf "$DBTGZ" $DBIMGS
+  n=0; until rsync -q --partial --append-verify -e "ssh $SSH_OPTS" "$DBTGZ" ec2-user@"$IP":volumes.tgz; do
+    n=$((n+1)); [ $n -ge 6 ] && { echo "the volumes did not upload — the db step is skipped"; DBIMGS=""; break; }; sleep 10
+  done
+  [ -n "$DBIMGS" ] && { ssh $SSH_OPTS ec2-user@"$IP" 'mkdir -p talaria/kernel/target && tar -xSzf volumes.tgz -C talaria/kernel/target && rm -f volumes.tgz' \
+    || { echo "the volumes did not unpack — the db step is skipped"; DBIMGS=""; }; }
 fi
 
 echo "== the arm64 stand image, built natively (fedora:40 pulls its arm64 variant) =="

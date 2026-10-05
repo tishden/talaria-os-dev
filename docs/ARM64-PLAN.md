@@ -1799,20 +1799,38 @@ dlopen of libz) passed on its first boot.
   `talaria.test=mixwait` (both machines): the parked one is woken by each producer within
   2 ms; with the kicks removed it wakes at its 2 s ceiling (1970 ms) and the gate fails.
 
-**ClickHouse is the one left, and it is not a port item.** Its official arm64 binary is an
-ET_EXEC at 0x200000..0x1CA9_7310 (458 MB). Every process of this kernel shares the kernel's
-identity map, and there it is the devices on `virt` (the GIC at 0x0800_0000, the UART,
-virtio-mmio, the 32-bit PCIe window) and RAM on a Graviton (GB0 is RAM from 5 MiB). x86 had
-the same collision with RAM and moved the kernel above the binary
-(`services/clickhouse/build-kernel.sh`). The plan for arm64, in this order:
-1. the kernel's devices off the low addresses: the bases the tree and ACPI name (GIC, ITS,
-   UART, virtio windows, RTC, the 32-bit BARs the kernel assigns) are used through an alias
-   at a fixed high VA (one L0 slot, Device blocks) instead of their identity — the drivers
-   keep their pointers, only where the address is first read changes;
-2. a process whose ELF asks for GB0 gets a user table there instead of the Device block;
-3. on a Graviton, `talaria.lowres=` keeps RAM below the binary's end out of the allocator
-   (x86's high-base kernel in one knob).
-Step 1 alone runs ClickHouse on `virt`, i.e. on the KVM stand.
+**ClickHouse: the address space, then a defect of both machines.** Its official arm64 binary
+(x86's release, 25.8.33.6, under Ubuntu 22.04's arm64 glibc) is an ET_EXEC at
+0x200000..0x1CA9_7310 (458 MB). Every process of this kernel shares the kernel's identity map,
+and there it was the devices on `virt` (the GIC at 0x0800_0000, the UART, virtio-mmio, the
+32-bit PCIe window) and RAM on a Graviton (GB0 is RAM from 5 MiB). x86 had the same collision
+with RAM and moved the kernel above the binary (`services/clickhouse/build-kernel.sh`).
+1. DONE: the kernel reaches GB0's devices through an alias — the same 1 GiB Device block
+   once more in L0 slot 384 (`mmu::DEV_SLOT`, VA 0xC000_0000_0000 + PA), in the early map
+   and in the kernel's root before the first address space copies it. `arch::mmio_va` is
+   applied where a base is first read (the GIC frames, the ITS, the UART after the MMU is
+   on, the RTC, the virtio windows, a low ECAM, `pci::bar`, the virtio HAL); what a DEVICE is
+   told stays physical (`mmio_pa`: the ITS's translater, a redistributor in a MAPC). x86's
+   `mmio_va` is the identity. The prints keep the physical addresses the gates match.
+2. DONE: GB0 of devices is no longer mapped by its identity at all on arm64, so it is free in
+   every process; the loader lays the ET_EXEC there with fresh frames. Unmapping it found a
+   null dereference the flash had been answering (`docs/ENGINEERING-NOTES.md` item 40).
+3. NOT DONE: a Graviton — GB0 is RAM there, the kernel's frames are in it. The knob
+   `talaria.lowres=` keeping RAM below the binary's end out of the allocator is the plan.
+
+On `virt` under TCG ClickHouse then answered — and crashed about every third run, a thread
+returning to address 0 right after starting. The hunt built three instruments that stay: a
+frame ledger (`mem::fc_*`: a bit per frame, a hand-out of a handed-out frame or a free of a
+free one is said with the caller), the page tables' journal (`talaria.ptlog=1`: every entry
+write with the line that made it; a killed process prints the history of its pc's and fault's
+pages) and the kernel stacks' quarantine (`talaria.kq=1`: a freed stack is poisoned and
+checked before reuse). They excluded a double-allocated frame, a replaced entry and a stack
+written after its free; the crashed thread's register file named it: x0..x18 and lr zero.
+A syscall that moves its thread to another core rebuilt the return context from the
+callee-saved registers only (both machines; item 38, `talaria.test=migregs`). With the whole
+register file carried, ClickHouse's runs are clean (6 of 6, four with the push off, against 6 crashes in 6 with the
+stealing push off). Also: `get_mempolicy`/`set_mempolicy`/`mbind` (one node: the default
+policy, accepted) — arm64's ClickHouse asks at start-up.
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),

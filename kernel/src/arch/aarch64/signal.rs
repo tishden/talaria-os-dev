@@ -46,12 +46,6 @@ pub fn fork_regs(f: &Frame) -> Gp {
     g[0] = 0;
     g
 }
-/// The callee-saved registers a frame carries (x19..x29), for a context that moves cores.
-pub fn callee_saved(f: &Frame) -> Gp {
-    let mut g = [0u64; 31];
-    for i in 19..30 { g[i] = f.x(i); }
-    g
-}
 /// Where a thread stood when it left through a syscall — for a core dump.
 pub fn exit_uregs(f: &Frame) -> [u64; 10] {
     [f.pc, f.usp, f.fp, f.x(19), f.x(20), f.x(21), f.x(22), f.x(23), f.flags, f.nr]

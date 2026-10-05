@@ -224,6 +224,35 @@ struct Table([u64; 512]);
 /// the root and nothing else.
 static mut L0: Table = Table([0; 512]);
 static mut L1: Table = Table([0; 512]);
+/// The level-1 table of the devices' alias (`DEV_SLOT`): entry 0 is GB0's Device block.
+static mut L1DEV: Table = Table([0; 512]);
+
+// ── The devices' alias: the kernel reaches GB0's devices away from the low addresses ──
+//
+// Every process of this kernel shares the kernel's identity map, and on QEMU `virt` its first
+// gigabyte is the devices (the GIC, the UART, virtio-mmio, the 32-bit PCIe window). A workload
+// whose image wants those addresses — ClickHouse's arm64 ET_EXEC is linked at 2 MB..458 MB —
+// can have them only if the kernel itself does not touch GB0 through its identity. So the
+// kernel touches the devices of GB0 through an alias: the same 1 GiB Device block once more,
+// in an L0 slot above every user range (`USER_TOP` is 1 << 47; the slot is 384, VA
+// 0xC000_0000_0000 + PA). The slot is in the early map and in the kernel's root before the
+// first address space exists, and `copy_kernel_pml4` hands every process the same L1.
+// `mmio_va` is applied where a device's base is FIRST read (the tree, ACPI, a BAR); an address
+// the DEVICE sees (an MSI doorbell, an ITS command's redistributor) stays physical (`mmio_pa`).
+pub const DEV_SLOT: usize = 384;
+pub const DEV_BASE: u64 = (DEV_SLOT as u64) << 39;
+static DEV_ALIAS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The kernel's pointer to a device register at physical `pa`: the alias for GB0 once the MMU
+/// is on, the identity otherwise (before the MMU, and for every other gigabyte).
+#[inline]
+pub fn mmio_va(pa: u64) -> u64 {
+    if pa < (1 << 30) && DEV_ALIAS.load(core::sync::atomic::Ordering::Relaxed) { DEV_BASE + pa } else { pa }
+}
+/// The physical address behind a pointer `mmio_va` gave (what a device is told).
+#[inline]
+pub fn mmio_pa(va: u64) -> u64 { if (DEV_BASE..DEV_BASE + (1 << 30)).contains(&va) { va - DEV_BASE } else { va } }
+/// The alias's L1 entry for `paging::init`'s root: GB0 as a Device block, supervisor.
+pub fn dev_alias_l1_entry() -> u64 { device_block(0) }
 
 /// A 1 GiB Normal RAM block for the kernel alone (no EL0 access).
 const fn normal_block(pa: u64) -> u64 { pa | VALID | (ATTR_NORMAL << ATTR_SHIFT) | SH_INNER | AF | UXN }
@@ -258,6 +287,9 @@ pub unsafe fn early_enable(rams: &[(u64, u64)], devs: &[u64]) {
     }
     let l0 = &mut *core::ptr::addr_of_mut!(L0);
     l0.0[0] = (core::ptr::addr_of!(L1) as u64) | VALID | TABLE_OR_PAGE;
+    // the devices' alias (see DEV_SLOT): GB0's Device block once more, high
+    (*core::ptr::addr_of_mut!(L1DEV)).0[0] = device_block(0);
+    l0.0[DEV_SLOT] = (core::ptr::addr_of!(L1DEV) as u64) | VALID | TABLE_OR_PAGE;
     // The intermediate physical address size: what the core supports, capped at 48 bits
     // (the encodings of PARange and TCR.IPS coincide up to that point).
     HW_DIRTY.store(cpu::has_hw_dirty(), core::sync::atomic::Ordering::Relaxed);
@@ -273,6 +305,8 @@ pub unsafe fn early_enable(rams: &[(u64, u64)], devs: &[u64]) {
         options(nostack),
     );
     enable_here();
+    DEV_ALIAS.store(true, core::sync::atomic::Ordering::Relaxed);
+    super::uart::rebase();
 }
 
 /// Turn the MMU on for THIS core with the table the boot core built (`early_enable`):

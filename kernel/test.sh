@@ -1779,6 +1779,18 @@ for i in $(seq 1 120); do sleep 0.5; grep -aq "piperace: ALL OK\|piperace: FAILU
 assert "piperace: the pipe carried 4194304 bytes in order across cores" "piperace: a pipe between threads on two cores carries 4 MB byte-exact"
 assert "piperace: the eventfd summed 300000 increments from 3 threads exactly" "piperace: an eventfd written from three cores loses no increment"
 stopq $q4
+# A SYSCALL THAT MOVES THE THREAD KEEPS EVERY REGISTER (docs/ARM64-PLAN.md §10.13): the move
+# from the boot core rebuilt the return context from the callee-saved registers only — rdi..r10
+# came back zero here, x0..x18 and lr on arm64 (ClickHouse's threads returned to address 0).
+rm -f /tmp/o.log
+qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 4 -m 1024 \
+  -kernel "/w/$K" -append "console=ttyS0 talaria.test=migregs talaria.smp=4" \
+  -display none -serial file:/tmp/o.log -no-reboot >/tmp/q.log 2>&1 &
+q4=$!; qstarted migregs
+for i in $(seq 1 60); do sleep 0.5; grep -aq "migregs: ALL OK\|migregs: FAILURES\|panic" /tmp/o.log 2>/dev/null && break; done
+assert "migregs: sched_setaffinity -> 0, the core 0 -> [1-3]" "migregs: sched_setaffinity moves the thread off the boot core"
+assert "migregs: ALL OK" "migregs: rdi/rsi/rdx/r8-r10 survive the move (a syscall preserves all but rax, rcx, r11)"
+stopq $q4
 # A WAITER OF A MIXED EPOLL SET, PARKED (`talaria.netmix=`, docs/ARM64-PLAN.md §10.13): a pipe,
 # an eventfd and a signalfd in the set; one of two waiters is the stack's poller, the other
 # parks with a 2 s ceiling, and the producers must kick it — a kernel without the kicks wakes

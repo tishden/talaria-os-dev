@@ -31,7 +31,7 @@ unsafe impl Hal for TalariaHal {
     }
 
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, _size: usize) -> NonNull<u8> {
-        NonNull::new(paddr as *mut u8).unwrap()
+        NonNull::new(crate::arch::mmio_va(paddr as u64) as *mut u8).unwrap() // arm64: GB0 through the devices' alias
     }
 
     unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection) -> PhysAddr {

@@ -96,8 +96,21 @@ pub fn init() {
                     pte_w((pdpt as *mut Pte).add(gb as usize), pd0 | PTE_P | PTE_RW | PTE_US);
                 }
                 mmu::GbKind::Ram1G => pte_w((pdpt as *mut Pte).add(gb as usize), (gb << 30) | PTE_P | PTE_RW | PTE_PS),
+                // arm64's GB0 of devices is NOT mapped by its identity: the kernel reaches it through
+                // the devices' alias (below), and the gigabyte is free for a workload whose image is
+                // linked there (ClickHouse's arm64 ET_EXEC: 2 MB..458 MB) — every process copies this L1
+                mmu::GbKind::Device if gb == 0 && cfg!(target_arch = "aarch64") => {}
                 mmu::GbKind::Device => pte_w((pdpt as *mut Pte).add(gb as usize), (gb << 30) | PTE_P | PTE_RW | PTE_PS | PTE_UC),
             }
+        }
+        // arm64: the devices' alias (`mmu::DEV_SLOT`) — GB0's Device block once more in a slot
+        // above every user range, supervisor, BEFORE the first address space copies the root.
+        #[cfg(target_arch = "aarch64")]
+        {
+            let dl1 = crate::mem::alloc_frame().expect("frame: the devices' alias");
+            core::ptr::write_bytes(dl1 as *mut u8, 0, 4096);
+            pte_w(dl1 as *mut Pte, PTE_P | PTE_RW | PTE_PS | PTE_UC);
+            pte_w((pml4 as *mut Pte).add(mmu::DEV_SLOT), dl1 | PTE_P | PTE_RW);
         }
         mmu::set_root(pml4);
     }
@@ -144,16 +157,81 @@ unsafe fn pte_r(p: *const Pte) -> u64 { mmu::dec(core::ptr::read_volatile(p).0) 
 /// # Safety
 /// P1 + P2 + P4: `p` points into a live table; the caller flushes what the write staled.
 #[inline(always)]
-unsafe fn pte_w(p: *mut Pte, canonical: u64) { core::ptr::write_volatile(p, Pte(mmu::enc(canonical))) }
+#[track_caller]
+unsafe fn pte_w(p: *mut Pte, canonical: u64) {
+    if PTLOG_ON.load(core::sync::atomic::Ordering::Relaxed) { ptlog(p as u64, core::ptr::read_volatile(p).0, mmu::enc(canonical), core::panic::Location::caller().line()); }
+    core::ptr::write_volatile(p, Pte(mmu::enc(canonical)))
+}
+
+// ── THE PAGE TABLES' JOURNAL (`talaria.ptlog=1`): who wrote which entry ────────────────────
+//
+// A page whose content changes under a thread with no syscall touching it (a ClickHouse
+// thread's stack word read back as 0 on arm64, ~30 % of runs on four cores, none on one) is a
+// table entry replaced behind the owner's back. Every write of an entry goes into a ring:
+// the entry's address, the old and the new raw value, the core, the task and the line of
+// paging.rs that wrote it; `ptlog_dump(entry)` prints the history of one entry.
+pub static PTLOG_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+const PTLOG_N: usize = 1 << 16;
+static PTLOG: [[core::sync::atomic::AtomicU64; 4]; PTLOG_N] = [const { [const { core::sync::atomic::AtomicU64::new(0) }; 4] }; PTLOG_N];
+static PTLOG_I: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[inline(never)]
+fn ptlog(entry: u64, old: u64, new: u64, line: u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let i = PTLOG_I.fetch_add(1, Relaxed) % PTLOG_N;
+    let who = (crate::percpu::cpu_id() as u64) << 56 | (crate::sched::current_id() as u64 & 0xFFFF) << 32 | line as u64;
+    PTLOG[i][0].store(entry, Relaxed); PTLOG[i][1].store(old, Relaxed); PTLOG[i][2].store(new, Relaxed); PTLOG[i][3].store(who, Relaxed);
+}
+/// The journal's records whose old or new value names the frame `pa` (any entry, any AS).
+#[allow(dead_code)] // a tool for a hunt: called by hand where a frame is suspected
+pub fn ptlog_frame(pa: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !PTLOG_ON.load(Relaxed) { return; }
+    let n = PTLOG_I.load(Relaxed);
+    let from = n.saturating_sub(PTLOG_N);
+    let mut k = 0;
+    for j in from..n {
+        let r = &PTLOG[j % PTLOG_N];
+        let (o, nw) = (mmu::dec(r[1].load(Relaxed)), mmu::dec(r[2].load(Relaxed)));
+        let hit = |v: u64| v & PTE_P != 0 && (v & ADDR_MASK) == pa || v & PTE_P != 0 && v & PTE_PS != 0 && (v & ADDR_MASK) <= pa && pa < (v & ADDR_MASK) + 0x20_0000;
+        if !hit(o) && !hit(nw) { continue; }
+        let who = r[3].load(Relaxed);
+        crate::println!("ptlog: frame {:#x}: #{} entry {:#x}: {:#x} -> {:#x} by core {} t{} at paging.rs:{}", pa, j, r[0].load(Relaxed),
+            r[1].load(Relaxed), r[2].load(Relaxed), who >> 56, (who >> 32) & 0xFFFF, who & 0xFFFF_FFFF);
+        k += 1; if k >= 24 { break; }
+    }
+}
+/// The journal's records of the entry that maps `vaddr` in the table `root`.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))] // arm64's fault path prints it; x86's has not been wired yet
+pub fn ptlog_dump(root: u64, vaddr: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !PTLOG_ON.load(Relaxed) { return; }
+    // SAFETY: P1 + P2 — a read-only walk for a diagnosis.
+    let Some(pt) = (unsafe { pt_for(root, vaddr, false) }) else { crate::println!("ptlog: {:#x} has no 4K entry", vaddr); return; };
+    let e = unsafe { pt.add(pt_idx(vaddr)) } as u64;
+    let n = PTLOG_I.load(Relaxed);
+    let from = n.saturating_sub(PTLOG_N);
+    crate::println!("ptlog: the entry of {:#x} at {:#x} (now {:#x}); {} writes journaled:", vaddr, e, unsafe { core::ptr::read_volatile(e as *const u64) }, n);
+    let mut k = 0;
+    for j in from..n {
+        let r = &PTLOG[j % PTLOG_N];
+        if r[0].load(Relaxed) != e { continue; }
+        let who = r[3].load(Relaxed);
+        crate::println!("ptlog:   #{} {:#x} -> {:#x} by core {} t{} at paging.rs:{}", j, r[1].load(Relaxed), r[2].load(Relaxed), who >> 56, (who >> 32) & 0xFFFF, who & 0xFFFF_FFFF);
+        k += 1; if k >= 24 { break; }
+    }
+}
 /// A compare-and-swap of one entry (P3): the slot is a naturally aligned 8-byte word the
 /// hardware reads atomically, on both machines.
 /// # Safety
 /// P1 + P2 + P3, as `install_table`.
 #[inline(always)]
+#[track_caller]
 unsafe fn pte_cas(p: *mut Pte, expect: u64, new: u64) -> bool {
     let a = &*(p as *const core::sync::atomic::AtomicU64);
-    a.compare_exchange(mmu::enc(expect), mmu::enc(new), core::sync::atomic::Ordering::SeqCst,
-                       core::sync::atomic::Ordering::SeqCst).is_ok()
+    let ok = a.compare_exchange(mmu::enc(expect), mmu::enc(new), core::sync::atomic::Ordering::SeqCst,
+                       core::sync::atomic::Ordering::SeqCst).is_ok();
+    if ok && PTLOG_ON.load(core::sync::atomic::Ordering::Relaxed) { ptlog(p as u64, mmu::enc(expect), mmu::enc(new), core::panic::Location::caller().line()); }
+    ok
 }
 
 const PTE_P:  u64 = 1;         // present

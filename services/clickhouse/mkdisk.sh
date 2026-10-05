@@ -8,14 +8,21 @@
 #   /q.sql                   the queries (manifest arguments cannot contain spaces)
 #   /cell.manifest           what to run
 # mkdisk.sh [size]   env: CH_ARGS="local --queries-file /q.sql" CH_QUERY="SELECT 1"
+# arm64 (services/build-aarch64-db.sh ch): CH_BIN= the arm64 binary, CH_GLIBC= a directory with
+# Ubuntu 22.04's arm64 lib/ (ld-linux-aarch64.so.1, lib/aarch64-linux-gnu/*), CH_OUT= the image.
 set -eu
 cd "$(dirname "$0")"
-BIN=$(ls build/clickhouse-common-static-*/usr/bin/clickhouse | head -1)
+BIN=${CH_BIN:-$(ls build/clickhouse-common-static-*/usr/bin/clickhouse | head -1)}
 [ -f "$BIN" ] || { echo "no ClickHouse binary in build/ (unpack the tgz)"; exit 1; }
 ROOT=$(mktemp -d)
 mkdir -p "$ROOT/lib64" "$ROOT/lib/x86_64-linux-gnu" "$ROOT/etc" "$ROOT/tmp" "$ROOT/proc" "$ROOT/sys" \
          "$ROOT/var/lib/clickhouse" "$ROOT/var/log/clickhouse-server"
 cp "$BIN" "$ROOT/clickhouse"
+if [ -n "${CH_GLIBC:-}" ]; then
+  # the runtime from a given tree, the links materialised (the kernel's ext2 does not follow them)
+  rmdir "$ROOT/lib64" "$ROOT/lib/x86_64-linux-gnu"
+  (cd "$CH_GLIBC" && tar -chf - lib) | tar -C "$ROOT" -xf -
+else
 # a small dynamic binary of the same runtime — a control run (CH_BINARY=/echo)
 docker run --rm ubuntu:22.04 cat /bin/echo > "$ROOT/echo"; chmod +x "$ROOT/echo"
 # the glibc runtime comes from the Ubuntu 22.04 image (glibc 2.35)
@@ -25,6 +32,7 @@ docker run --rm ubuntu:22.04 tar -C / -cf - \
   lib/x86_64-linux-gnu/libdl.so.2 lib/x86_64-linux-gnu/librt.so.1 \
   lib/x86_64-linux-gnu/libpthread.so.0 lib/x86_64-linux-gnu/libgcc_s.so.1 \
   | tar -C "$ROOT" -xf -
+fi
 
 printf 'root:x:0:0:root:/:/bin/sh\nclickhouse:x:1000:1000:clickhouse:/var/lib/clickhouse:/bin/sh\n' > "$ROOT/etc/passwd"
 printf 'root:x:0:\nclickhouse:x:1000:\n' > "$ROOT/etc/group"
@@ -139,7 +147,8 @@ ${CH_PLAN:-}
 # harmful (checkHarmfulEnvironmentVariables) and RE-EXECUTES itself via execve after
 # dropping them. The libraries are on the paths built into ld-linux anyway.
 M
-../../kernel/mkext2.sh "$ROOT" disk-ch.img ${1:-1500M}
+OUTIMG=${CH_OUT:-disk-ch.img}
+../../kernel/mkext2.sh "$ROOT" "$OUTIMG" ${1:-1500M}
 rm -rf "$ROOT"
-ls -la disk-ch.img
-e2fsck -fn disk-ch.img >/dev/null 2>&1 && echo "disk-ch.img: ext2 ok"
+ls -la "$OUTIMG"
+e2fsck -fn "$OUTIMG" >/dev/null 2>&1 && echo "$OUTIMG: ext2 ok"

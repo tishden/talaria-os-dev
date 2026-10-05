@@ -719,6 +719,8 @@ fn parse_early_opts(cmdline: &str) {
         vga::disable();
         println!("talaria: the VGA screen is off, output goes only to COM1");
     }
+    if cmdline::flag(cmdline, "talaria.kq") { sched::KQ_ON.store(true, core::sync::atomic::Ordering::Relaxed); println!("sched: the kernel stacks' quarantine is on (talaria.kq)"); }
+    if cmdline::flag(cmdline, "talaria.ptlog") { paging::PTLOG_ON.store(true, core::sync::atomic::Ordering::Relaxed); println!("paging: the page tables' journal is on (talaria.ptlog)"); }
     for tok in cmdline.split_whitespace() { // talaria.strace=N — a trace of the first N syscalls
         if let Some(v) = tok.strip_prefix("talaria.strace=") { if let Ok(n) = v.parse::<u64>() { syscall::strace_enable(n); } }
         // talaria.netprof=N — a profile of the datapath's stages, a summary every N turns

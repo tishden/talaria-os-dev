@@ -715,6 +715,32 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     (the producers of a pipe's, an eventfd's and a signal's readiness kick them); it is off
     by default, the TCG gate turns it on. **Before diagnosing a hang under an emulator, ask
     `top` who is eating the cores.**
+38. **"A context rebuilt from what one register convention promises."** A syscall that
+    moves its own thread to another core (`sched_setaffinity` from the boot core, a
+    `prctl(PR_SET_NAME)` a layout rule acts on) builds the thread's return context anew on the
+    target, and it carried only the CALLEE-saved registers — the ones a FUNCTION call
+    preserves. A syscall preserves everything but its return value (x86: also rcx/r11), and
+    compiled code keeps temporaries across an inline `svc` in x9..x18 and lr. ClickHouse's
+    threads, laid out by name, came back with x0..x18 and lr zero and returned to address 0
+    (6 runs of 6 with its stealing push off, ~30 % with it on — the push moved them first);
+    x86 lost rdi..r10 the same way and nothing had noticed. `talaria.test=migregs` (both
+    machines) fills the registers around a raw moving syscall; the old kernel fails it on each.
+    The hunt took a frame ledger and a page-table journal to exclude a lost write, and then
+    the registers of the crashed thread said it in one line: x0..x18 zero, x19..x29 sane.
+    **Print the whole register file of a crash before theorising about memory.**
+39. **"A diagnostic that read a page base as an address."** On the way there a probe of the
+    crashed thread read its stack through `paging::phys_of_in`, which returns the PAGE's
+    physical base, not the address's — and reported a zeroed stack frame, which sent the
+    hunt after a lost store for two hours. The page dump next to it disagreed with it. **When
+    two views of one memory disagree, the probe is the first suspect** — validate a new
+    instrument on a value you know before reading one you do not.
+40. **"The identity map answered a null pointer."** On arm64 the kernel reached GB0's devices
+    (the GIC, the UART, virtio, the 32-bit BARs) by their identity, and every process had that
+    gigabyte mapped. Moving the devices onto an alias (`mmu::DEV_SLOT`) to free GB0 for
+    ClickHouse's ET_EXEC unmapped it — and the first allocation faulted at address 0x20: the
+    per-core block's accessors read `TPIDR_EL1 + 0x20` before `percpu::init`, when the register
+    is 0, and had been reading `virt`'s flash all along. The accessors are null-safe now. A
+    mapping at address 0 hides null dereferences; the first thing that unmaps it finds them.
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

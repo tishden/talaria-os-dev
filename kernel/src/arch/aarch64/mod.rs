@@ -55,8 +55,12 @@ pub const VIRTIO_MMIO_SLOTS: usize = dtb::MAX_VIRTIO;
 pub fn virtio_mmio_slot(i: usize) -> Option<(usize, usize)> {
     if i >= VIRTIO_MMIO_SLOTS { return None; }
     let base = kmain::VIRTIO_WINDOWS[i].load(core::sync::atomic::Ordering::Relaxed);
-    if base == 0 { None } else { Some((base as usize, 0x200)) }
+    if base == 0 { None } else { Some((mmu::mmio_va(base) as usize, 0x200)) } // the kernel's pointer
 }
+/// The kernel's pointer to a device register at physical `pa` (the devices' alias for GB0,
+/// `mmu::DEV_SLOT`), and back — shared code applies it where it reads a base itself.
+pub fn mmio_va(pa: u64) -> u64 { mmu::mmio_va(pa) }
+pub fn mmio_pa(va: u64) -> u64 { mmu::mmio_pa(va) }
 /// The "GSI" (the SPI's number: INTID - 32) of the virtio-mmio window in slot `i` — the
 /// device tree names it for every window (`virt`: SPIs 16..47), nothing is derived.
 pub fn virtio_mmio_gsi(i: usize) -> Option<u32> {
