@@ -796,6 +796,30 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     echo's and the sink's — the clock's too; the next pass panicked on its dangling handle in
     smoltcp. Both reproduced under TCG with the old binary, both are gated on both machines.
     **A kernel-owned resource in a table the workload's reset walks is named in that walk.**
+46. **"A check by a loop that cannot produce the event."** On a `c7g.large`, `top` printed
+    "LLC misses 0" on every interval. The boot line said `LLC-miss=-`: the core does not declare
+    LL_CACHE_MISS_RD (0x37), the fallback L2D_CACHE_REFILL (0x17) IS declared, and the
+    "does it move" check dropped it — the check is an ALU loop that touches no memory, so a
+    working miss counter stands still over it. A probe on the hardware (`talaria.test=pmu`,
+    `pmu-ev:` — each candidate on the last counter across a random walk of 64 MB) showed 0x17 at
+    0.99 per line, 0x16 at 2.00, the L3/LL events not declared and silent. Now only the events
+    the loop is sure to produce (the instructions, the branches) are judged by moving, as x86
+    judges only its fixed counters; and an event with no counter prints "- (no counter)" in
+    `top`/`perf`, not a zero (the gate: QEMU declares no cache event). **A check by the deed must
+    be able to produce the deed; a zero that was not measured is printed as absent.**
+47. **"The wake is fast; the tier's policy is not."** `examples/mdpipe` on a `c7g.large`: stage
+    p99 34 us in the default wait tier (`wfe(monitor)`), 6.8 us with `talaria.sync=hlt`, 4.8-5.7
+    on Linux — the same binary, the same type, three runs each. The obvious theory (Nitro wakes
+    a `wfe` sleeper late) was measured instead of believed: `talaria.test=wakeprobe` times a
+    store under `wfe`, an SGI under `wfe` and an SGI under `wfi` after 30 us .. 1 ms of sleep —
+    140 ns, 2.3-2.5 us and 2.3-2.5 us, at every length. A first version of the probe, which
+    timed only the store and switched the tier on it, was built and refuted the same hour; it
+    did not ship. What does differ is the tier's traffic: in 30 s 349 k futex waits against
+    123 k, waits ended by "the word itself" 316 k against 123 k, 131 k IPI reschedules of a core
+    whose current task sleeps against 61 k (the `stat:` block's wake-delivery line). Which part
+    of the wfe tier's policy turns that traffic into a 34 us p99 is the next item to find; until
+    then `talaria.sync=hlt` is the measured lever on a Graviton VM. **Measure the primitive before blaming it — and when the probe says "not
+    it", the probe stays as an instrument and the policy that used it does not.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

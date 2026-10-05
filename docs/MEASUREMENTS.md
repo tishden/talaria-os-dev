@@ -807,6 +807,47 @@ seconds with the high half at 0 (`docs/ENGINEERING-NOTES.md` item 44); CHAIN is 
 (`talaria.pmuchain=1`) and the reader widens 32-bit counters. The busy loop's IPC 1.99 (two instructions a cycle, a mul-add chain), a halted core's
 cycles do not count (0.15-1.5 M in 100 ms of `wfi`).
 
+### 10.11. The Graviton's mdpipe tail: the wait tier, not the wake; the cache counter (2026-10-05)
+
+`examples/mdpipe` (`mdpipe-a64`, 2 workers, 20 000 ticks/s, 30 s) on `c7g.large`: one AMI per
+batch with the tail of the command line from user-data, each variant its own instance, and in
+every batch a Linux AL2023 arm64 `c7g.large` running the same static binary three times in the
+same hour (the stage latency, us):
+
+| | runs | p50 | p90 | p99 | p99.9 |
+| --- | --- | --- | --- | --- | --- |
+| Talaria, the default tier `wfe(monitor)` | 10 | 1.59-1.75 | 5.5-6.0 | **33.5-36.1** | 43-46 (96-110 with `talaria.stat=`) |
+| Talaria, `talaria.sync=hlt` (`wfi+ipi`) | 2 | 2.6-2.7 | 6.3-6.4 | **6.8** | 8.6-8.9 |
+| Talaria, `talaria.sysprof=1` (the profile perturbs the timing) | 1 | 1.89 | 5.6 | 8.2 | 36.9 |
+| Linux 6.18 (AL2023) | 15 | 3.5-4.1 | 4.1-4.4 | **4.6-5.7** | 5.5-15.5 (one run 4881: a host hiccup) |
+
+The `stat:` block over the same 30 s, wfe / hlt: futex waits 591 k / 246 k (ended by "the
+word itself" 316 k / 123 k), FUTEX_WAKE 374 k / 124 k, IPI reschedules of a core whose current
+task sleeps 139 k / 61 k, kicks 129 k / 61 k.
+
+What each wake costs on the same machine (`talaria.test=wakeprobe`: the first secondary sleeps
+as a futex waiter does, the boot core wakes it after 30 us / 100 us / 300 us / 1 ms; the
+medians of four, ns, two instances):
+
+| | 30 us | 100 us | 300 us | 1 ms |
+| --- | --- | --- | --- | --- |
+| a store, under `wfe` | 137-150 | 138-147 | 138-147 | 138-148 |
+| an SGI, under `wfe` | 2287-2319 | 2351-2402 | 2435-2494 | 2532-2612 |
+| an SGI, under `wfi` | 2209-2289 | 2249-2316 | 2254-2325 | 2494-2591 |
+
+The Nitro host wakes a `wfe` sleeper as fast as a `wfi` one, by either means, at every length:
+the 34 us is the wfe tier's policy (its traffic above), not its wake —
+`docs/ENGINEERING-NOTES.md` item 47. `talaria.sync=hlt` is the measured lever until the
+policy's share is found. Under TCG, for comparison: 0.6-1.6 / 4.3-6.2 / 16-51 us.
+
+**The cache counter on a `c7g.large`** (`talaria.test=pmu`, `pmu-ev:` — each event on the last
+counter across a random walk of 64 MB, 1 M line loads): L2D_CACHE_REFILL (0x17) 0.99 per
+line, L2D_CACHE (0x16) 2.00, L1D_CACHE_REFILL 0.99, L1D_CACHE 1.00, MEM_ACCESS 1.00,
+L1D_TLB_REFILL ~0; LL_CACHE_RD/MISS_RD, L3D_CACHE(_REFILL) and BUS_ACCESS are not declared
+and count nothing. PMCEID0 = 0x0000027079ff0f3f, PMCEID1 = 0x000000001e30a07f. With item 46's
+fix the boot line is `LLC-miss=1:0x17` and `top` shows 13-17 M misses per 10 s (7.1-7.6 per
+thousand instructions) over mdpipe, where it showed 0.
+
 ## 11. Reproducing any of this
 
 ```sh
