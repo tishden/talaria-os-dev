@@ -818,14 +818,14 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     123 k, waits ended by "the word itself" 316 k against 123 k, 131 k IPI reschedules of a core
     whose current task sleeps against 61 k (the `stat:` block's wake-delivery line). Then the
     knobs, one instance each: `talaria.wakepreempt=0` — p99 8.2 us; `nosteal`, `slice=150000` —
-    no change; `nowakebal` — 12. The woken worker waits on a BUSY core until the running task has
-    run the wake-preemption threshold: the wfe tier puts it there and `wfi+ipi` does not. The
-    kick line of the `stat:` block (new) counted it: 126 442 of 129 188 kicks went to a core
-    running ANOTHER worker, freshly switched in (~1 us), where a kick — it only ends a `wfe` — is
-    a no-op. The design question for the fix is the policy's own: a woken thread on a core whose
-    current task has just started is "do not preempt a computing thread" by the threshold, and
-    on a pipeline that is the tail. `talaria.sync=hlt` and `wakepreempt=0` are the measured
-    levers on a Graviton VM meanwhile. **Measure the primitive before blaming it — and when the probe says "not
+    no change; `nowakebal` — 12. The kick line of the `stat:` block (new) counted 126 442 of
+    129 188 kicks going to a core running ANOTHER worker, freshly switched in (~1 us), where a
+    kick — it only ends a `wfe` — is a no-op; it was tempting to write "so the woken one waits
+    for the threshold, and that is the tail". The block's own "wakeup -> cpu" histogram refuses
+    it: only 1.2-2.0 k of ~270 k wakeups took over 20 us, and a p99 of 34 us needs ~6 k ticks.
+    What `wakepreempt=0` changes is the next item; `talaria.sync=hlt` and `wakepreempt=0` are the
+    measured levers on a Graviton VM meanwhile. **An instrument that names a mechanism is not yet
+    the cause: check its count against the size of the effect.** **Measure the primitive before blaming it — and when the probe says "not
     it", the probe stays as an instrument and the policy that used it does not.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
