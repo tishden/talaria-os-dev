@@ -35,13 +35,18 @@ cp "$REPO/services/nginx/nginx.conf"  "$OUT/nginx/nginx.conf"
 # nginx under root calls getpwnam for the user directive — without /etc/passwd it
 # refuses to start. The file goes into the SHARED tree so that both sides of the
 # comparison see the same thing.
+# Alpine's arm64 nginx is built `--user=nginx`: as root (the Linux side of the stand) it asks
+# getpwnam("nginx") and refuses to start without it (`[emerg] getpwnam("nginx") failed` — the first
+# Graviton scoreboard lost its nginx bring-up to it; Talaria's process is not root and never asks).
 cat > "$OUT/etc/passwd" <<'P'
 root:x:0:0:root:/root:/bin/sh
 nobody:x:65534:65534:nobody:/:/bin/false
+nginx:x:100:101:nginx:/var/lib/nginx:/bin/false
 P
 cat > "$OUT/etc/group" <<'G'
 root:x:0:
 nobody:x:65534:
+nginx:x:101:
 G
 
 # A page of fixed size: the response must not depend on what happened to be
