@@ -841,6 +841,26 @@ pub fn dump() {
                 crate::sync::WK_RESCHED_LONG.load(Relaxed), crate::sync::WK_KICK.load(Relaxed), crate::sync::WK_BSP.load(Relaxed),
                     crate::sync::WK_BELL.load(Relaxed));
         }
+        {   // the holders of a core a wakeup only kicked (the top four)
+            let mut top = [(0u64, 0usize); 4];
+            for t in 0..crate::sched::NTASKS {
+                let k = crate::sync::KICK_ON[t].load(Relaxed);
+                if k == 0 { continue; }
+                if let Some(i) = (0..4).find(|&i| k > top[i].0) { top.copy_within(i..3, i + 1); top[i] = (k, t); }
+            }
+            crate::println!("stat:   kicks: the woken task's own core {}, a core running another task {} (of them asleep {})",
+                crate::sync::KICK_SELF.load(Relaxed), top.iter().map(|x| x.0).sum::<u64>(), crate::sync::KICK_ON_SLEEPING.load(Relaxed));
+            if top[0].0 > 0 {
+                crate::print!("stat:   a kick found the core running another task:");
+                for &(k, t) in top.iter().filter(|x| x.0 > 0) {
+                    let c = crate::sched::comm(t);
+                    let n = c.iter().position(|&b| b == 0).unwrap_or(16);
+                    crate::print!(" t{} {} {} (ran {} us on average)", t, core::str::from_utf8(&c[..n]).unwrap_or("?"), k,
+                        crate::sync::KICK_ON_RAN[t].load(Relaxed) / k / 1000);
+                }
+                crate::println!("");
+            }
+        }
         let names = ["WAIT", "WAKE", "FD", "REQUEUE", "CMP_REQUEUE", "WAKE_OP", "LOCK_PI",
                      "UNLOCK_PI", "TRYLOCK_PI", "WAIT_BITSET", "WAKE_BITSET", "?11", "?12", "?13", "?14", "?15"];
         let mut any = false;
