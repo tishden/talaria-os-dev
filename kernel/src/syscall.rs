@@ -500,6 +500,23 @@ use crate::arch::cpu::{set_tls_base, tls_base};
 pub use crate::arch::syscall_entry::Frame;
 /// Set up SYSCALL: STAR (the selectors), LSTAR (the handler), FMASK, EFER.SCE.
 /// kcs/kss are the kernel CS/SS; STAR[63:48] sets the user selectors for sysret.
+/// THIS core's syscall entry only — what a secondary core needs when it comes up.
+///
+/// The secondaries used to call `init`, whose other half is the workload's common brk heap:
+/// the first call ALLOCATES it (before a launch path had reserved its static image's range,
+/// so the heap could lie over the image and `nx_range` made the code non-executable), and a
+/// repeated call ZEROES its used part — a core coming up after the workload had started wiped
+/// the heap, or the image under it (both machines). On the KVM stand: a test's first
+/// instruction "not executable", `udf` where the code was (a SIGILL), and the secondary's own
+/// write into the read-only code page — futexlat 17 of 96 boots, syncbench 13 of 96.
+pub fn init_core() {
+    // SAFETY: S4 — the SYSCALL MSRs of THIS core (STAR/LSTAR/FMASK, EFER.SCE), armed before it
+    // ever enters ring 3.
+    unsafe { crate::arch::syscall_entry::init_msrs(); }
+}
+
+/// The launch path's: this core's entry and the workload's common brk heap (allocated once,
+/// zeroed on a repeated start of the workload). Never from a secondary core (`init_core`).
 pub fn init() {
     // SAFETY: S4 — the SYSCALL MSRs of THIS core (STAR/LSTAR/FMASK, EFER.SCE). They are
     // armed once per core, before it ever enters ring 3, so nothing is using them yet.
