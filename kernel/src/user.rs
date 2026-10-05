@@ -632,6 +632,7 @@ unsafe fn run_disk_threaded_identity(path: *const u8, args: &[&[u8]], envs: &[&[
 /// the launch path, does not return.
 pub unsafe fn run_threaded(elf: &[u8]) -> ! {
     use core::sync::atomic::Ordering;
+    reserve_embedded(elf); // before the first frame of this path (see there)
     let kmain = crate::sched::alloc_kstack().unwrap();
     let ub = crate::mem::alloc_frame().unwrap();
     for _ in 0..15 { crate::mem::alloc_frame().unwrap(); } // 16 frames (a 64 KB stack for the main thread)
@@ -674,6 +675,29 @@ fn require_embedded(elf: &[u8]) {
 /// L1 + L2 + L3, and the segments go to their OWN vaddrs in the current identity
 /// AS — so this is only for the embedded images, whose vaddrs the kernel's linker
 /// script keeps clear of the kernel itself.
+/// RESERVE AN EMBEDDED IMAGE'S IDENTITY RANGE BEFORE ANYTHING IS ALLOCATED.
+///
+/// `load_elf` copies a static binary to its link address, which IS the physical address
+/// (arm64: 0x5000_0000; x86: 0x1000_0000) — and, unlike the disk loader, never told the
+/// frame allocator. A launch path that allocated the main thread's stack first could get
+/// frames inside the image: the code was copied over the stack and `harden_stack` made it
+/// non-executable. It took the allocator reaching 0x5000_0000 at that moment: the KVM stand's
+/// `tsync` died on its first instruction (a permission fault, level 3) once the kernel's
+/// `.bss` had grown by 4 MB. Called first on every launch path; a frame of the range ALREADY
+/// handed out (the ledger knows) is said aloud — it is the same collision from the other side.
+fn reserve_embedded(elf: &[u8]) {
+    let Some(h) = crate::elfhdr::header(elf) else { return };
+    let Some(tab) = elf.get(h.phoff as usize..) else { return };
+    let Some((lo, hi)) = crate::elfhdr::load_span(tab, h.phentsize, h.phnum) else { return };
+    crate::mem::reserve(lo, hi - lo);
+    let mut taken = 0u64;
+    let mut a = lo & !0xFFF;
+    while a < hi { if crate::mem::fc_handed(a) == Some(true) { taken += 1; } a += 4096; }
+    if taken != 0 {
+        crate::println!("talaria: THE IMAGE'S IDENTITY RANGE {:#x}..{:#x} HOLDS {} FRAMES THE KERNEL HAS ALREADY HANDED OUT — they will be overwritten", lo, hi, taken);
+    }
+}
+
 unsafe fn load_elf(elf: &[u8]) -> u64 {
     require_embedded(elf);
     let Some(h) = crate::elfhdr::header(elf) else {
@@ -737,6 +761,7 @@ unsafe fn build_stack(top: u64, entry: u64) -> u64 {
 
 /// Run the built-in static ELF (musl/raw) in ring 3.
 pub fn run(elf: &[u8]) -> ! {
+    reserve_embedded(elf);
     let kstack = crate::sched::alloc_kstack().unwrap();
     // the user's stack: several frames
     let ub = crate::mem::alloc_frame().unwrap();
@@ -784,6 +809,7 @@ unsafe fn ring3_expect_fault(rip: u64, rsp: u64) -> u64 {
 /// that the loader set W^X per segment (.text=R-X, .data=RW-NX), a guard page and
 /// an NX stack; then LIVE #PFs: (1) executing an NX page, (2) a write into RO .text.
 pub fn wxorx_test(elf: &[u8]) -> ! {
+    reserve_embedded(elf);
     let kstack = crate::sched::alloc_kstack().unwrap();
     // SAFETY: L1 + L2 + L4 — the same launch path; the faults it provokes are caught by
     // recovery (`ring3_expect_fault`), and the gate's verdict is printed before `park`.
