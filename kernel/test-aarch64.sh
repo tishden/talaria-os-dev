@@ -640,6 +640,8 @@ echo "== observability on arm64: PMUv3, the profile with stacks, the gdb stub ==
 # instruction is one cycle, so the IPC is exactly 1.00 — a deterministic judge of the
 # counters and of the 32-bit widening across a wrap (talaria.pmunarrow=1).
 A0=$ACCEL; IC=0; [ "$ACCEL" = "-cpu max" ] && { ACCEL="$ACCEL -icount shift=0"; IC=1; }
+boot 30 "talaria.test=allocfail"
+assert 'allocfail: ALL OK'                                                 'allocfail: a refused contiguous request leaves the bump whole (a Graviton'"'"'s refused fscache=512 took it and the next kernel stack panicked)'
 boot 60 "talaria.test=wakeprobe"
 assert 'wakeprobe: a store under wfe: the median wake after 30 us, 100 us, 300 us, 1 ms of sleep: [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: a store wakes a wfe sleeper, timed after four lengths of sleep'
 assert 'wakeprobe: an SGI under wfe: the median wake after .* [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: an SGI wakes a wfe sleeper, timed'

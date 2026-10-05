@@ -1958,7 +1958,9 @@ under 20 us in both tiers, so what that knob changes is open; `talaria.sync=hlt`
 `c7g.xlarge`'s 844 MB below 4 GB, where a process's `MAP_SHARED` memory must come from, and the
 postmaster's 256 MB `shared_buffers` failed; in the same shape under TCG (`virt` 10 GB,
 `talaria.lowmem=850`) the old kernel panicked on a page table. The cache comes from the high area
-now. Item 48.
+now. Item 48. And mongodb's launch panicked on a kernel stack right after its manifest's 512 MB
+cache resize was refused: the bump allocator moved its pointer before checking the bound, so a
+refused request took the rest of the bump (both machines; `talaria.test=allocfail`). Item 49.
 
 **The direct map**: the plan is §10.16.
 

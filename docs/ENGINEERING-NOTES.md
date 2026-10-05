@@ -841,6 +841,18 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     direct map's plan (ARM64-PLAN §10.16): a page-table allocation that panics instead of failing
     the syscall, and shared mappings bound to the identity window at all. **A smoke under the
     emulator proves the protocol, not the machine's shape: give the gate the target's memory map.**
+49. **"A refusal that takes the rest with it."** The same scoreboard's mongodb bring-up: the Talaria
+    server panicked at launch on `alloc_kstack().unwrap()` — a 64 KB kernel stack not found on an
+    8 GB machine. The line before it said `the fscache=512 MB IS REJECTED — there is no contiguous
+    piece`. `mem::alloc_contig`'s bump moved its pointer by CAS and checked the bound AFTER: a
+    request that did not fit returned None with the pointer already past the end, and every bump
+    allocation after it failed (only the free list still served). Reproduced in the Graviton's
+    shape under TCG with the scoreboard's own image (the old kernel: the same refusal, the same
+    panic; with item 48's fix the cache is above 4 GB, the resize succeeds and mongod listens).
+    The bound now comes before the CAS; `talaria.test=allocfail` asks for one frame more than the
+    bump has and requires the bump unchanged and a small block after it — the old order gives
+    "0 after, NO" (checked), both gates run it. **A failure path must leave the state it found:
+    test the refusal, not only the grant.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
