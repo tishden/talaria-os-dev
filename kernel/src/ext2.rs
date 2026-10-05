@@ -1995,6 +1995,18 @@ pub fn cache_relocate(node: u8) -> bool {
 ///
 /// We take the new area BEFORE giving the old one away: if a contiguous piece was not
 /// found, it is better to stay with the old cache than without a cache at all.
+/// The block cache's memory: from the high area (RAM above 4 GB) when there is one, else the
+/// main allocator. The cache is the largest thing the kernel keeps, and below 4 GB it ate what a
+/// workload's shared mappings must have there (they are handed out at their identity address
+/// from the main allocator): on a `c7g.xlarge` the low part is 844 MB, the cache took 421 of it,
+/// and PostgreSQL's 256 MB `shared_buffers` failed with "could not map anonymous shared memory:
+/// Out of memory" — the first Graviton scoreboard lost its PostgreSQL side to it. The high area
+/// is identity-mapped by 1 GB leaves in every space, so the kernel reaches the cache the same way,
+/// and the devices take 64-bit addresses. `free_contig` returns such frames to the area's list.
+fn cache_alloc(pages: u64) -> Option<u64> {
+    crate::mem::alloc_high(pages, 4096).or_else(|| crate::mem::alloc_contig(pages))
+}
+
 pub fn cache_resize(mb: usize) -> bool {
     let _fsg = fs_lock();
     // SAFETY: E1 + E2 — under the lock, with the same "clean cache only" condition as
@@ -2025,7 +2037,7 @@ pub fn cache_resize(mb: usize) -> bool {
         }
         let oldpages = (was * BSZ / 4096) as u64;
         let old = CACHE_BASE;
-        let new = match crate::mem::alloc_contig((want * BSZ / 4096) as u64) {
+        let new = match cache_alloc((want * BSZ / 4096) as u64) {
             Some(b) => b,
             None => {
                 FSCACHE_MB.store(0, core::sync::atomic::Ordering::SeqCst);
@@ -2091,7 +2103,7 @@ pub fn mount() -> bool {
             // of the mount means it does not work at all.
             let mut want = cache_pick();
             loop {
-                match crate::mem::alloc_contig((want * BSZ / 4096) as u64) {
+                match cache_alloc((want * BSZ / 4096) as u64) {
                     Some(b) => { CACHE_BASE = b; break; }
                     None if want > 512 => { want = (want / 2 / WAYS) * WAYS; }
                     None => { crate::println!("ext2: there is no memory for the cache"); return false; }
@@ -2121,8 +2133,9 @@ pub fn mount() -> bool {
         for i in 0..ncache() { COWN[i] = 0; }
         let (tot, ngr, isz, bsz) = (TOTAL_BLOCKS, NGROUPS, INODE_SIZE, BSZ);
         crate::println!("ext2: it is mounted — the block is {} B, {} blocks ({} MB), {} groups, an inode is {} B, free {} blocks / {} inodes, the cache is {} \
-            MB write-back",
-            b, tot, (tot as usize * b) >> 20, ngr, isz, rd32(&sb2, 12), rd32(&sb2, 16), (ncache() * bsz) >> 20);
+            MB write-back{}",
+            b, tot, (tot as usize * b) >> 20, ngr, isz, rd32(&sb2, 12), rd32(&sb2, 16), (ncache() * bsz) >> 20,
+            if CACHE_BASE >= 1 << 32 { " (above 4 GB)" } else { "" });
         // §8.4: the journal (a replay when it is non-empty) comes after the cache and
         // the groups' maps are ready: the map of the journal's blocks is read through bmap.
         if JOFF { crate::println!("ext2: the journal is off by the flag talaria.ext2=nojournal"); } else { jrn_mount(); }

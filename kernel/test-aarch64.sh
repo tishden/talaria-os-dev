@@ -351,6 +351,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     # 2 MB pages from the LOW memory and the next page table found no frame — a panic one
     # syscall in, on the real machine; reproduced here by cutting the low allocator.
     run 400 "talaria.test=forktls talaria.lowmem=850" ext2 5120
+    assert 'the cache is [0-9]+ MB write-back \(above 4 GB\)'                 'fscache: the block cache lives in the high area where there is one (a Graviton'"'"'s low 844 MB is the shared mappings'"'"')'
     assert 'forktls: ALL OK'                                                  'forktls on a c7g.large shape (850 MB low): the huge pages come from the high area, the kernel keeps its tables'
     assertnot "$BAD|\[fault\]|there is no frame"                          'forktls on a c7g.large shape: no panic for a page table'
     run 150 "talaria.mode=proc" forkap
