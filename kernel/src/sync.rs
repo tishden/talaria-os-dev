@@ -503,6 +503,15 @@ pub static WK_RESCHED_IDLE: AtomicU64 = AtomicU64::new(0); // an IPI reschedule:
 pub static WK_RESCHED_BUSY: AtomicU64 = AtomicU64::new(0); // an IPI reschedule: the current one has worked out the threshold
 pub static WK_RESCHED_LONG: AtomicU64 = AtomicU64::new(0); // an IPI reschedule: the core is on a long tick
 pub static WK_KICK: AtomicU64 = AtomicU64::new(0);      // a kick of an AP (the word did not change / a yield parking)
+/// Who held the core when a wakeup only kicked it (no reschedule): per current task, and how
+/// long that task had run, ns in total — the stat block names the holders (a woken thread
+/// waits for them up to the wake-preemption threshold).
+pub static KICK_ON: [AtomicU64; NTASKS] = [const { AtomicU64::new(0) }; NTASKS];
+pub static KICK_ON_RAN: [AtomicU64; NTASKS] = [const { AtomicU64::new(0) }; NTASKS];
+/// The kicks whose core runs the woken task itself (it sleeps in place: the kick ends its wait).
+pub static KICK_SELF: AtomicU64 = AtomicU64::new(0);
+/// The kicks to a core whose OTHER current task was asleep at the moment (by the registry).
+pub static KICK_ON_SLEEPING: AtomicU64 = AtomicU64::new(0);
 pub static WK_BSP: AtomicU64 = AtomicU64::new(0);       // an IPI reschedule of the BSP from an AP
 pub static WK_BELL: AtomicU64 = AtomicU64::new(0);      // by a write into the core's doorbell (the sleeper is on the doorbell / the pickup loop)
 /// AN EXACT DEADLINE FURTHER THAN ONE TICK PERIOD IS SERVED BY THE TICK, NOT BY BORROWING THE LVT.
@@ -1078,7 +1087,17 @@ fn wake_impl(addr: u64, maxn: usize, leader: usize, allow_switch: bool) -> usize
                 (if idle_ish { &WK_RESCHED_IDLE } else if busy_long { &WK_RESCHED_BUSY } else { &WK_RESCHED_LONG }).fetch_add(1, Ordering::Relaxed);
                 crate::sched::hint_set_on(c, t);
                 crate::smp::send_ipi(crate::smp::apic_of(c), crate::idt::TIMER_VECTOR as u8);
-            } else if !store_woke { WK_KICK.fetch_add(1, Ordering::Relaxed); kick(c as u32); } // it sleeps on the word itself — a write/a call is enough
+            } else if !store_woke {
+                WK_KICK.fetch_add(1, Ordering::Relaxed);
+                if on_cpu == t as u64 { KICK_SELF.fetch_add(1, Ordering::Relaxed); }
+                else if (on_cpu as usize) < NTASKS {
+                    KICK_ON[on_cpu as usize].fetch_add(1, Ordering::Relaxed);
+                    let r = crate::sched::ran_ns_on(c);
+                    if r != u64::MAX { KICK_ON_RAN[on_cpu as usize].fetch_add(r.min(1 << 40), Ordering::Relaxed); }
+                    if WADDR[on_cpu as usize].load(Ordering::Relaxed) != 0 && WOKEN[on_cpu as usize].load(Ordering::Relaxed) == 0 { KICK_ON_SLEEPING.fetch_add(1, Ordering::Relaxed); }
+                }
+                kick(c as u32); // it sleeps on the word itself — a write/a call is enough
+            }
             else { WK_STORE.fetch_add(1, Ordering::Relaxed); }
         }
         else if !store_woke { // a BSP sleeper, we wake it from an AP

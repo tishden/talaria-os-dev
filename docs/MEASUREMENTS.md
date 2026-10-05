@@ -843,7 +843,13 @@ the 34 us is the wfe tier's policy, not its wake — and the knobs name the part
 `talaria.wakepreempt=0` the p99 is 8.2 us, i.e. the woken worker waits on a BUSY core for the
 running task to have run the wake-preemption threshold, and the wfe tier lands it there where
 `wfi+ipi` does not (`docs/ENGINEERING-NOTES.md` item 47). `talaria.sync=hlt` (p99 6.8) and
-`talaria.wakepreempt=0` (8.2) are the measured levers until that placement is understood. Under TCG, for comparison: 0.6-1.6 / 4.3-6.2 / 16-51 us.
+`talaria.wakepreempt=0` (8.2) are the measured levers until that placement is understood.
+The `stat:` block's new kick line names it (one more run, wfe): of 129 188 kicks, 2 746 went to
+the woken task's own core (it sleeps in place — the kick ends its wait) and **126 442 to a core
+running ANOTHER task** (md_work0 101 093, md_work1 25 337, each having run ~1 us; asleep at that
+moment: 29). A kick only ends a `wfe`; a running core does not notice it, and the woken worker
+waits until the other one gives the core up. With `wakepreempt=0` exactly those become
+reschedules with the hint — hence its 8.2 us. Under TCG, for comparison: 0.6-1.6 / 4.3-6.2 / 16-51 us.
 
 **The cache counter on a `c7g.large`** (`talaria.test=pmu`, `pmu-ev:` — each event on the last
 counter across a random walk of 64 MB, 1 M line loads): L2D_CACHE_REFILL (0x17) 0.99 per
@@ -852,6 +858,22 @@ L1D_TLB_REFILL ~0; LL_CACHE_RD/MISS_RD, L3D_CACHE(_REFILL) and BUS_ACCESS are no
 and count nothing. PMCEID0 = 0x0000027079ff0f3f, PMCEID1 = 0x000000001e30a07f. With item 46's
 fix the boot line is `LLC-miss=1:0x17` and `top` shows 13-17 M misses per 10 s (7.1-7.6 per
 thousand instructions) over mdpipe, where it showed 0.
+
+### 10.12. The KVM stand on the session's branch (2026-10-05)
+
+`kvm-stand-aarch64.sh` on `c7g.metal` from `4a69b13` (`arm64-s64`: the cache-counter fix and
+`wakeprobe` on top of `bb198d8`), 63 minutes, destroyed by itself; logs
+`infra/aws/logs/aarch64-20261005-175710/`:
+
+| step | result |
+| --- | --- |
+| the gate under KVM, once and three times in a loop | 323 PASS, 1 FAIL each time — the new "`-` (no counter)" assertion, true only under TCG: KVM's PMU counts the cache events (`LLC-miss=1:0x37 LLC-ref=3:0x36 branches=4:0x21 predictor-miss=2:0x22`); split by machine in `3bd2ef4` |
+| the five servers, default wait / `netmix` | 15/0 / 15/0 (the JVM's speedup4 3.997 / 3.996, park p50 0.444 us) |
+| the soak, 13 modes × 50 boots | **0 of 650** |
+| the parallel detector, 6 modes × 96 boots, 24 at once | **0 of 576** |
+| UDP RTT p50, polling / `netirq=1` / `netirq=1 netpark=0` | 11.5 / 23.8 / 11.4 us |
+| futex RTT p50 same-core / cross-core; condvar same-core | 500 / 500 / 2641 ns |
+| `mbench` syscall; svc round trip with the FP save | 156 ns; 130 ns |
 
 ## 11. Reproducing any of this
 

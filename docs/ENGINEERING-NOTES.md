@@ -819,9 +819,13 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     whose current task sleeps against 61 k (the `stat:` block's wake-delivery line). Then the
     knobs, one instance each: `talaria.wakepreempt=0` — p99 8.2 us; `nosteal`, `slice=150000` —
     no change; `nowakebal` — 12. The woken worker waits on a BUSY core until the running task has
-    run the wake-preemption threshold: the wfe tier puts it there and `wfi+ipi` does not. Why the
-    tier changes the placement is the next item; `talaria.sync=hlt` and `wakepreempt=0` are the
-    measured levers on a Graviton VM meanwhile. **Measure the primitive before blaming it — and when the probe says "not
+    run the wake-preemption threshold: the wfe tier puts it there and `wfi+ipi` does not. The
+    kick line of the `stat:` block (new) counted it: 126 442 of 129 188 kicks went to a core
+    running ANOTHER worker, freshly switched in (~1 us), where a kick — it only ends a `wfe` — is
+    a no-op. The design question for the fix is the policy's own: a woken thread on a core whose
+    current task has just started is "do not preempt a computing thread" by the threshold, and
+    on a pipeline that is the tail. `talaria.sync=hlt` and `wakepreempt=0` are the measured
+    levers on a Graviton VM meanwhile. **Measure the primitive before blaming it — and when the probe says "not
     it", the probe stays as an instrument and the policy that used it does not.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
