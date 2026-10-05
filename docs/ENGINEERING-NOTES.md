@@ -827,6 +827,20 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     measured levers on a Graviton VM meanwhile. **An instrument that names a mechanism is not yet
     the cause: check its count against the size of the effect.** **Measure the primitive before blaming it — and when the probe says "not
     it", the probe stays as an instrument and the policy that used it does not.**
+48. **"The low memory is the shared mappings', and the cache ate half of it."** The first Graviton
+    scoreboard's PostgreSQL bring-up gave the Talaria side a ceiling of 0: the postmaster had died at
+    start with `could not map anonymous shared memory: Out of memory`. A `MAP_SHARED` mapping is
+    handed out at its identity address from the main allocator, which stops at 4 GB; a
+    `c7g.xlarge` has 844 MB there (the rest of its 8 GB is the high area), and the FS block cache
+    took its default half — 421 MB — at mount. The TCG smoke had passed because a 1 GB `virt` has
+    no high area and a smaller cache. Reproduced in the Graviton's shape (`virt` 10 GB,
+    `talaria.lowmem=850`, the scoreboard's own image): the old kernel PANICKED allocating a page
+    table (`pte_in: pt` — the low memory gone), the new one has the postmaster ready. The cache
+    now comes from the high area where there is one (identity-mapped in every space, 64-bit DMA),
+    and the mount line says so; the gate asserts it on the `lowmem=850` boot. Two more for the
+    direct map's plan (ARM64-PLAN §10.16): a page-table allocation that panics instead of failing
+    the syscall, and shared mappings bound to the identity window at all. **A smoke under the
+    emulator proves the protocol, not the machine's shape: give the gate the target's memory map.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

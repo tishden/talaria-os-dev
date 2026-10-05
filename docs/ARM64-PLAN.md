@@ -1954,6 +1954,12 @@ move it: `talaria.wakepreempt=0` takes the p99 to 8.2 us. The wake latency itsel
 under 20 us in both tiers, so what that knob changes is open; `talaria.sync=hlt` (6.8) and
 `wakepreempt=0` (8.2) are the measured levers meanwhile. Item 47.
 
+**PostgreSQL on a Graviton's memory map** (found by the scoreboard): the FS cache took half of a
+`c7g.xlarge`'s 844 MB below 4 GB, where a process's `MAP_SHARED` memory must come from, and the
+postmaster's 256 MB `shared_buffers` failed; in the same shape under TCG (`virt` 10 GB,
+`talaria.lowmem=850`) the old kernel panicked on a page table. The cache comes from the high area
+now. Item 48.
+
 **The direct map**: the plan is §10.16.
 
 ### 10.16. The identity window's real fix: a kernel direct map (the plan, 2026-10-05)
