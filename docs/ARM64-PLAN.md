@@ -1674,7 +1674,7 @@ but sits off the mwait wake path; left.
 dump slot is claimed by a swap. The 1 GB identity leaves of a high area that cover a hole
 beside it stay: the right fix is 2 MB leaves for a partial gigabyte, which touches how every
 address space inherits the kernel's PDPT, and no machine seen puts a device in such a
-gigabyte (Graviton's PCI window is in GB3, x86's high BARs are far above RAM).
+gigabyte (Graviton's PCI window is in GB2 — the 16550 at 0x8004_8000 — x86's high BARs are far above RAM).
 
 **The wall clock on Graviton** (no PHC, §10.10): the servo takes any source
 (`wallclock::feed_ref`), but nothing feeds it in production on either machine — the PHC is
@@ -1803,7 +1803,7 @@ dlopen of libz) passed on its first boot.
 (x86's release, 25.8.33.6, under Ubuntu 22.04's arm64 glibc) is an ET_EXEC at
 0x200000..0x1CA9_7310 (458 MB). Every process of this kernel shares the kernel's identity map,
 and there it was the devices on `virt` (the GIC at 0x0800_0000, the UART, virtio-mmio, the
-32-bit PCIe window) and RAM on a Graviton (GB0 is RAM from 5 MiB). x86 had the same collision
+32-bit PCIe window) — and, the plan believed, RAM on a Graviton (it is not: §10.14). x86 had the same collision
 with RAM and moved the kernel above the binary (`services/clickhouse/build-kernel.sh`).
 1. DONE: the kernel reaches GB0's devices through an alias — the same 1 GiB Device block
    once more in L0 slot 384 (`mmu::DEV_SLOT`, VA 0xC000_0000_0000 + PA), in the early map
@@ -1815,8 +1815,9 @@ with RAM and moved the kernel above the binary (`services/clickhouse/build-kerne
 2. DONE: GB0 of devices is no longer mapped by its identity at all on arm64, so it is free in
    every process; the loader lays the ET_EXEC there with fresh frames. Unmapping it found a
    null dereference the flash had been answering (`docs/ENGINEERING-NOTES.md` item 40).
-3. NOT DONE: a Graviton — GB0 is RAM there, the kernel's frames are in it. The knob
-   `talaria.lowres=` keeping RAM below the binary's end out of the allocator is the plan.
+3. DONE without code (§10.14): on a Graviton GB0 is devices too (the GIC, the ECAM; RAM from
+   1 GiB), so step 2 already covers it; the knob `talaria.lowres=` this item planned was for a
+   memory map nobody had read — the machine's own boot log of §10.8 said otherwise.
 
 On `virt` under TCG ClickHouse then answered — and crashed about every third run, a thread
 returning to address 0 right after starting. The hunt built three instruments that stay: a
@@ -1845,7 +1846,53 @@ Gates after the session: `kernel/test-aarch64-db.sh` **14/0** under TCG (the fiv
 ClickHouse's B12 set in 20 s), arm64 `test-aarch64.sh` **316/0** (`dyn`, `idregs`, `mixwait`,
 `migregs` new), x86 `test.sh` **501/0** + host 22/0 (`mixwait`, `migregs` new), kernel-unit
 296/0; clippy clean on both. Phase 7's list stands at: everything on `virt` (the gate) — the
-KVM stand's numbers in `docs/MEASUREMENTS.md` §10.7; ClickHouse on a Graviton waits for step 3.
+KVM stand's numbers in `docs/MEASUREMENTS.md` §10.7; ClickHouse on a Graviton — §10.14.
+
+### 10.14. A Graviton's own boot runs ClickHouse; the wall clock gets a reference; the plug pulled (2026-10-05)
+
+**ClickHouse on `c7g.large`, no change needed.** §10.13's step 3 planned a knob for "GB0 is RAM
+on a Graviton". The boot log of §10.8 had said otherwise all along: the firmware's map is RAM
+at 0x4000_0000..0x8000_0000 and from 0x4_0000_0000, the GIC at 0x1000_0000, the ECAM at
+0x2000_0000, the PCI window (the console's 16550, the NVMe and ENA BARs) at 0x8000_0000 — GB0
+is devices, exactly as on `virt`, and the devices' alias already frees it. The official arm64
+binary ran validate.sh B12's set to the right sums and `exit_group(0)` on its first boot there
+(`docs/MEASUREMENTS.md` §10.9). The comment in `mmu::gb_kind` that carried the wrong map is
+corrected. `docs/ENGINEERING-NOTES.md` item 42.
+
+**The wall clock's reference: SNTP** (`talaria.ntp=aws|<a.b.c.d>[,<poll s>]`,
+`kernel/src/ntp.rs`, both machines). §10.11 left the servo with nothing to feed it on a Graviton
+(no PHC on Nitro's ENA, no paravirtual clock on arm64 KVM) and on any metal. The client is a
+kernel UDP socket on the first interface, run in the network stack's pass like the DHCP client
+(so wherever the stack is driven, workload or idle). A query carries our counter in its
+transmit field and the server echoes it, so a reply names its query and nothing is kept per
+query; the server's `(T2 + T3) / 2` is paired with our `(t1 + t4) / 2`. A poll is a burst of
+four and only the shortest round trip is fed (the pairing's error is bounded by half the round
+trip; a queue lengthens it). The network reference owns the servo (`wallclock::set_net_ref`:
+kvmclock's tick feed stands aside), feeds it with its own interval (`feed_ref_iv`), and its first
+sample before the workload starts SETS the base (`wallclock::set_base`) instead of stepping it —
+EC2's UEFI clock was a second ahead and the first version counted a "step back" at boot
+(`docs/ENGINEERING-NOTES.md` item 43). The boot waits up to 3 s for that first sample.
+
+Gates (`kernel/test.sh` and `test-aarch64-net.sh`): `kernel/tools/minintp.py` serves the host's
+clock +3 s running 150 ppm fast; the first sample sets the base (+3.0 s under kvmclock, +3-4 s
+from arm64's PL031 whole seconds), eight samples without a step, and the judge
+(`kernel/tools/ntpcmp.py`: the kernel echo's wall-clock stamp against an SNTP answer, both
+referred to the host's clock) puts the guest within 1 ms (3 ms under TCG) — without the
+feature it is 3 s off. A silent server is said and the boot goes on. On `c7g.large` against the
+Amazon Time Sync Service: ±21 us judged from a Linux neighbour, the servo at the crystal's
++15 ppm. Host tests for the packet, the parse (kiss-of-death, unsynchronised, reversed
+timestamps), the midpoint pair and the burst.
+
+**The pulled plug on EBS** — phase 7's second exit gate: `ec2-crash-test.sh` on `c7g.large`,
+ordered and `journal=data`, both `RECOVERED OK` after `stop-instances --force`.
+
+Phase 7 stands complete against its table: the services on `virt` and under KVM (§10.13),
+ClickHouse on the Graviton itself, the power cut on a `c7g` with EBS. Phase 6's
+"wall-clock reference decision" is made: SNTP everywhere, the PHC where it exists.
+
+Gates after the session: arm64 `test-aarch64.sh` **336/0** under TCG (four `ntp` checks new, no
+SKIP), x86 `test.sh` **505/0** + host 22/0 (four `ntp` checks new), kernel-unit 302/0 (six `ntp`
+tests new), clippy clean on both.
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),

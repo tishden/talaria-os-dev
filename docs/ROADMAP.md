@@ -72,6 +72,12 @@ holds the NIC. Today `talaria.test=phc` feeds the reference ONCE on metal (the
 plumbing is verified); there is no periodic adjustment. **The cost of doing
 nothing is known: 95 ppm — 8.2 seconds a day.**
 
+**A reference that does not need the device (2026-10-05):** `talaria.ntp=aws|<ip>` feeds the
+same servo from SNTP in the network stack's pass (`kernel/src/ntp.rs`; the shortest round trip
+of a four-query burst is the sample). On a `c7g.large` it holds the clock within ±21 us of the
+Amazon Time Sync Service, judged from outside (`docs/MEASUREMENTS.md` §10.9). What is left
+here is the PHC as a BETTER reference where an instance type has it, not the only one.
+
 ### 2.4. CAT on a live chip
 
 The code is in the kernel (`cat.rs`, `llc=` in the manifest) and the logic is

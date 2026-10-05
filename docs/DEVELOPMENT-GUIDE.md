@@ -259,6 +259,7 @@ The point where a new mode is added is `selftest/` or `runmode.rs` (§10.2).
 | `suite.rs` | 164 | `talaria.suite=<LBA>`: a LIST of modes from one image, across reboots — one POST of a metal instance instead of one per mode | `lba_from_cmdline`, `take`, `more`, `park`, `reboot` |
 | `arch/x86_64/cat.rs` | ~390 | §6.3: the partitioning of the L3 (Intel CAT, the manifest's `llc=<to whom>:<mask>`) and the cache's size — a neighbour washing the LLC out is also a tail | `init`, `present`, `l3_bytes`, `mask_valid`, `apply`, `apply_local` |
 | `arch/x86_64/ioapic.rs` | 102 | the I/O APIC: the delivery of interrupts from DEVICES (the network one — without it the stack moved only from a syscall) | `note`, `available`, `lines_of`, `route` |
+| `ntp.rs` | ~230 | the wall clock's reference over the network (`talaria.ntp=`): SNTP's query and reply, the midpoint pair, a burst's shortest round trip — pure, host-tested; the socket and the schedule are `netsys::ntp_process` (in the stack's pass), the servo is `wallclock::feed_ref_iv`/`set_base` | `request`, `parse`, `sample`, `Burst`, `parse_knob` |
 | `imds.rs` | 142 | a mini client of the EC2 metadata service (IMDSv2, `talaria.imds=1`): the token, the instance-id, the hostname, the user-data | `fetch`, `user_data` |
 
 `kernel/user/` — the user binaries/sources (asm: `hello.s`, `uaftest.s`,
@@ -543,6 +544,20 @@ kfast=0 and a cap=2), `syncbench`, `futexlat`, `fiber`, `dynsync`, `shmwake`, th
   (a read gives an EOF: OpenSSL uses getrandom).
 - **exit_group** — it terminates all the tasks with the same CR3 (the process's threads), then under
   the supervisor there is a `supervise::process_exited` (a longjmp 3), otherwise an `sti;hlt` until the summary.
+
+**arm64** (`arch/aarch64/syscall_entry.rs`, `arch::abi`). The entry is `svc #0` through the
+exception vector into the same unified `Frame`: the number in `x8`, the arguments in `x0..x5`,
+the result back in `x0`; `syscall::init_core` arms only THIS core's entry (a secondary must
+not touch the workload's heap — `docs/ENGINEERING-NOTES.md` item 41). The numbers are the
+generic table (`asm-generic/unistd.h`: no `open`/`stat`/`fork`/`epoll_wait` — `openat`,
+`newfstatat`, `clone`, `epoll_pwait`), translated by `arch::abi` onto the shared handlers; the
+values whose encoding differs (`stat`, `epoll_event` — packed on x86, padded on arm64 — and
+the `open` flags) are re-encoded there, with host tests. TLS is `TPIDR_EL0` (`clone`'s `tls`),
+the signal frame (`arch/aarch64/signal.rs`) carries the FP/SIMD state as Linux's
+`fpsimd_context`, and the return is the vDSO's `__kernel_rt_sigreturn`. `AT_HWCAP` promises
+only what exists — its `HWCAP_CPUID` bit is backed by `trap::emulate_id_read` (EL0 `mrs` of the
+ID registers answered as Linux does). `clock_gettime` reads `CNTVCT_EL0` in the vDSO; the wall
+clock's reference is SNTP (`talaria.ntp=`, `ntp.rs`) — there is no kvmclock on arm64.
 
 ---
 

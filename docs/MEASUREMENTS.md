@@ -736,6 +736,45 @@ allocated and re-zeroed the workload's brk heap (`docs/ENGINEERING-NOTES.md` ite
 targeted run failed for capacity: no `c7g.metal` in any of the three zones for 18 minutes; the
 next one, minutes later, got one in the first.
 
+### 10.9. A Graviton's own boot: ClickHouse, the clock by SNTP, the pulled plug (2026-10-05)
+
+Three runs on `c7g.large` (Nitro, edk2, one core by default) through
+`infra/aws/ec2-boot-talaria.sh` with `ARCH=arm64`, the neighbour an AL2023 `c7g.large` in
+the same cluster placement group (`lab-up.sh c7g.large`).
+
+**ClickHouse, the official arm64 binary** (25.8.33.6, an ET_EXEC at 0x200000..0x1CA9_7310,
+from `services/build-aarch64-db.sh`'s ext2 volume; `talaria.pci=1 talaria.mode=proc`):
+validate.sh B12's set — 10 million rows to 49999995000000, MergeTree written, merged and read
+back (19999900000, 28572 marks aggregated), `exit_group(0)`; the queries' own log spans
+0.72 s. No knob: the firmware's map puts the GIC (0x1000_0000) and the ECAM (0x2000_0000)
+in GB0 and RAM from 1 GiB, so GB0 is devices on a Graviton as on `virt`, and the devices'
+alias of §10.13 already frees it for the binary.
+
+**The wall clock by SNTP** (`talaria.ntp=aws,4`: a burst of four queries to
+169.254.169.123 every 4 s, the shortest round trip fed to the servo):
+
+| | |
+| --- | --- |
+| the base's error at the first sample (UEFI `GetTime`) | −209 ms; −1.03 s on another boot |
+| the best round trip of a burst | 49–55 us (111–124 us in the first burst: ARP) |
+| the servo's correction, settled | +14…+17 ppm (the neighbour's chrony: its crystal +13.6 ppm) |
+| the residual the kernel reports | −63 → −38 us over the first five samples |
+| **the guest − the reference, judged from the neighbour** | **+18, +3, −1, −10, +21, −3 us** |
+
+The judge (`kernel/tools/ntpcmp.py` on the neighbour) asks the kernel echo
+(`talaria.kecho=7777 talaria.kts=1`, the kernel's wall clock in the answer) and
+169.254.169.123 in turn, each answer referred to the neighbour's clock at its round trip's
+midpoint; the median of 15 rounds, six times 20 s apart. Without the reference the same
+machine counts from the firmware's whole seconds at the crystal's +15 ppm: 1.3 s a day. On the
+dev box the gates' server is the host's clock +3 s running 150 ppm fast: the guest is −64 us
+from it under KVM (x86) and −54 us under TCG (arm64), whose servo settles at −150…−190 ppm —
+the reference's rate, exactly.
+
+**The pulled plug on EBS** (`infra/aws/ec2-crash-test.sh`: `stop-instances --force` after a
+committed, un-checkpointed transaction, then the same volume with phase 2's user-data): ordered
+mode — 6 blocks replayed, `journal2: RECOVERED OK`; `journal=data` — 14 blocks (the data in the
+transaction) replayed, `RECOVERED OK`. Phase 7's second exit gate, on the target hardware.
+
 ## 11. Reproducing any of this
 
 ```sh
