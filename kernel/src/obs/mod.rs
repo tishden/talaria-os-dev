@@ -137,8 +137,17 @@ pub fn miss(num: u64, mpki100: u64, has_ratio: bool, pct100: u64) -> S<40> {
     s
 }
 /// The same for LLC and branch-predictor misses from a snapshot.
-pub fn miss_llc(s: &crate::pmu::Sample) -> S<40> { miss(s.llc_miss, s.llc_mpki100(), s.has_llc_ratio(), s.llc_miss_pct100()) }
-pub fn miss_br(s: &crate::pmu::Sample) -> S<40> { miss(s.br_miss, s.br_mpki100(), s.has_br_ratio(), s.br_miss_pct100()) }
+/// A machine with no counter for the event says "-" (no counter), not a zero: a `c7g.large`'s two
+/// counters carry the instructions and one cache event, and its `top` used to print "LLC misses 0".
+pub fn miss_llc(s: &crate::pmu::Sample) -> S<40> {
+    if !crate::pmu::has_llc() { return absent(); }
+    miss(s.llc_miss, s.llc_mpki100(), s.has_llc_ratio(), s.llc_miss_pct100())
+}
+pub fn miss_br(s: &crate::pmu::Sample) -> S<40> {
+    if !crate::pmu::has_br() { return absent(); }
+    miss(s.br_miss, s.br_mpki100(), s.has_br_ratio(), s.br_miss_pct100())
+}
+fn absent() -> S<40> { use core::fmt::Write; let mut s = S::new(); let _ = write!(s, "- (no counter)"); s }
 
 /// A thread's name as a printable string (a thread may not have named itself).
 pub fn comm(t: usize) -> S<16> {

@@ -296,3 +296,9 @@ pub fn selftest_wrap() -> Option<(u64, u64)> { None }
 pub fn selftest_idle() {}
 /// arm64's probe of a chained counter pair; x86 has none.
 pub fn selftest_chain() {}
+/// Whether a counter carries the LLC misses / the predictor's misses at all (`top` and `perf`
+/// print "-" for one that does not, never a zero that was not measured).
+pub fn has_llc() -> bool { available() && get(&I_LLCM).is_some() }
+pub fn has_br() -> bool { available() && get(&I_BRM).is_some() }
+/// arm64's probe of the cache events on a spare counter; x86 has its own boot check.
+pub fn selftest_events() {}
