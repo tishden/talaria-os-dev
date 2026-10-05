@@ -9,15 +9,29 @@ OUT=${1:?directory}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../../../.." && pwd)
 SRC="$REPO/services/mariadb/build"
-[ -x "$SRC/b/sql/mariadbd" ] || { echo "no mariadbd — run services/mariadb/build.sh"; exit 1; }
+. "$HERE/../../lib/arch.sh"
 [ -d "$SRC/datadir" ] || { echo "no $SRC/datadir (mariadb-install-db)"; exit 1; }
 
 mkdir -p "$OUT/opt/mariadb/bin" "$OUT/opt/mariadb/share" "$OUT/tmp" "$OUT/etc" "$OUT/run"
-cp "$SRC/b/sql/mariadbd" "$OUT/opt/mariadb/bin/mariadbd"
-strip "$OUT/opt/mariadb/bin/mariadbd" 2>/dev/null || true
-cp -r "$SRC/b/sql/share/english" "$OUT/opt/mariadb/share/english"
-cp -r "$SRC/b/sql/share/charsets" "$OUT/opt/mariadb/share/charsets" 2>/dev/null \
-  || cp -r "$SRC/mariadb-10.11.9/sql/share/charsets" "$OUT/opt/mariadb/share/charsets"
+if [ "$ARCH" = arm64 ]; then
+    # Alpine's aarch64 MariaDB 10.11 (dynamic) with its closure (services/build-aarch64-db.sh);
+    # the binary and its messages go to x86's paths, so my.cnf and the spec stay one file.
+    # The data directory is x86's mariadb-install-db (the same bytes on both machines).
+    . "$REPO/services/apkroot.sh"
+    apkroot "$OUT.apk" v3.20 mariadb >&2 || exit 1
+    [ -f "$OUT.apk/usr/bin/mariadbd" ] || { echo "no mariadbd in the unpacked tree"; exit 1; }
+    cp -a "$OUT.apk/." "$OUT/"; rm -rf "$OUT.apk" "$OUT/usr/share/doc" "$OUT/usr/share/man" "$OUT/usr/include"
+    mv "$OUT/usr/bin/mariadbd" "$OUT/opt/mariadb/bin/mariadbd"
+    cp -r "$OUT/usr/share/mariadb/english" "$OUT/opt/mariadb/share/english"
+    cp -r "$OUT/usr/share/mariadb/charsets" "$OUT/opt/mariadb/share/charsets"
+else
+    [ -x "$SRC/b/sql/mariadbd" ] || { echo "no mariadbd — run services/mariadb/build.sh"; exit 1; }
+    cp "$SRC/b/sql/mariadbd" "$OUT/opt/mariadb/bin/mariadbd"
+    strip "$OUT/opt/mariadb/bin/mariadbd" 2>/dev/null || true
+    cp -r "$SRC/b/sql/share/english" "$OUT/opt/mariadb/share/english"
+    cp -r "$SRC/b/sql/share/charsets" "$OUT/opt/mariadb/share/charsets" 2>/dev/null \
+      || cp -r "$SRC/mariadb-10.11.9/sql/share/charsets" "$OUT/opt/mariadb/share/charsets"
+fi
 cp -r "$SRC/datadir" "$OUT/data"
 rm -f "$OUT/data"/*.pid
 printf 'root:x:0:0:root:/root:/bin/sh\nmysql:x:27:27:mysql:/:/bin/false\n' > "$OUT/etc/passwd"

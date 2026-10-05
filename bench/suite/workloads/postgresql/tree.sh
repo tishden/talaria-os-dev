@@ -7,13 +7,30 @@ OUT=${1:?directory}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../../../.." && pwd)
 SRC="$REPO/services/postgresql/build"
-[ -x "$SRC/pg-static/opt/pg/bin/postgres" ] || { echo "no static postgres — run services/postgresql/build.sh"; exit 1; }
+. "$HERE/../../lib/arch.sh"
 [ -d "$SRC/pgdata" ] || { echo "no $SRC/pgdata (initdb)"; exit 1; }
 
 mkdir -p "$OUT/opt/pg/bin" "$OUT/opt/pg/share" "$OUT/opt/pg/lib/postgresql" "$OUT/tmp" "$OUT/etc"
-cp "$SRC/pg-static/opt/pg/bin/postgres" "$OUT/opt/pg/bin/"
-cp -r "$SRC/pg-static/opt/pg/share/postgresql" "$OUT/opt/pg/share/"
-rm -rf "$OUT/opt/pg/share/postgresql/extension" "$OUT/opt/pg/share/postgresql/tsearch_data"
+if [ "$ARCH" = arm64 ]; then
+    # Alpine's aarch64 PostgreSQL 16 (dynamic) with its closure, as the arm64 gates run it
+    # (services/build-aarch64-db.sh). The binary goes to x86's path so that the manifest,
+    # the spec and their measured settings stay ONE file for both machines; its share
+    # directory is found at the compiled-in /usr/share/postgresql16 (PostgreSQL falls back
+    # to the absolute path when the binary is not under its compiled bindir). The data
+    # directory is x86's initdb — the same bytes on both little-endian machines.
+    . "$REPO/services/apkroot.sh"
+    apkroot "$OUT.apk" v3.20 postgresql16 >&2 || exit 1
+    [ -f "$OUT.apk/usr/libexec/postgresql16/postgres" ] || { echo "no postgres in the unpacked tree"; exit 1; }
+    cp -a "$OUT.apk/." "$OUT/"; rm -rf "$OUT.apk"
+    rm -rf "$OUT/usr/share/doc" "$OUT/usr/share/man" "$OUT/usr/include" "$OUT/usr/share/postgresql16/extension" \
+        "$OUT/usr/share/postgresql16/tsearch_data" "$OUT"/usr/lib/postgresql16/llvmjit*
+    mv "$OUT/usr/libexec/postgresql16/postgres" "$OUT/opt/pg/bin/postgres"
+else
+    [ -x "$SRC/pg-static/opt/pg/bin/postgres" ] || { echo "no static postgres — run services/postgresql/build.sh"; exit 1; }
+    cp "$SRC/pg-static/opt/pg/bin/postgres" "$OUT/opt/pg/bin/"
+    cp -r "$SRC/pg-static/opt/pg/share/postgresql" "$OUT/opt/pg/share/"
+    rm -rf "$OUT/opt/pg/share/postgresql/extension" "$OUT/opt/pg/share/postgresql/tsearch_data"
+fi
 cp -r "$SRC/pgdata" "$OUT/pgdata"
 chmod 700 "$OUT/pgdata"
 rm -f "$OUT/pgdata/postmaster.pid"

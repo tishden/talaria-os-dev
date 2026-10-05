@@ -4,6 +4,8 @@
 #
 #   stand-up.sh <workload> [--linux-only | --reuse-ami <ami-...>]
 #   env: AWS_DEFAULT_REGION= TF_VAR_instance_type= STAND_DIR=
+#        ARCH=arm64 — a Graviton stand (the arm64 trees and tlgen.a64, the Talaria AMI from the
+#        aarch64 stub, AL2023 arm64, c7g.xlarge unless TF_VAR_instance_type says otherwise)
 #
 # The stand costs money and lives until stand-down.sh. All the state is in STAND_DIR,
 # so it can be torn down from another session too.
@@ -16,6 +18,10 @@ REPO=$(cd "$SUITE/../.." && pwd)
 STAND_DIR=${STAND_DIR:-$HOME/.talaria-lab/stand}
 TF="$HERE/terraform"
 mkdir -p "$STAND_DIR"
+. "$SUITE/lib/arch.sh"
+TYPE=${TF_VAR_instance_type:-$TL_TYPE_DEFAULT}
+case "$TYPE" in [a-z]*[0-9]g*.*) TARCH=arm64;; *) TARCH=x86_64;; esac
+[ "$TARCH" = "$ARCH" ] || { echo "ARCH=$ARCH, but the instance type $TYPE is $TARCH"; exit 1; }
 export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-1}
 
 command -v aws >/dev/null || { echo "no aws cli"; exit 1; }
@@ -67,7 +73,7 @@ terraform -chdir="$TF" apply -auto-approve -input=false \
     -var "talaria_ami=$AMI" \
     -var "talaria_smp=${TF_VAR_talaria_smp:-$WL_SMP}" \
     -var "talaria_count=$([ -n "$AMI" ] && echo 2 || echo 0)" \
-    ${TF_VAR_instance_type:+-var "instance_type=$TF_VAR_instance_type"} | tail -20
+    -var "arch=$ARCH" -var "instance_type=$TYPE" | tail -20
 
 get() { terraform -chdir="$TF" output -json "$1" 2>/dev/null | python3 -c "
 import json,sys
@@ -79,6 +85,7 @@ except Exception:
 
 {
     echo "STAND_TYPE=$(terraform -chdir="$TF" output -raw instance_type)"
+    echo "STAND_ARCH=$ARCH"
     echo "STAND_AZ=$(terraform -chdir="$TF" output -raw az)"
     echo "STAND_REGION=$AWS_DEFAULT_REGION"
     echo "STAND_KEY=$TF/$(basename "$(terraform -chdir="$TF" output -raw key_file)")"
@@ -117,7 +124,7 @@ TREE=$(mktemp -d)
 chmod 755 "$TREE"
 tar czf "$A/files/tree-$WL.tar.gz" -C "$TREE" .
 rm -rf "$TREE"
-cp "$SUITE/tlgen/tlgen" "$A/files/tlgen"
+cp "$TLGEN_BIN" "$A/files/tlgen"
 
 {
     echo "[linux_stand]"

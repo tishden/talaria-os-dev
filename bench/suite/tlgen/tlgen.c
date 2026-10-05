@@ -2,7 +2,7 @@
  *
  * One static musl binary is built and runs both on Linux and on
  * Talaria. Everything it does differently on the two systems is nothing:
- * sockets, epoll, clock_gettime and rdtsc exist on both.
+ * sockets, epoll, clock_gettime and rdtsc (CNTVCT_EL0 on arm64) exist on both.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -29,10 +29,20 @@
 
 /* ------------------------------------------------------------------ time */
 
+/* The cycle-ish counter: the TSC on x86; on arm64 the generic timer's virtual count
+ * (CNTVCT_EL0, readable from EL0 on Linux and on Talaria; 1.05 GHz on a Graviton3,
+ * so the resolution is the TSC's). `isb` orders the read after the preceding
+ * instructions, as `lfence` does for rdtsc. The calibration below does not care which. */
 static inline uint64_t rdtsc(void) {
+#if defined(__aarch64__)
+    uint64_t v;
+    __asm__ __volatile__("isb\n\tmrs %0, cntvct_el0" : "=r"(v) :: "memory");
+    return v;
+#else
     unsigned lo, hi;
     __asm__ __volatile__("lfence\n\trdtsc" : "=a"(lo), "=d"(hi) :: "memory");
     return ((uint64_t)hi << 32) | lo;
+#endif
 }
 
 static double g_tsc_hz = 0;

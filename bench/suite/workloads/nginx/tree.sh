@@ -8,10 +8,27 @@ set -eu
 OUT=${1:?directory}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../../../.." && pwd)
-[ -f "$REPO/services/nginx/build/nginx" ] || { echo "no services/nginx/build/nginx — run services/nginx/build.sh"; exit 1; }
+. "$HERE/../../lib/arch.sh"
+if [ "$ARCH" = arm64 ]; then
+    # ALPINE'S OWN aarch64 nginx (dynamic: ld-musl + pcre2/ssl/zlib), not x86's static
+    # build: nginx's configure RUNS its test programs (sizeof, the features), so it does
+    # not cross-build, and there is no aarch64 machine to build on. Both sides of the
+    # Graviton stand run this one binary; the config is the same file as on x86. Its
+    # compiled-in paths (/var/lib/nginx/tmp/*, /var/log/nginx) are created at start-up
+    # when their parents exist — they are made below; everything we use is set by the
+    # config relative to `-p /nginx/`.
+    . "$REPO/services/apkroot.sh"
+    apkroot "$OUT.apk" v3.20 nginx >&2 || exit 1
+    [ -f "$OUT.apk/usr/sbin/nginx" ] || { echo "no usr/sbin/nginx in the unpacked tree"; exit 1; }
+    cp -a "$OUT.apk/." "$OUT/"; rm -rf "$OUT.apk" "$OUT/etc/nginx" "$OUT/usr/share/doc" "$OUT/usr/share/man"
+    mkdir -p "$OUT/nginx" "$OUT/var/lib/nginx/tmp" "$OUT/var/log/nginx" "$OUT/run/nginx"
+    mv "$OUT/usr/sbin/nginx" "$OUT/nginx/nginx"
+else
+    [ -f "$REPO/services/nginx/build/nginx" ] || { echo "no services/nginx/build/nginx — run services/nginx/build.sh"; exit 1; }
+fi
 
 mkdir -p "$OUT/nginx/html" "$OUT/nginx/tmp/body" "$OUT/nginx/logs" "$OUT/etc"
-cp "$REPO/services/nginx/build/nginx" "$OUT/nginx/nginx"
+[ "$ARCH" = arm64 ] || cp "$REPO/services/nginx/build/nginx" "$OUT/nginx/nginx"
 cp "$REPO/services/nginx/nginx.conf"  "$OUT/nginx/nginx.conf"
 : > "$OUT/nginx/error.log"
 

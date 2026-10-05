@@ -13,7 +13,7 @@
 # after: "terminate returned 0" does not count as a cleanup.
 #
 #   smoke.sh [<workload>=redis]
-#   env: SMOKE_TYPE=c6i.large  AWS_DEFAULT_REGION=ap-northeast-1  SMOKE_KEEP=1
+#   env: SMOKE_TYPE=c6i.large  AWS_DEFAULT_REGION=ap-northeast-1  SMOKE_KEEP=1  ARCH=arm64
 #        (do not tear down on failure — for analysis; the inventory will then certainly not match)
 #
 # It costs a few cents and ~6 minutes. It touches nothing foreign: its own resources are
@@ -23,7 +23,8 @@ WL=${1:-redis}
 HERE=$(cd "$(dirname "$0")" && pwd)
 SUITE=$(cd "$HERE/.." && pwd)
 REPO=$(cd "$SUITE/../.." && pwd)
-TYPE=${SMOKE_TYPE:-c6i.large}
+# ARCH=arm64: the Graviton path (lib/arch.sh) — the arm64 image, a c7g.large by default
+TYPE=${SMOKE_TYPE:-$([ "${ARCH:-x86_64}" = arm64 ] && echo c7g.large || echo c6i.large)}
 export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-1}
 W=${SMOKE_DIR:-$HOME/.talaria-lab/smoke-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$W"

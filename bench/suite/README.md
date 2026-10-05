@@ -237,6 +237,24 @@ python3 bench/suite/lib/compare.py $R/C $R/A                       # a ratio < 1
 bench/suite/infra/stand-down.sh                                    # TEAR IT DOWN
 ```
 
+**On a Graviton (arm64).** `ARCH=arm64` switches the whole EC2 path (`lib/arch.sh`): the
+workload trees take the arm64 builds (Redis and mongoose cross-built static by
+`services/build-aarch64.sh`; nginx, PostgreSQL 16, MariaDB 10.11 and MongoDB 4.0.5 are
+Alpine's own aarch64 packages, unpacked by `services/apkroot.sh` and put at x86's paths, so
+the manifests, the specs and their measured settings stay ONE file for both machines), the
+generator is `tlgen.a64` (`make -C tlgen a64`; CNTVCT_EL0 in place of the TSC), the Talaria
+AMI is the aarch64 UEFI stub, terraform takes AL2023 arm64 and `c7g.xlarge` (4 vCPU as on
+x86, but four physical cores — no SMT on either side), and the playbook leaves out the x86-only
+kernel parameters. Before paying for the stand, `a64-smoke.sh` boots every arm64 image under
+TCG in both roles (the server answers every test case; `tlgen.a64` as the job receiver runs a
+job), and `ARCH=arm64 infra/smoke.sh redis` is the deployment gate on a `c7g.large`:
+
+```sh
+make -C bench/suite/tlgen a64 && bench/suite/a64-smoke.sh   # TCG, ~15 min, no money
+ARCH=arm64 bench/suite/infra/smoke.sh redis                 # c7g.large, ~9 min, cents
+ARCH=arm64 bench/suite/run-remote-all.sh                    # the arm64 scoreboard -> results/ec2all-a64-<stamp>
+```
+
 Before the stand comes the smoke gate of the deployment path (eight minutes,
 cents):
 

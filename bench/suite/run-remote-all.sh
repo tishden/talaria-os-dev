@@ -4,7 +4,7 @@
 #
 #   run-remote-all.sh [workloads...]     (by default all that have a meta.env)
 #   env: the same as run-remote.sh (DUR/WARM/CONNS/REPEAT/RATES), SKIP="..."
-#        and stand-up.sh's (AWS_DEFAULT_REGION, TF_VAR_instance_type)
+#        and stand-up.sh's (AWS_DEFAULT_REGION, TF_VAR_instance_type, ARCH=arm64)
 #
 # Why: the criterion is "a run on EC2 starts with one command,
 # reaches the end and gives judgeable points on both sides, and the cleanup is checked
@@ -21,7 +21,8 @@ LIST=${*:-}
 [ -n "$LIST" ] || LIST=$(cd "$HERE/workloads" && ls -d */ 2>/dev/null | tr -d /)
 SKIP=${SKIP:-}
 STAMP=$(date +%Y%m%d-%H%M%S)
-ALL="$HERE/results/ec2all-$STAMP"
+# ARCH=arm64: the Graviton stand (lib/arch.sh) — its own directory name, never mixed with x86's
+ALL="$HERE/results/ec2all$([ "${ARCH:-x86_64}" = arm64 ] && echo -a64)-$STAMP"
 export STAND_DIR=${STAND_DIR:-$HOME/.talaria-lab/stand}
 export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-1}
 mkdir -p "$ALL"

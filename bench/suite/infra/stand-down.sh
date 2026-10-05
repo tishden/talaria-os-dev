@@ -18,7 +18,8 @@ AMI=""
 
 echo "== terraform destroy"
 terraform -chdir="$TF" destroy -auto-approve -input=false \
-    -var "region=$AWS_DEFAULT_REGION" -var "talaria_ami=${AMI:-ami-00000000000000000}" | tail -10
+    -var "region=$AWS_DEFAULT_REGION" -var "talaria_ami=${AMI:-ami-00000000000000000}" \
+    -var "arch=${STAND_ARCH:-x86_64}" | tail -10
 
 if [ -n "$AMI" ] && [ "$KEEP_AMI" != "--keep-ami" ]; then
     echo "== removing AMI $AMI and its snapshot"
