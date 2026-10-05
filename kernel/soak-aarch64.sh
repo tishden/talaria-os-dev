@@ -8,6 +8,7 @@
 #   kernel/soak-aarch64.sh [N=50] [outdir]      # the modes below, N boots each
 #   MODES="shmrace memrace" kernel/soak-aarch64.sh 200
 #   PAR=24 MODES=forkap kernel/soak-aarch64.sh 96     # 24 copies of one boot AT ONCE: more vCPUs
+#   SOAK_APPEND=talaria.ptlog=1 ...                      # extra knobs on every boot (a hunt's instruments)
 #                                                     # than the host has cores is the cheapest
 #                                                     # race detector the port has (§10.5 found
 #                                                     # three races of the shared code that way)
@@ -39,7 +40,7 @@ one() {
     D="-drive id=d0,file=/w/$TD/soak-$slot.img,format=raw,if=none -device virtio-blk-device,drive=d0"
   fi
   QEMU="timeout $1 qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp $SMP -m 1024 -nographic \
-    -kernel /w/$IMG -append \"console=ttyAMA0 $2 talaria.smp=$SMP talaria.poweroff=1\" $D"
+    -kernel /w/$IMG -append \"console=ttyAMA0 $2 ${SOAK_APPEND:-} talaria.smp=$SMP talaria.poweroff=1\" $D"
   if command -v qemu-system-aarch64 >/dev/null 2>&1; then
     sh -c "$(echo "$QEMU" | sed "s|/w/|$REPO/|g")" > "$LOG.$slot" 2>&1
   else
@@ -59,7 +60,8 @@ forkap|talaria.mode=proc|forkap|crashme: forkap ALL OK
 schedapi|talaria.test=schedapi|ext2|schedapi: ALL OK
 piperace|talaria.test=piperace||piperace: ALL OK
 syncbench|talaria.test=syncbench talaria.futexhang=3||SYNCBENCH: ALL OK
-mixwait|talaria.test=mixwait talaria.netmix=2000000000||mixwait: ALL OK'
+mixwait|talaria.test=mixwait talaria.netmix=2000000000||mixwait: ALL OK
+tsync|talaria.test=tsync talaria.futexhang=3||TSYNC: ALL OK'
 BAD='\[trap\]|PANIC|is spoilt|\[futex\] IT HAS HUNG|AN UNEXPECTED SIGSEGV|an unknown number'
 : > "$OUT/summary.txt"
 echo "== the arm64 soak: $N boots of each mode, $SMP cores, $ACCEL, $PAR at a time ($(nproc) host cores) =="
