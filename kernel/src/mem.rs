@@ -985,7 +985,6 @@ fn fc_idx(phys: u64) -> Option<usize> {
     if i < FC_FRAMES { Some(i) } else { None }
 }
 /// Is the frame handed out (the ledger's bit), None outside the window.
-#[allow(dead_code)] // a tool for a hunt
 pub fn fc_handed(phys: u64) -> Option<bool> { fc_idx(phys).map(|i| FC_BITS[i / 64].load(Ordering::Relaxed) & (1u64 << (i % 64)) != 0) }
 /// `n` frames from `addr` are handed out.
 #[track_caller]

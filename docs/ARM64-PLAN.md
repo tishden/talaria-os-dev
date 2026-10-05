@@ -1832,6 +1832,12 @@ register file carried, ClickHouse's runs are clean (6 of 6, four with the push o
 stealing push off). Also: `get_mempolicy`/`set_mempolicy`/`mbind` (one node: the default
 policy, accepted) — arm64's ClickHouse asks at start-up.
 
+Gates after the session: `kernel/test-aarch64-db.sh` **14/0** under TCG (the five servers,
+ClickHouse's B12 set in 20 s), arm64 `test-aarch64.sh` **316/0** (`dyn`, `idregs`, `mixwait`,
+`migregs` new), x86 `test.sh` **501/0** + host 22/0 (`mixwait`, `migregs` new), kernel-unit
+296/0; clippy clean on both. Phase 7's list stands at: everything on `virt` (the gate) — the
+KVM stand's numbers in `docs/MEASUREMENTS.md` §10.7; ClickHouse on a Graviton waits for step 3.
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its
