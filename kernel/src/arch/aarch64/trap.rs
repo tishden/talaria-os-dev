@@ -735,6 +735,8 @@ fn user_fault(f: &mut Frame) -> bool {
         let tp = unsafe { cpu::tls_base() };
         let root = crate::sched::task_cr3(crate::sched::current_id()) & 0x0000_ffff_ffff_f000;
         let tp_lost = tp != 0 && (root == 0 || crate::paging::phys_of_in(root, tp).is_none());
+        // `talaria.ptlog=1`: the history of the entries behind the pc and the faulting address
+        if root != 0 { crate::paging::ptlog_dump(root, f.pc & !0xFFF); if far != 0 { crate::paging::ptlog_dump(root, far & !0xFFF); } }
         crate::println!("\n[fault] EL0: esr={:#x} ({}) pc={:#x} far={:#x} sp={:#x} tpidr={:#x}{}",
             f.esr, ec_name(f.esr), f.pc, far, f.usp, tp, if tp_lost { " (tpidr IS NOT MAPPED) <-- THE TLS IS BROKEN" } else { "" });
         // An UNDEFINED instruction: the word the data side holds at the pc, through the

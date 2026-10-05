@@ -124,6 +124,17 @@ jvm) # TCG runs the short set (the start, the interpreter and C1/C2, a park betw
   fi
   refute "$BAD" "jvm: no trap (HotSpot's SIGSEGVs are delivered, not traps), no unknown syscall"
   stopq ;;
+ch) # validate.sh B12's queries: 10 million rows to a known sum, MergeTree written, merged and
+  # read back, the process's exit 0. The official arm64 binary is an ET_EXEC at 2 MB..458 MB:
+  # it runs because the kernel reaches GB0's devices through an alias (ARM64-PLAN §10.13).
+  have ext2-ch.img clickhouse || continue
+  bootdb 4 3072 "" ext2-ch.img
+  t0=$SECONDS; while [ $((SECONDS - t0)) -lt "$(budget 1500)" ] && alive && ! grep -aq 'exit_group\|killed by the signal' $O 2>/dev/null; do sleep 3; done; sleep 2
+  if grep -qa "49999995000000" $O && grep -qa "19999900000" $O && grep -qa "28572" $O && grep -qa "exit_group(the code=0)" $O; then
+    ok "clickhouse: Linux's arm64 binary aggregates 10 million rows, writes/merges/reads MergeTree, exits 0 ($((SECONDS - t0)) s)"
+  else bad "clickhouse: the B12 query set (the sums, the MergeTree count, exit 0)" "$(grep -a "^[0-9]\|^25\.\|exit_group\|killed" $O)"; fi
+  refute "$BAD" "clickhouse: no trap, no unknown syscall"
+  stopq ;;
 *) echo "  SKIP  '$w' (not yet)";;
 esac; done
 echo "DB TOTAL: PASS=$PASS FAIL=$FAIL"

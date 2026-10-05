@@ -46,13 +46,6 @@ pub fn fork_regs(f: &Frame) -> [u64; 15] {
     [0, f.rbx, f.pc, f.a3, f.a2, f.a1, f.rbp, f.a5, f.a6, f.a4, f.flags, f.r12, f.r13, f.r14, f.r15]
 }
 
-/// The callee-saved registers a syscall's frame carries, in the `fork_regs` order, for a
-/// context that moves to another core (`sched::migrate_current_to`).
-pub fn callee_saved(f: &Frame) -> [u64; 15] {
-    let mut gp = [0u64; 15];
-    gp[1] = f.rbx; gp[6] = f.rbp; gp[11] = f.r12; gp[12] = f.r13; gp[13] = f.r14; gp[14] = f.r15;
-    gp
-}
 
 /// Where a thread stood in user space when it left through a syscall — for a core dump
 /// (`sched::set_exit_uregs`: rip, rsp, rbp, rbx, r12..r15, rflags, the syscall number).

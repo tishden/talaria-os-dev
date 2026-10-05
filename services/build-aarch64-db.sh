@@ -8,8 +8,7 @@
 # tarballs. The plan's "arm64 builder" (a c7g with docker) is not needed for any of them.
 #
 #   services/build-aarch64-db.sh [pg] [mdb] [mongo] [jvm] [ch] [dyn]   (none = all)
-#     -> kernel/target/a64-services/ext2-{pg,mdb,mongo,jvm,jvm-short}.img, kernel/target/disk-a64-dyn.img
-#   (ch is not built yet — see its case below)
+#     -> kernel/target/a64-services/ext2-{pg,mdb,mongo,jvm,jvm-short,ch}.img, kernel/target/disk-a64-dyn.img
 #
 # The data directories. PostgreSQL's and MariaDB's are initialised by a program the host
 # cannot run (an aarch64 initdb / mariadb-install-db); they are the x86 builds' ones
@@ -23,7 +22,7 @@ REPO=$(cd "$HERE/.." && pwd)
 OUT=${OUT:-$REPO/kernel/target/a64-services}
 DL=$OUT/dl
 mkdir -p "$OUT" "$DL"
-WHAT=${*:-dyn pg mdb mongo jvm}
+WHAT=${*:-dyn pg mdb mongo jvm ch}
 ok=0; skipped=""
 
 # apkroot DIR RELEASE PKG...: the aarch64 packages with their closure unpacked into DIR, the
@@ -176,12 +175,26 @@ M
     rm -rf "$R"
   else skipped="$skipped jvm(the Temurin download, services/jvm/build-bench.sh)"; fi ;;
 
-ch) # ClickHouse's official arm64 binary is an ET_EXEC at 0x200000..0x1CA9_7310 (458 MB): there
-  # every process of this kernel has the identity map — the devices on `virt` (the GIC, the
-  # UART, virtio-mmio, the 32-bit PCIe window), RAM on a Graviton. x86 moved its kernel above
-  # the binary (services/clickhouse/build-kernel.sh); arm64 needs the kernel's view of
-  # devices and RAM off the low addresses (docs/ARM64-PLAN.md §10.13, "the direct map").
-  skipped="$skipped ch(the address-space layout, ARM64-PLAN §10.13)" ;;
+ch) # ClickHouse's official arm64 binary (x86's release, 25.8.33.6) under Ubuntu 22.04's arm64 glibc,
+  # with x86's config and queries (services/clickhouse/mkdisk.sh). It is an ET_EXEC at
+  # 0x200000..0x1CA9_7310, where the kernel used to keep GB0's devices by their identity; it
+  # reaches them through an alias now (docs/ARM64-PLAN.md §10.13) and GB0 is a process's.
+  V=25.8.33.6; T=$DL/ch-arm64.tgz
+  [ -s "$T" ] || curl -sfL -C - --retry 5 -o "$T" "https://packages.clickhouse.com/tgz/stable/clickhouse-common-static-$V-arm64.tgz" || rm -f "$T"
+  G=$DL/glibc-a64
+  if [ ! -f "$G/lib/aarch64-linux-gnu/libc.so.6" ]; then
+    mkdir -p "$G"
+    for f in pool/main/g/glibc/libc6_2.35-0ubuntu3.15_arm64.deb "pool/main/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04.3_arm64.deb"; do
+      (cd "$DL" && curl -sfO "http://ports.ubuntu.com/ubuntu-ports/$f" && cd "$G" && ar x "$DL/$(basename "$f")" && tar -xf data.tar.* && rm -f data.tar.* control.tar.* debian-binary)
+    done
+  fi
+  if [ -s "$T" ] && [ -f "$G/lib/aarch64-linux-gnu/libc.so.6" ]; then
+    X=$OUT/ch-x; rm -rf "$X"; mkdir -p "$X" "$OUT/tmp"
+    tar -C "$X" -xzf "$T" --wildcards '*/usr/bin/clickhouse'
+    TMPDIR=$OUT/tmp CH_BIN=$(ls "$X"/*/usr/bin/clickhouse) CH_GLIBC=$G CH_OUT=$OUT/ext2-ch.img \
+      sh "$HERE/clickhouse/mkdisk.sh" 1500M >/dev/null 2>&1 && ok=$((ok+1)) || echo "build-aarch64-db: ch did not pack"
+    rm -rf "$X" "$OUT/tmp"
+  else skipped="$skipped ch(the ClickHouse/glibc downloads)"; fi ;;
 *) echo "build-aarch64-db: unknown '$w' (dyn pg mdb mongo jvm ch)"; exit 1 ;;
 esac; done
 

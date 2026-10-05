@@ -247,6 +247,11 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
   assert 'mixwait: ALL OK'                                                    'mixwait: a parked mixed-set waiter is woken by a pipe, an eventfd and a signal at once, not by its 2 s ceiling'
   assert 'mixed-set waiters parked [1-9][0-9]* \(woken [1-9][0-9]*, by the ceiling 0\)' 'mixwait: the waiters really parked, and no park ended by the ceiling'
   assertnot "$BAD"                                                           'mixwait: no trap'
+  # A syscall that moves the thread to another core keeps every register (a ClickHouse thread
+  # moved by its name came back with x0..x18 and lr zero; the old kernel fails this on x1..x17, lr).
+  boot 60 "talaria.test=migregs"
+  assert 'migregs: sched_setaffinity -> 0, the core 0 -> [1-3]'               'migregs: sched_setaffinity moves the thread off the boot core'
+  assert 'migregs: ALL OK'                                                    'migregs: x1..x17 and lr survive the move (a syscall preserves all but x0)'
   # The ID registers from EL0: AT_HWCAP's CPUID bit promises Linux's emulation of `mrs` (OpenSSL
   # reads MIDR at load; Alpine's PostgreSQL died on it with a SIGILL before).
   boot 60 "talaria.test=idregs"

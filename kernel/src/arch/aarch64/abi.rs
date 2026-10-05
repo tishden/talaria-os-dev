@@ -14,7 +14,7 @@
 //! number on both architectures.
 
 /// (the arm64 number, the internal number), sorted by the arm64 number.
-const MAP: [(u16, u16); 160] = [
+const MAP: [(u16, u16); 163] = [
     ( 17,  79), // getcwd
     ( 19, 290), // eventfd2
     ( 20, 291), // epoll_create1
@@ -161,6 +161,9 @@ const MAP: [(u16, u16); 160] = [
     (230, 151), // mlockall
     (231, 152), // munlockall
     (233,  28), // madvise
+    (235, 237), // mbind
+    (236, 239), // get_mempolicy
+    (237, 238), // set_mempolicy
     (242, 288), // accept4
     (243, 299), // recvmmsg
     (260,  61), // wait4

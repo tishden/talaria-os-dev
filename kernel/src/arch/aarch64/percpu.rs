@@ -100,20 +100,26 @@ pub fn init_gs(cpu: usize) { init_tpidr(cpu); }
 pub fn pv_eoi_addr(_cpu: usize) -> u64 { 0 }
 /// The user-sp substitution on the way out to EL0 (+16), the current task (+32), the root
 /// table the core is switching to (+40, the x86 name kept), the stack being left (+56).
-#[inline] pub fn sig_newrsp() -> u64 { unsafe { (*block()).sig_newrsp } }
-#[inline] pub fn set_sig_newrsp(v: u64) { unsafe { (*block()).sig_newrsp = v; } }
-#[inline] pub fn set_cur_task(t: u64) { unsafe { (*block()).cur_task = t; } }
-#[inline] pub fn cur_task() -> u64 { unsafe { (*block()).cur_task } }
-#[inline] pub fn set_sched_cr3(v: u64) { unsafe { (*block()).sched_root = v; } }
-#[inline] pub fn set_off_stack(t: u64) { unsafe { (*block()).off_stack = t; } }
+///
+/// BEFORE `init` the register is 0 and a field is a read of physical 0x20 — which on `virt`
+/// answered from the flash through GB0's identity map and went unnoticed until GB0 stopped
+/// being mapped (the devices' alias, `mmu::DEV_SLOT`): the frame allocator's per-task count
+/// asked `cur_task` at the first allocation. Without a block a read is "none" and a write
+/// goes nowhere.
+#[inline] pub fn sig_newrsp() -> u64 { let b = block(); if b.is_null() { 0 } else { unsafe { (*b).sig_newrsp } } }
+#[inline] pub fn set_sig_newrsp(v: u64) { let b = block(); if !b.is_null() { unsafe { (*b).sig_newrsp = v; } } }
+#[inline] pub fn set_cur_task(t: u64) { let b = block(); if !b.is_null() { unsafe { (*b).cur_task = t; } } }
+#[inline] pub fn cur_task() -> u64 { let b = block(); if b.is_null() { u64::MAX } else { unsafe { (*b).cur_task } } }
+#[inline] pub fn set_sched_cr3(v: u64) { let b = block(); if !b.is_null() { unsafe { (*b).sched_root = v; } } }
+#[inline] pub fn set_off_stack(t: u64) { let b = block(); if !b.is_null() { unsafe { (*b).off_stack = t; } } }
 
 /// The kernel stack for an EL0 -> EL1 entry on the current core (+8).
 #[inline]
-pub fn set_kstack_top(v: u64) { unsafe { (*block()).kstack_top = v; } }
+pub fn set_kstack_top(v: u64) { let b = block(); if !b.is_null() { unsafe { (*b).kstack_top = v; } } }
 #[inline]
-pub fn kstack_top() -> u64 { unsafe { (*block()).kstack_top } }
+pub fn kstack_top() -> u64 { let b = block(); if b.is_null() { 0 } else { unsafe { (*b).kstack_top } } }
 
 /// The FP/SIMD area the current entry saved (0 — none: a kernel context that never entered).
-#[inline] pub fn fp_area() -> u64 { unsafe { (*block()).fp_area } }
+#[inline] pub fn fp_area() -> u64 { let b = block(); if b.is_null() { 0 } else { unsafe { (*b).fp_area } } }
 /// The image the next entry into a frame loads (`switch::fpu_restore`).
 #[inline] pub fn set_fp_pending(a: u64) { let b = block(); if !b.is_null() { unsafe { (*b).fp_pending = a; } } }

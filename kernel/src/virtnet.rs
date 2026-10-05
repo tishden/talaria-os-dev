@@ -170,7 +170,7 @@ fn find_mmio(inst: usize) -> Option<(usize, usize)> {
 fn probe(_: Option<&PciDev>, inst: usize) -> Option<&'static mut dyn NetDev> {
     if inst >= NSLOT { return None; }
     let (a, sz) = find_mmio(inst)?;
-    crate::println!("virtio-net: the instance {} — the window {:#x} ({} B)", inst, a, sz);
+    crate::println!("virtio-net: the instance {} — the window {:#x} ({} B)", inst, crate::arch::mmio_pa(a as u64), sz);
     let header = NonNull::new(a as *mut VirtIOHeader)?;
     let transport = unsafe { MmioTransport::new(header, sz) }.ok()?;
     let dev: Net = VirtIONetRaw::new(SomeTransport::from(transport)).ok()?;
@@ -257,7 +257,7 @@ pub fn mmio_window_from_cmdline(cmdline: &str) -> Option<(usize, usize)> {
         let (size_s, rest) = rest.split_once('@')?;
         let (addr_s, _irq) = rest.split_once(':')?;
         let size = parse_size(size_s)?;
-        let addr = parse_num(addr_s)?;
+        let addr = crate::arch::mmio_va(parse_num(addr_s)? as u64) as usize; // the kernel's pointer (arm64: the devices' alias)
         let header = NonNull::new(addr as *mut VirtIOHeader)?;
         if let Ok(t) = unsafe { MmioTransport::new(header, size) } {
             let net = t.device_type() == DeviceType::Network;

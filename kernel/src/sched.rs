@@ -2109,7 +2109,45 @@ unsafe fn free_kstack(base: u64, pages: u64) {
         let c = core::ptr::read_volatile(core::ptr::addr_of!(CR3[t]));
         if c != 0 { crate::paging::unguard_in(c & !0xFFF, base); }
     }
-    crate::mem::free_contig(base, pages);
+    kstack_quarantine(base, pages);
+}
+
+// ── THE KERNEL STACKS' QUARANTINE: a freed stack is poisoned and checked before it is reused ──
+//
+// A core that is still on a kernel stack after the slot was given away (an interrupt frame
+// pushed, the scheduler's call chain) writes into frames the allocator has handed to somebody
+// else: a fresh thread's first frame ("AT THE ADDRESS RSP[t] THERE IS NO FRAME" in futexlat), a
+// user page. The writes are invisible where they land. Here a freed stack is filled with a
+// pattern and held back for KQ_N frees; when it leaves, every word that is not the pattern is
+// a write after the free — counted and said with its offset and value. `talaria.kq=1`.
+const KQ_N: usize = 16;
+const KQ_POISON: u64 = 0xC0DE_DEAD_5EED_F00D;
+static KQ: [core::sync::atomic::AtomicU64; KQ_N] = [const { core::sync::atomic::AtomicU64::new(0) }; KQ_N];
+static KQ_NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static KQ_HITS: AtomicU64 = AtomicU64::new(0);
+pub static KQ_ON: AtomicBool = AtomicBool::new(false);
+unsafe fn kstack_quarantine(base: u64, pages: u64) {
+    if !KQ_ON.load(Ordering::Relaxed) || pages > 0xFFF { crate::mem::free_contig(base, pages); return; }
+    let words = (pages * 4096 / 8) as usize;
+    for k in 0..words { core::ptr::write_volatile((base as *mut u64).add(k), KQ_POISON); }
+    let slot = KQ_NEXT.fetch_add(1, Ordering::Relaxed) % KQ_N;
+    let old = KQ[slot].swap(base | pages, Ordering::AcqRel); // base is page-aligned: the low 12 bits carry the page count
+    if old == 0 { return; }
+    let (ob, op) = (old & !0xFFF, old & 0xFFF);
+    let ow = (op * 4096 / 8) as usize;
+    let mut first = usize::MAX; let mut count = 0usize; let mut sample = [(0usize, 0u64); 4];
+    for k in 0..ow {
+        let v = core::ptr::read_volatile((ob as *const u64).add(k));
+        if v != KQ_POISON { if count < 4 { sample[count] = (k * 8, v); } if first == usize::MAX { first = k; } count += 1; }
+    }
+    if count != 0 {
+        let n = KQ_HITS.fetch_add(1, Ordering::Relaxed);
+        if n < 8 {
+            crate::println!("sched: A KERNEL STACK WRITTEN AFTER IT WAS FREED: {:#x}..{:#x}, {} words, the first at +{:#x}; {:x?}",
+                ob, ob + op * 4096, count, first * 8, &sample[..count.min(4)]);
+        }
+    }
+    crate::mem::free_contig(ob, op);
 }
 
 /// The pages of a kernel stack per task. It was 4 (16 KB) — that is too little for large

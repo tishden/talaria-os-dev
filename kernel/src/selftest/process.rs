@@ -222,6 +222,14 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             println!("talaria: the idregs test, {} bytes (the ID registers from EL0)", IR.len());
             unsafe { crate::user::run_processes(&[IR]); }
         }
+        // A syscall that moves the thread to another core (`sched_setaffinity` from the boot
+        // core) returns with EVERY register the thread had, not only the callee-saved ones.
+        "migregs" => {
+            crate::smp::start_from_cmdline(cmdline);
+            static MR: &[u8] = user_elf!("migregs");
+            println!("talaria: the migregs test, {} bytes (the registers across a move to another core)", MR.len());
+            unsafe { crate::user::run_threaded(MR); }
+        }
         // Two waiters in epoll_wait on sets that are not only sockets, one of them parked by
         // `talaria.netmix=`: a pipe's write, an eventfd's and a signal must wake the parked one
         // at once, not at the park's ceiling (`netsys::mix_kick`).

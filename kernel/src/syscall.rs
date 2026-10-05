@@ -1417,7 +1417,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 crate::sched::set_comm(t, &name[..n]);
                 if let Some(cpu) = crate::affinity::on_set_name(t, &name[..n]) {
                     if cpu != crate::percpu::cpu_id() && crate::sched::sched_cpu(cpu) {
-                        let gp = crate::arch::signal::callee_saved(f);
+                        // THE WHOLE REGISTER FILE, the return value 0 — see sched_setaffinity below.
+                        let gp = crate::arch::signal::fork_regs(raw); // the REAL frame: f is the dispatcher's translated copy
                         // SAFETY: S3 — `sched::migrate_current_to`'s own contract; here it holds:
                         // the current task, on its kernel stack, with its CR3 active.
                         unsafe { crate::sched::migrate_current_to(cpu, f.pc, f.usp, f.flags, gp, fpu_area(raw)); }
@@ -1983,13 +1984,32 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             if mask & (1u64 << cur_cpu) != 0 { return 0; } // it is already where it was asked to be
             let want = (mask & crate::percpu::ONLINE.load(Ordering::SeqCst)).trailing_zeros() as usize;
             if cur_cpu != 0 || want == 0 { return 0; }     // a move only from the BSP (a PoC)
-            // The context of the return from THIS syscall (rax=0) moves onto the AP; the callee-saved ones come from the Frame.
-            let gp = crate::arch::signal::callee_saved(f);
+            // The context of the return from THIS syscall (the return value 0) moves onto the AP
+            // WITH THE WHOLE REGISTER FILE. A syscall preserves every register but the return
+            // value (x86 also rcx/r11, which sysret takes), and compiled code relies on it: an
+            // inline `svc` keeps its temporaries in x9..x18 and lr across the call. Only the
+            // callee-saved ones were carried, and a ClickHouse thread moved by its name
+            // (`prctl(PR_SET_NAME)` above) came back with x0..x18 and lr zero and returned to
+            // address 0 — arm64, 6 runs of 6 with the stealing push off; x86 lost rdi..r10 the same way.
+            let gp = crate::arch::signal::fork_regs(raw); // the REAL frame: f is the dispatcher's translated copy
             // IMPORTANT: fpu_area comes from the REAL frame (raw) rather than from the copy g (dispatch
             // passes a copy for the fd translation; the address arithmetic over it is garbage)
             // SAFETY: S3 — `sched::migrate_current_to`'s own contract; here it holds: the current
             // task, on its kernel stack, with its CR3 active.
             unsafe { crate::sched::migrate_current_to(want, f.pc, f.usp, f.flags, gp, fpu_area(raw)); }
+        }
+        // NUMA policies: a process's memory comes from one node (`affinity::my_node`), so a
+        // policy is accepted and changes nothing, and the policy reported is the default. arm64's
+        // ClickHouse asks `get_mempolicy` at start-up (an ENOSYS it tolerated, an unknown syscall
+        // the gates refuse).
+        237 | 238 => 0, // mbind, set_mempolicy
+        239 => { // get_mempolicy(mode*, nodemask*, maxnode, addr, flags)
+            // SAFETY: S1 — the pointer arguments were validated by `uaccess::gate` (4 and 8 bytes).
+            unsafe {
+                if f.a1 != 0 { core::ptr::write_unaligned(f.a1 as *mut i32, 0); } // MPOL_DEFAULT
+                if f.a2 != 0 && f.a3 != 0 { core::ptr::write_bytes(f.a2 as *mut u8, 0, (f.a3.div_ceil(8) as usize).min(8)); }
+            }
+            0
         }
         204 => { // sched_getaffinity(pid, len, mask*) — the cores where the thread IS ALLOWED to live
             // This is what the workload counts nproc/hardware_concurrency by and starts

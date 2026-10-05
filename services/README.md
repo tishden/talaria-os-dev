@@ -45,8 +45,11 @@ little-endian with the same alignment; `pg_control` checks it). `kernel/test-aar
 is the arm64 twin of `validate.sh` B10-B11: each server from its volume in
 `talaria.mode=proc`, answered by a Python client (`postgresql/pgprobe.py`,
 `mariadb/mysqlprobe.py`, `mongodb/mongoprobe.py` — no x86 binary, so the arm64 stand runs it
-too). ClickHouse is not there yet: its arm64 ET_EXEC wants the low 458 MB of the address
-space, where this kernel keeps its identity map (`docs/ARM64-PLAN.md` §10.13).
+too). ClickHouse is the official arm64 binary under Ubuntu 22.04's arm64 glibc (the `.deb`s
+unpacked, x86's config and queries through `clickhouse/mkdisk.sh`'s `CH_BIN`/`CH_GLIBC`/`CH_OUT`);
+its ET_EXEC takes the low 458 MB of the address space, which the kernel frees on `virt` by
+reaching its devices through an alias (`docs/ARM64-PLAN.md` §10.13; a Graviton, where that
+gigabyte is RAM, is not done).
 
 ## Results
 

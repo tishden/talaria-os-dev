@@ -836,7 +836,7 @@ pub fn probe_at(d: &crate::pci::PciDev) -> Option<Ena> {
     // the device. On a c6i.metal the probe died on a read of the registers, and by the log it was
     // impossible to understand even whether it is the right function and what its BAR is.
     crate::println!("ena: the device {:02x}:{:02x}.{} BAR0={:#x} ({} KB)",
-        d.bus, d.dev, d.func, bar0, sz0 / 1024);
+        d.bus, d.dev, d.func, crate::arch::mmio_pa(bar0), sz0 / 1024);
     if bar0 == 0 { crate::println!("ena: BAR0 is unavailable"); return None; }
 
     // the pages for the queues/buffers (identity: phys == virt)
@@ -898,7 +898,7 @@ pub fn probe_at(d: &crate::pci::PciDev) -> Option<Ena> {
         return None;
     }
     crate::println!("ena: {:02x}:{:02x}.{} BAR0={:#x} version={}.{} controller={}.{}.{} caps={:#x}",
-        d.bus, d.dev, d.func, bar0, (ver >> 8) & 0xFF, ver & 0xFF,
+        d.bus, d.dev, d.func, crate::arch::mmio_pa(bar0), (ver >> 8) & 0xFF, ver & 0xFF,
         (cver >> 16) & 0xFF, (cver >> 8) & 0xFF, cver & 0xFF, caps);
 
     // the controller's reset (like ena_com_dev_reset)

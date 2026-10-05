@@ -173,6 +173,7 @@ pub fn sig(nr: u64) -> &'static [Ptr] {
         228 | 229 => t![wr_opt(2, Fixed(TIMESPEC))],                   // clock_gettime, clock_getres
         230 => t![rd(3, Fixed(TIMESPEC)), wr_opt(4, Fixed(TIMESPEC))], // clock_nanosleep
         232 => t![wr(2, ArgMul(3, EPOLL_EVENT))],                      // epoll_wait
+        239 => t![wr_opt(1, Fixed(4)), wr_opt(2, Fixed(8))],           // get_mempolicy (the mode; the first word of the mask)
         233 => t![rd_opt(4, Fixed(EPOLL_EVENT))],                      // epoll_ctl (NULL for EPOLL_CTL_DEL)
         235 => t![rd(1, Str), rd_opt(2, Fixed(2 * TIMEVAL))],          // utimes
         257 | 258 | 260 | 263 | 268 | 269 | 439 => t![rd(2, Str)],     // openat mkdirat fchownat unlinkat fchmodat faccessat faccessat2

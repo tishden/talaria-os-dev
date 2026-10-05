@@ -94,7 +94,8 @@ static DEVS: [AtomicU64; MAX_ITS_DEV] = [const { AtomicU64::new(0) }; MAX_ITS_DE
 
 pub fn present() -> bool { READY.load(Ordering::Acquire) }
 /// Where a device must write its event number.
-pub fn translater() -> u64 { BASE.load(Ordering::Relaxed) + GITS_TRANSLATER }
+/// `BASE` is the kernel's pointer (the devices' alias); the device is told the physical one.
+pub fn translater() -> u64 { super::mmu::mmio_pa(BASE.load(Ordering::Relaxed)) + GITS_TRANSLATER }
 
 fn lock() { while LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() { core::hint::spin_loop(); } }
 fn unlock() { LOCK.store(false, Ordering::Release); }
@@ -140,7 +141,8 @@ unsafe fn drain() -> bool {
 
 /// What `MAPC`/`SYNC` name a redistributor by: its address, or its processor number.
 fn rdbase(frame: u64, typer: u64) -> u64 {
-    if PTA.load(Ordering::Relaxed) { frame & !0xFFFF } else { ((typer >> 8) & 0xFFFF) << 16 }
+    // the frame is the kernel's pointer; the ITS is told the physical address
+    if PTA.load(Ordering::Relaxed) { super::mmu::mmio_pa(frame) & !0xFFFF } else { ((typer >> 8) & 0xFFFF) << 16 }
 }
 fn rdbase_of_cpu(cpu: usize) -> Option<u64> {
     let mpidr = super::smp::mpidr_of(cpu)?;
@@ -184,6 +186,8 @@ pub unsafe fn enable_lpis_here() -> bool {
 pub unsafe fn init(base: u64) -> bool {
     if base == 0 || READY.load(Ordering::Relaxed) { return READY.load(Ordering::Relaxed); }
     if !gic::lpis_supported() { crate::println!("its: the distributor has no LPIs — MSI-X is unavailable"); return false; }
+    let pa = base;
+    let base = super::mmu::mmio_va(pa);
     BASE.store(base, Ordering::Relaxed);
     let typer = r64(base + GITS_TYPER);
     ITT_ESZ.store(((typer >> 4) & 0xF) + 1, Ordering::Relaxed);
@@ -224,7 +228,7 @@ pub unsafe fn init(base: u64) -> bool {
     let ok = drain();
     READY.store(ok, Ordering::Release);
     crate::println!("its: {:#x} is up: device ids of {} bits, a translation entry of {} B, LPIs {}..{} ({})",
-        base, DEV_BITS.load(Ordering::Relaxed), ITT_ESZ.load(Ordering::Relaxed), LPI_BASE, LPI_BASE as usize + MAX_LPI - 1,
+        pa, DEV_BITS.load(Ordering::Relaxed), ITT_ESZ.load(Ordering::Relaxed), LPI_BASE, LPI_BASE as usize + MAX_LPI - 1,
         if ok { "the commands were taken" } else { "THE COMMAND QUEUE STALLED" });
     ok
 }

@@ -34,6 +34,9 @@ pub const VIRTIO_MMIO_SLOTS: usize = 32;
 pub fn virtio_mmio_slot(i: usize) -> Option<(usize, usize)> {
     if i < VIRTIO_MMIO_SLOTS { Some((0xFEB0_0000 + i * 512, 512)) } else { None }
 }
+/// The kernel's pointer to a device register: x86 reaches every device through its identity.
+#[inline] pub fn mmio_va(pa: u64) -> u64 { pa }
+#[inline] pub fn mmio_pa(va: u64) -> u64 { va }
 /// The GSI of the virtio-mmio window in slot `i`. The microvm puts the virtio lines at the
 /// TOP of the GSI space: the highest occupied slot sits on the highest line and the rest are
 /// counted down from it (measured — see `netsys::netirq_setup`). `None`: not derivable.

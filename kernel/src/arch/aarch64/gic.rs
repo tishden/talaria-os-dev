@@ -59,7 +59,9 @@ pub const SPURIOUS: u32 = 1023;
 #[inline] unsafe fn w64(a: u64, v: u64) { core::ptr::write_volatile(a as *mut u64, v) }
 
 /// Where the frames are (from the tree or the MADT).
+/// The frames are kept as the kernel's pointers (`mmu::mmio_va`: the devices' alias for GB0).
 pub fn set_frames(gicd: u64, gicr: u64, gicr_size: u64) {
+    let (gicd, gicr) = (super::mmu::mmio_va(gicd), super::mmu::mmio_va(gicr));
     GICD.store(gicd, Ordering::Relaxed);
     GICR.store(gicr, Ordering::Relaxed);
     GICR_END.store(gicr + gicr_size, Ordering::Relaxed);
