@@ -243,6 +243,8 @@ fn ip_ok(v: &str) -> bool {
     a.split('.').filter(|o| o.parse::<u8>().is_ok()).count() == 4 && a.split('.').count() == 4
         && p.is_none_or(|p| p.parse::<u8>().is_ok_and(|n| n <= 32))
 }
+/// `talaria.ntp=aws|<a.b.c.d>[,<poll s>]` (`ntp::parse_knob`).
+fn ntp_ok(v: &str) -> bool { crate::ntp::parse_knob(v).is_some() }
 fn ipaddr_ok(v: &str) -> bool { v != "dhcp" && ip_ok(v) }
 /// `talaria.prof=1|<hz>`.
 fn prof_ok(v: &str) -> bool { is_num(v) }
@@ -327,6 +329,7 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.noshoot", Kind::Flag, "switch TLB shootdowns to neighbours off (diagnostics)"),
     once("talaria.nosteal", Kind::Flag, "switch work stealing off"),
     once("talaria.nowakebal", Kind::Flag, "switch placement on wakeup off"),
+    once("talaria.ntp", Kind::Check(ntp_ok), "the wall clock's reference: SNTP to aws (169.254.169.123) or a.b.c.d, optionally ,<poll s> (default 16)"),
     once("talaria.pci", Kind::Flag, "bring PCI up (ECAM/ivshmem)"),
     many("talaria.pin", Kind::Text, "a thread placement rule"),
     once("talaria.pmunarrow", Kind::Flag, "arm64: the PMU's counters at 32 bits, widened by the reader (a test of the no-CHAIN path)"),

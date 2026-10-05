@@ -600,6 +600,7 @@ struct Iface {
     dh: Option<SocketHandle>,   // this interface's DHCP client
     ke: Option<SocketHandle>,   // §7.4: the kernel echo
     ks: Option<SocketHandle>,   // A3: the sink
+    nt: Option<SocketHandle>,   // the wall clock's SNTP client (`talaria.ntp=`, the first interface)
     info: IfInfo,
 }
 static mut IFS: [Option<Iface>; MAXIF] = [None, None, None, None];
@@ -673,6 +674,14 @@ static mut CFG_KTS: bool = false;
 // flow to an unoccupied port makes the stack build an ICMP "the port is unreachable" for EVERY packet,
 // and rxbench would measure the speed of those answers rather than of the receive path.
 static mut CFG_KSINK: u16 = 0;
+// talaria.ntp=aws|a.b.c.d[,poll s]: the wall clock's reference over the network (`ntp.rs`).
+static mut CFG_NTP: Option<([u8; 4], u32)> = None;
+/// The SNTP client's poll: the burst in flight, when the next one is due, what it fed.
+/// `boot`: the boot is still waiting for the first sample — it sets the base instead of stepping.
+struct NtpState { b: crate::ntp::Burst, next: u64, last_tx: u64, burst_t0: u64, fed: u32, silent: u32, boot: bool }
+static mut NTP: NtpState = NtpState { b: crate::ntp::Burst::new(), next: 0, last_tx: 0, burst_t0: 0, fed: 0, silent: 0, boot: false };
+/// The samples fed to the servo so far (the boot's wait and the gate read it).
+pub fn ntp_fed() -> u32 { unsafe { NTP.fed } }
 // §7.5: when idle, SLEEP on the receive ring (MONITOR/MWAIT) rather than spin a poll().
 static mut CFG_NETIDLE: bool = false;
 pub fn configure(ip: [u8; 4], prefix: u8, gw: [u8; 4], dns: [u8; 4]) {
@@ -728,6 +737,12 @@ pub fn configure_from_cmdline(cmdline: &str) {
         else if let Some(v) = tok.strip_prefix("talaria.kecho=") { if let Ok(p) = v.parse::<u16>() { unsafe { CFG_KECHO = p; } } }
         else if let Some(v) = tok.strip_prefix("talaria.ksink=") { if let Ok(p) = v.parse::<u16>() { unsafe { CFG_KSINK = p; } } }
         else if tok == "talaria.kts=1" { unsafe { CFG_KTS = true; } }
+        else if let Some(v) = tok.strip_prefix("talaria.ntp=") {
+            match crate::ntp::parse_knob(v) {
+                Some(c) => unsafe { CFG_NTP = Some(c); },
+                None => crate::println!("netsys: talaria.ntp={} is not aws or a.b.c.d[,poll s] — no reference", v),
+            }
+        }
         else if tok == "talaria.netidle=1" { unsafe { CFG_NETIDLE = true; } }
         else if tok == "talaria.netsolo=1" {
             // A PASS OF THE STACK IS ONE PER MACHINE: the non-polling waiters park.
@@ -789,7 +804,7 @@ pub fn add_iface(dev: &'static mut dyn crate::netdev::NetDev, mac: [u8; 6], drv:
             prefix: if first && !CFG_DHCP { CFG_PREFIX } else { 0 },
             gw: if first && !CFG_DHCP { CFG_GW } else { [0; 4] },
         };
-        IFS[idx] = Some(Iface { dev: sdev, iface, sockets, dh: None, ke: None, ks: None, info });
+        IFS[idx] = Some(Iface { dev: sdev, iface, sockets, dh: None, ke: None, ks: None, nt: None, info });
         NIF = idx + 1;
         // THE SECOND CARD CANCELS THE WATCHING OF THE RING: the silence of the first says nothing
         // about the second, while a pass of the stack goes over ALL the interfaces at once.
@@ -923,6 +938,19 @@ pub fn init_named(dev: &'static mut dyn crate::netdev::NetDev, mac: [u8; 6], drv
             crate::println!("netsys: the sink UDP :{} (accept and throw away — a measurement of the receive path)", sp);
         }
     }
+    // The wall clock's SNTP client occupies THE THIRD-FROM-LAST UDP slot (the sink's and the
+    // echo's are the last two); any free local port.
+    if let Some((srv, iv)) = unsafe { CFG_NTP } {
+        let f = ifr(idx);
+        let h = f.sockets.add(new_udp(NU - 3));
+        if NU >= 3 && f.sockets.get_mut::<udp::Socket>(h).bind(10123).is_ok() {
+            uu()[NU - 3] = Udp { used: true, bound: true, ifx: idx as u8, port: 10123, h: Some(h), ..UDP0 };
+            f.nt = Some(h);
+            crate::wallclock::set_net_ref();
+            crate::println!("netsys: the wall clock's reference is SNTP to {}.{}.{}.{} every {} s (a burst of {}, the shortest round trip is the sample)",
+                srv[0], srv[1], srv[2], srv[3], iv, crate::ntp::BURST);
+        }
+    }
     if unsafe { CFG_DHCP } {
         // A synchronous wait for the lease (DISCOVER→ACK; with slirp/a VPC it is single ms,
         // the DISCOVER is repeated once every 2 s, see `start_dhcp`). On the stand we wait 8 s
@@ -961,6 +989,15 @@ pub fn init_named(dev: &'static mut dyn crate::netdev::NetDev, mac: [u8; 6], drv
         ip[0], ip[1], ip[2], ip[3], pfx, gw[0], gw[1], gw[2], gw[3],
         dns[0], dns[1], dns[2], dns[3], NS, NU, if unsafe { CFG_DHCP } { " (dhcp)" } else { "" });
     if unsafe { CFG_IMDS } { crate::imds::fetch(); } // talaria.imds=1 (the EC2 metadata, §3.3)
+    // The first sample before the workload starts: its first timestamps are the reference's,
+    // not the firmware's whole seconds. A bounded wait — no answer is said and the poll goes on.
+    if ifr(idx).nt.is_some() {
+        let t0 = tsc::rdtsc();
+        unsafe { NTP.boot = true; }
+        while ntp_fed() == 0 && tsc::rdtsc().wrapping_sub(t0) < 3 * hz { poll(); core::hint::spin_loop(); }
+        unsafe { NTP.boot = false; }
+        if ntp_fed() == 0 { crate::println!("netsys: ntp: no sample in 3 s — the clock keeps its base, the poll goes on"); }
+    }
 }
 pub fn ready() -> bool { unsafe { NIF > 0 } }
 /// §0.1: take the stack down after the early phase of the user-data, PRESERVING the received lease as
@@ -1470,6 +1507,7 @@ fn poll_gated(force: bool) {
         f.dev.flush(); // §7.2: one call to the device for the whole pass of the stack
         if t0 != 0 { crate::netprof::mark_poll(tsc::rdtsc().wrapping_sub(t0)); } // §7.1
         if f.dh.is_some() { dhcp_process(idx); }
+        if f.nt.is_some() { ntp_process(idx, ts); }
     }
     if crate::l1::rx_seen() != rx0 {
         if stale { RING_LIED.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
@@ -2008,6 +2046,78 @@ pub static DELIV_SAMECPU: core::sync::atomic::AtomicU64 = core::sync::atomic::At
 pub static DELIV_OTHERCPU: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// A DHCP client's event (a lease/a renewal/a loss) ON THE INTERFACE idx: apply
 /// the address/gateway/DNS (musl's resolver reads /etc/resolv.conf — regenerate it).
+/// The SNTP client's step in the stack's pass: take the replies, finish a burst into one sample
+/// for the servo, send the burst's next query when it is due. In the pass, under the stack's
+/// lock, like the DHCP client — so it runs wherever the stack is driven, workload or idle.
+fn ntp_process(idx: usize, ts: smoltcp::time::Instant) {
+    use crate::ntp;
+    let f = match ifopt(idx) { Some(f) => f, None => return };
+    let h = match f.nt { Some(h) => h, None => return };
+    let (srv, iv) = match unsafe { CFG_NTP } { Some(c) => c, None => return };
+    let hz = unsafe { HZ };
+    let st = unsafe { &mut *addr_of_mut!(NTP) };
+    let mut buf = [0u8; 64];
+    loop {
+        let (len, from) = match f.sockets.get_mut::<udp::Socket>(h).recv() {
+            Ok((d, m)) => { let l = d.len().min(buf.len()); buf[..l].copy_from_slice(&d[..l]); (l, m.endpoint) }
+            Err(_) => break,
+        };
+        let t4 = tsc::rdtsc();
+        if ep_parts(Some(from)).0 != srv { continue; }
+        // A reply to a query of THIS burst only: a late one of the previous burst is stale.
+        if let Some(s) = ntp::parse(&buf[..len]).filter(|r| r.cookie >= st.burst_t0 && st.b.sent > 0).and_then(|r| ntp::sample(&r, t4, hz)) {
+            st.b.add(s);
+        }
+    }
+    let now = tsc::rdtsc();
+    if st.b.sent == 0 && now < st.next { return; }
+    let gap = now.wrapping_sub(st.last_tx);
+    let done = st.b.got >= ntp::BURST || (st.b.sent >= ntp::BURST && gap > hz / 2);
+    if done {
+        let iv_ns = iv as u64 * 1_000_000_000;
+        match st.b.best {
+            Some(s) if st.fed == 0 && st.boot => {
+                if let Some(err) = crate::wallclock::set_base(s.ref_ns, s.at_tsc, crate::wallclock::SRC_NTP, iv_ns) {
+                    st.fed = 1; st.silent = 0;
+                    crate::println!("ntp: sample 1 from {}.{}.{}.{}: the error {:+} us, the round trip {} us (the best of {}/{}) — the boot's base is set onto it, not stepped",
+                        srv[0], srv[1], srv[2], srv[3], err / 1000, s.rtt_ns / 1000, st.b.got, st.b.sent);
+                }
+            }
+            Some(s) if crate::wallclock::feed_ref_iv(s.ref_ns, s.at_tsc, crate::wallclock::SRC_NTP, iv_ns) => {
+                st.fed += 1; st.silent = 0;
+                let (ppm, err, _, steps, back, _) = crate::tsc::wall_stats();
+                // The first samples and every step are said; the steady state is `stat`'s.
+                if st.fed <= 8 || (steps > 0 && err.unsigned_abs() > crate::clock::STEP_NS as u64) {
+                    crate::println!("ntp: sample {} from {}.{}.{}.{}: the error {:+} us, the round trip {} us (the best of {}/{}), the servo {:+} ppm, steps {} back {}",
+                        st.fed, srv[0], srv[1], srv[2], srv[3], err / 1000, s.rtt_ns / 1000, st.b.got, st.b.sent, ppm, steps, back);
+                }
+            }
+            Some(_) => {}
+            None => {
+                st.silent += 1;
+                if st.silent == 1 || st.silent % 64 == 0 {
+                    crate::println!("ntp: no answer from {}.{}.{}.{} ({} poll(s) in a row)", srv[0], srv[1], srv[2], srv[3], st.silent);
+                }
+            }
+        }
+        st.b = ntp::Burst::new();
+        st.next = now + iv as u64 * hz;
+        return;
+    }
+    // The burst's next query: after the previous one's reply, or 200 ms without it.
+    if st.b.sent < ntp::BURST && (st.b.sent == 0 || st.b.got >= st.b.sent || gap > hz / 5) {
+        let t1 = tsc::rdtsc();
+        if st.b.sent == 0 { st.burst_t0 = t1; }
+        let q = ntp::request(t1);
+        let dst = IpEndpoint::new(IpAddress::v4(srv[0], srv[1], srv[2], srv[3]), 123);
+        if f.sockets.get_mut::<udp::Socket>(h).send_slice(&q, dst).is_ok() {
+            st.b.sent += 1; st.last_tx = t1;
+            f.iface.poll(ts, &mut f.dev, &mut f.sockets); // out in this same pass
+            f.dev.flush();
+        }
+    }
+}
+
 fn dhcp_process(idx: usize) {
     let f = match ifopt(idx) { Some(f) => f, None => return };
     let dh = match f.dh { Some(h) => h, None => return };

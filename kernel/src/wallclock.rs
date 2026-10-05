@@ -48,10 +48,15 @@ static PUB_HZ: AtomicU64 = AtomicU64::new(0);
 pub const SRC_NONE: u8 = 0;
 pub const SRC_KVM: u8 = 1;
 pub const SRC_PHC: u8 = 2;
+pub const SRC_NTP: u8 = 3;
 static SRC: AtomicU8 = AtomicU8::new(SRC_NONE);
 static SYNC_IV_NS: AtomicU64 = AtomicU64::new(1_000_000_000);
 static LAST_SYNC_TSC: AtomicU64 = AtomicU64::new(0);
 static FEEDS: AtomicU32 = AtomicU32::new(0);
+/// A network reference (`talaria.ntp=`) owns the servo: the tick's kvmclock feed stands aside,
+/// two references pulling one servo would make it follow whichever spoke last.
+static NET_REF: AtomicBool = AtomicBool::new(false);
+pub fn set_net_ref() { NET_REF.store(true, Ordering::Relaxed); }
 
 /// The discipline's interval in milliseconds; 0 — switch it off.
 pub fn set_sync_ms(ms: u64) { SYNC_IV_NS.store(ms.saturating_mul(1_000_000), Ordering::Relaxed); }
@@ -60,7 +65,7 @@ pub fn set_sync_ms(ms: u64) { SYNC_IV_NS.store(ms.saturating_mul(1_000_000), Ord
 pub fn have_ref() -> bool { REF_OK.load(Ordering::Relaxed) }
 pub fn source() -> u8 { SRC.load(Ordering::Relaxed) }
 pub fn source_name() -> &'static str {
-    match source() { SRC_KVM => "kvmclock", SRC_PHC => "phc(ena)", _ => "there is no reference" }
+    match source() { SRC_KVM => "kvmclock", SRC_PHC => "phc(ena)", SRC_NTP => "ntp", _ => "there is no reference" }
 }
 /// A snapshot of the discipline: (the correction in ppm, the error in ns, adjustments, steps, steps backwards, samples).
 pub fn wall_stats() -> (i32, i64, u32, u32, u32, u32) {
@@ -123,9 +128,12 @@ pub fn publish_vdso_now() {
 
 /// A sample of the external clock. Source-agnostic: kvmclock comes from the tick,
 /// the ENA's PHC — from a path where a blocking read of the device is admissible.
-pub fn feed_ref(ref_ns: u64, at_tsc: u64, src: u8) {
-    if WRITING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() { return; }
-    let iv = SYNC_IV_NS.load(Ordering::Relaxed);
+pub fn feed_ref(ref_ns: u64, at_tsc: u64, src: u8) { let _ = feed_ref_iv(ref_ns, at_tsc, src, SYNC_IV_NS.load(Ordering::Relaxed)); }
+/// The same with the source's own interval to its next sample (the error is absorbed over it):
+/// a network reference polls every tens of seconds, not every tick's second. `false` — another
+/// writer held the state and the sample was skipped.
+pub fn feed_ref_iv(ref_ns: u64, at_tsc: u64, src: u8, iv: u64) -> bool {
+    if WRITING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() { return false; }
     unsafe {
         let p = core::ptr::addr_of_mut!(SERVO);
         (*p).feed(ref_ns, at_tsc, iv);
@@ -134,6 +142,27 @@ pub fn feed_ref(ref_ns: u64, at_tsc: u64, src: u8) {
     SRC.store(src, Ordering::Relaxed);
     FEEDS.fetch_add(1, Ordering::Relaxed);
     WRITING.store(false, Ordering::Release);
+    true
+}
+
+/// The first sample of a reference that arrived BEFORE the workload: the base is moved onto it
+/// rather than stepped (the firmware's whole seconds were a guess, not a time anyone has read
+/// yet), and the frequency estimate starts from it. Returns the error the base had, ns; `None`
+/// — another writer held the state.
+pub fn set_base(ref_ns: u64, at_tsc: u64, src: u8, iv: u64) -> Option<i64> {
+    if WRITING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() { return None; }
+    let err;
+    unsafe {
+        let p = core::ptr::addr_of_mut!(SERVO);
+        err = ref_ns as i64 - (*p).ns_at(at_tsc) as i64;
+        (*p).reset(at_tsc, ref_ns);
+        (*p).feed(ref_ns, at_tsc, iv);
+        publish((*p).base_tsc, (*p).base_ns, (*p).hz);
+    }
+    SRC.store(src, Ordering::Relaxed);
+    FEEDS.fetch_add(1, Ordering::Relaxed);
+    WRITING.store(false, Ordering::Release);
+    Some(err)
 }
 
 /// The discipline from the timer's tick. THE CHEAP path: the check of the interval is an rdtsc and
@@ -143,7 +172,7 @@ pub fn feed_ref(ref_ns: u64, at_tsc: u64, src: u8) {
 /// a doorbell into the device and a poll of the answer.
 pub fn wall_tick() {
     let iv = SYNC_IV_NS.load(Ordering::Relaxed);
-    if iv == 0 || !REF_OK.load(Ordering::Relaxed) { return; }
+    if iv == 0 || !REF_OK.load(Ordering::Relaxed) || NET_REF.load(Ordering::Relaxed) { return; }
     let hz = PUB_HZ.load(Ordering::Relaxed);
     if hz == 0 { return; }
     let t = crate::tsc::rdtsc();

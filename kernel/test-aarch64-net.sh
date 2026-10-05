@@ -247,6 +247,21 @@ assert "hotpath enforce: packets=1 Δsyscalls=0 Δfaults=0 -> OK zero-syscall" "
 refute "$BAD" "fastapp: no trap"
 stopq
 
+# ntp: the wall clock's reference over the network (talaria.ntp=, kernel/src/ntp.rs) — on a
+# Graviton the only one (no PHC on Nitro's ENA, no paravirtual clock on arm64 KVM). The server
+# is the host's clock +3 s running 150 ppm fast; the judge compares the guest's kernel-echo
+# stamp with an SNTP answer from outside. TCG's round trips are milliseconds: a wider bound.
+python3 /w/kernel/tools/minintp.py 10.0.0.1 3 150 2>/tmp/ntp.log & NTPP=$!
+bootn 1 "talaria.mode=userver talaria.ntp=10.0.0.1,1 talaria.kecho=7777 talaria.kts=1"; waitfor "ntp: sample 8 " 120
+assert "ntp: sample 1 from 10\.0\.0\.1: the error \+(29|3[0-9])[0-9]{5} us.* the boot.s base is set onto it" "ntp: the first sample sets the boot's base onto the reference (+3 s)"
+assert "ntp: sample 8 from 10\.0\.0\.1: .* steps 0 back 0" "ntp: eight samples, no step, never back"
+R=$(python3 /w/kernel/tools/ntpcmp.py 10.0.0.2 7777 10.0.0.1 2>&1); E=$(echo "$R" | sed -n 's/.*reference = \([-+][0-9]*\) us.*/\1/p')
+LIM=3000; [ "$KVM" = 1 ] && LIM=1000
+if [ -n "$E" ] && [ "${E#[-+]}" -lt "$LIM" ]; then ok "ntp: the guest's wall clock is ${E} us from the reference, judged from outside (< $LIM)"
+else bad "ntp: the guest's wall clock against the reference ($R)"; fi
+refute "$BAD" "ntp: no trap"
+stopq; kill $NTPP 2>/dev/null
+
 # The network services of phase 7's first step (services/build-aarch64.sh): mongoose answers
 # HTTP, Redis RESP — unmodified, static musl, from a TFS1 disk.
 SVC=${TAL_SVC:-}

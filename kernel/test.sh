@@ -1056,6 +1056,24 @@ R=$(printf 'UDPUDPUD' | timeout 3 socat -T2 - udp:10.0.0.2:9998 2>/dev/null)
 [ "$R" = "UDPUDPUD" ] && { echo "  PASS  userdata: the mode from the user-data has started (a UDP echo after the card is reopened)"; PASS=$((PASS+1)); } || { echo "  FAIL  userdata: the mode from the user-data (got '$R')"; FAIL=$((FAIL+1)); }
 stopq $q; kill $IMDS_PID 2>/dev/null
 
+# ntp: the wall clock's reference over the network (talaria.ntp=, kernel/src/ntp.rs). The
+# server's clock is the host's moved +3 s and running 150 ppm fast: the guest must take it as
+# its base at the boot and then follow it; the judge compares the two from outside (the kernel echo's
+# wall-clock stamp against an SNTP answer, both referred to the host's clock), so without the
+# feature the guest is 3 s off and the gate fails.
+python3 /w/kernel/tools/minintp.py 10.0.0.1 3 150 2>/tmp/ntp.log & NTPP=$!
+q=$(boot "talaria.mode=userver talaria.ntp=10.0.0.1,1 talaria.kecho=7777 talaria.kts=1" net)
+for _ in $(seq 1 40); do grep -q "ntp: sample 8 " /tmp/o.log 2>/dev/null && break; sleep 0.5; done
+assert "ntp: sample 1 from 10\.0\.0\.1: the error \+(29|3[0-9])[0-9]{5} us.* the boot.s base is set onto it" "ntp: the first sample sets the boot's base onto the reference (+3 s)"
+assert "ntp: sample 8 from 10\.0\.0\.1: .* steps 0 back 0" "ntp: eight samples, no step, never back"
+R=$(python3 /w/kernel/tools/ntpcmp.py 10.0.0.2 7777 10.0.0.1 2>&1); E=$(echo "$R" | sed -n 's/.*reference = \([-+][0-9]*\) us.*/\1/p')
+if [ -n "$E" ] && [ "${E#[-+]}" -lt 1000 ]; then echo "  PASS  ntp: the guest's wall clock is ${E} us from the reference, judged from outside"; PASS=$((PASS+1))
+else echo "  FAIL  ntp: the guest's wall clock against the reference ($R)"; FAIL=$((FAIL+1)); fi
+stopq $q
+q=$(boot "talaria.mode=userver talaria.ntp=10.0.0.9,1" net)
+assert_slow "netsys: ntp: no sample in 3 s" "ntp: a silent server is said, and the boot goes on"
+stopq $q; kill $NTPP 2>/dev/null
+
 # uefi: OVMF (edk2, q35) -> the uefi-stub -> a trampoline -> pvh_start (PLAN-V1.1 §4.1);
 # the stub carries the kernel's ELF inside — a .efi FRESHER than the kernel's binary is required (uefi-stub/build.sh)
 EFI=kernel/uefi-stub/target/x86_64-unknown-uefi/release/talaria-uefi-stub.efi

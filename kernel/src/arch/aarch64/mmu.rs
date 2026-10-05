@@ -202,8 +202,9 @@ pub unsafe fn init_hw() -> bool { true }
 /// RAM by 2M leaves with the user identity region; any other gigabyte is RAM if the
 /// firmware's map puts RAM in it, devices otherwise. On `virt` that reads as before (GB0
 /// the GIC, the UART, virtio-mmio, the low ECAM; GB1 the kernel; GB2-3 RAM when the guest
-/// has it); on a Graviton GB0 is RAM (from 5 MiB) and GB3 is the PCI window with the
-/// 16550 — a fixed "below the kernel is devices" would have cached the console's registers.
+/// has it); on a Graviton (c7g.large's firmware map) GB0 is devices too (the GIC at
+/// 0x1000_0000, the ECAM at 0x2000_0000), RAM starts at 1 GiB and GB2 is the PCI window with the
+/// 16550 — a fixed "only GB0 is devices" would have cached the console's registers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GbKind { Device, User2M, Ram1G }
 pub fn gb_kind(gb: usize, kernel_gb: usize) -> GbKind {
