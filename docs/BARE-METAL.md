@@ -269,6 +269,31 @@ Separately about the stand itself:
   the logs live IN THE IMAGE FILE) — the check "the trace's sectors are zero
   before the run" STOPS the run.
 
+## 6. Graviton: what QEMU `virt` hides
+
+The arm64 port (`docs/ARM64-PLAN.md`) met the same rule on a different machine. Every line
+below was paid for by a run on a `c7g.large` (Nitro, edk2) or under KVM on a `c7g.metal`; the
+items of `docs/ENGINEERING-NOTES.md` §6 carry the stories.
+
+| What `virt` under TCG shows | What a Graviton does | Closed by |
+|---|---|---|
+| The console where the device tree says (a PL011) | The SPCR's address is a placeholder (0x8000_0000 — the ENA's BAR); the console is the 16550 of PCI function 00:01.0, its BAR 0 with memory decoding OFF, byte access at stride 1 (item 28) | `acpiboot`: the SPCR's PCI fields, the MCFG, `cmd \|= 2` |
+| RAM in one run from 1 GiB, devices below | RAM in pieces with holes, the PCI window in GB2 between them; an early map that covered "RAM from first to last" made the console's registers Normal memory | the early map from the firmware's ranges, glued only without a whole empty gigabyte |
+| All the RAM below 4 GiB at `-m 1024` | 3 GB of a `c7g.large`'s 4 above 4 GiB: the allocator saw 850 MB; a 2 MB page taken from the low area panicked a page table (item 29) | the main node's high area; `talaria.lowmem=` reproduces the shape at home |
+| GB0 is devices (and a binary that wants it collides) | GB0 is devices too — the GIC, the ECAM; RAM from 1 GiB (item 42: the plan had it as RAM from memory) | the devices' alias `mmu::DEV_SLOT` |
+| A read of an unmapped MMIO address returns at once | On Nitro it is an exit to the hypervisor, microseconds each: a 10-million-iteration probe loop hangs for minutes | no polling of unknown addresses; bounded by time, not count |
+| An interrupt lands only between translated blocks | A real core takes it on any instruction — inside the eight-instruction restore of the user frame (item 27; TCG NEVER reproduced it, its restore is one block) | `daifset` before `RESTORE_FRAME`; the KVM stand |
+| The timer's interrupt behaves like an edge | It is a level: a lent deadline left the line asserted and stormed the core (item 31) | the vector silences it; the KVM stand |
+| The secondary cores come up in lock-step with the boot core | A real core comes up later: an `init` with a global half run per core re-zeroed the workload's heap, 10-17 % of boots (item 41) | `syscall::init_core`; the parallel detector on the stand |
+| Hardware memory ordering is TCG's (strong in practice) | Neoverse V1 is weakly ordered: the audit's one-word-two-writers class (item 30) | `soak-aarch64.sh` and the race detector under KVM |
+| No wall-clock reference question | No PHC on the ENA, no paravirtual clock: the crystal's +15 ppm, 1.3 s a day | `talaria.ntp=aws` (SNTP to 169.254.169.123) |
+
+What the arm64 stand gives that the x86 metal did not: **a console on every instance** (the
+16550 through `get-console-output`), so a `c7g.large` at ~$0.07/hour is the cheap check of the
+same UEFI path, and `infra/aws/kvm-stand-aarch64.sh` runs the whole arm64 gate under KVM on a
+`c7g.metal` in about an hour, destroying the instance itself. `infra/aws/ec2-crash-test.sh`
+pulls the plug on EBS (`stop-instances --force`) on either architecture.
+
 ---
 
 Related documents: `docs/MEASUREMENTS.md` §8 (what was measured on hardware),

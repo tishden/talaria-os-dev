@@ -756,6 +756,20 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     journal's writes moved the timing and the failures went to 0 of 288; the same kernel
     without it failed 31 of 288. **Test a fix with the instruments that change timing OFF**,
     and **an `init` called per core must not own anything global.**
+42. **"A plan built on a memory map nobody had read."** Freeing GB0 for ClickHouse's ET_EXEC
+    left a third step: "on a Graviton GB0 is RAM (from 5 MiB)", so a knob to keep that RAM out
+    of the allocator. The claim sat in a code comment and in the plan; its source was never
+    named. The Graviton's own boot log, in the tree since §10.8, printed the firmware's map —
+    RAM from 1 GiB, the GIC and the ECAM in GB0 — and ClickHouse ran there with no change.
+    **A fact about a machine is the machine's printout, quoted with where it came from**; a
+    plan step that rests on a remembered fact starts by finding the printout.
+43. **"The first sample is not a step."** The SNTP client's first sample at boot found EC2's
+    UEFI clock a second ahead and the servo, rightly by its rules, stepped back and counted
+    it — a "time went backwards" on a machine where nobody had read the time yet. Before the
+    workload starts the firmware's whole seconds are a guess, not a clock: the first sample
+    sets the base (`wallclock::set_base`) and starts the frequency estimate from it. The same
+    run under kvmclock had hidden it — the error was +3 s, a step forward, which the old gate
+    expected. **A counter of anomalies needs the boundary where anomalies begin.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

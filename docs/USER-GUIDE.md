@@ -95,6 +95,22 @@ The details: the custom target `x86_64-talaria.json`, `build-std` (`core`/`alloc
 
 The built `talaria` is a PVH image: QEMU loads it directly through `-kernel`.
 
+**arm64 (AWS Graviton, QEMU `virt`).** The same tree builds for `aarch64-talaria.json`:
+
+```sh
+sh kernel/build-aarch64.sh            # -> kernel/target/aarch64-talaria/release/talaria{,.img}
+make -C kernel/user aarch64           # the ring-3 test set (needs aarch64-linux-musl-gcc)
+qemu-system-aarch64 -M virt,gic-version=3,its=on -cpu max -smp 4 -m 1024 -nographic \
+    -kernel kernel/target/aarch64-talaria/release/talaria.img -append "talaria.mode=userver talaria.smp=4"
+```
+
+`talaria.img` is a Linux-format `Image` (QEMU loads it at RAM base + 0x80000); the ELF next to
+it is for `gdb-multiarch`. The workloads are the same Linux binaries built for aarch64 — static
+musl, or dynamic through `ld-musl-aarch64.so.1`/glibc for PostgreSQL, MariaDB, MongoDB, the JVM
+and ClickHouse (`services/build-aarch64.sh`, `services/build-aarch64-db.sh` unpack the
+distributions' aarch64 packages without an arm64 builder). The gates: `kernel/test-aarch64.sh`
+(TCG on any host, KVM on an arm64 one) and `kernel/test-aarch64-db.sh`.
+
 ---
 
 ## 4. A quick start: the built-in demos
@@ -455,8 +471,9 @@ cat: the footprint of the ENA receive rings — 1 queues, 520 KB (the L3 50688 K
 ### 6.8. The clock
 
 Talaria runs `CLOCK_REALTIME` by the TSC from a reference point, and that point is
-**pulled towards an external clock** — kvmclock under KVM, the ENA device's PHC on
-hardware. Without that one calibration would last exactly the length of a demonstration:
+**pulled towards an external clock** — kvmclock under KVM (x86), an SNTP server over the
+network with `talaria.ntp=` (any machine; on EC2 the Amazon Time Sync Service, the only
+reference a Graviton has). Without that one calibration would last exactly the length of a demonstration:
 a quartz drifts by 10-50 ppm, that is by 1-4 seconds a day (on our dev stand
 95 ppm was measured — 8.2 s/day), while on that clock stand the orders' timestamps, the files'
 `mtime` and the one-way delays in measurements.
@@ -468,6 +485,14 @@ backwards, after which timestamps must not be compared.
 
 - `talaria.clocksync=<ms>` — the adjustment's interval (by default 1000; `0`
   switches the discipline off completely).
+- `talaria.ntp=aws|<a.b.c.d>[,<poll s>]` — SNTP to `169.254.169.123` (`aws`) or the given
+  server, a poll every 16 s by default. Each poll is a burst of four queries and the one with
+  the shortest round trip is the sample (its error is bounded by half that round trip); the
+  first sample before the workload starts SETS the base rather than stepping it, and the
+  network reference owns the servo (kvmclock stands aside). The boot waits up to 3 s for that
+  first sample and says so if the server is silent. On a `c7g.large` the clock stays within
+  ±21 us of the Amazon Time Sync Service judged from a Linux neighbour; the servo's
+  correction is the crystal's own (+15 ppm there).
 - `talaria.epoch=<seconds>` — set the epoch's base by hand (when there is no source).
 - The console command **`clock`** shows the reference, the correction in ppm, the residual
   error and the counters of the steps:
@@ -612,6 +637,7 @@ per-packet hardware timestamps the ENA does not give out at all — see `docs/RO
   would look the same. What is in the table and what it sees in the machine
   is shown by the console's `nics`.
 - `talaria.clocksync=<ms>` — the interval of the clock's discipline (§6.8); `0` switches it off.
+- `talaria.ntp=aws|<a.b.c.d>[,<poll s>]` — the wall clock's reference over the network (§6.8).
 - `talaria.sched=spread|nospread|balance|nobalance|numa|nonuma|node=N|irq=N` —
   the same switches as the `spread=`/`balance=`/`numa=`/`node=`/`irq=` in
   the manifest, separated by commas.
@@ -1168,6 +1194,23 @@ between the items the kernel reboots the machine itself, and at the end of the l
 | The run "has hung" | The set's counter on the disk (sector 1004) says which item it is at; `stopped` = it reached the end. |
 | The image was run locally | Rebuild it: the set's counter and the logs live IN THE IMAGE FILE. The check in `metal-ref-probe.sh` catches that and stops the run. |
 | A `VcpuLimitExceeded` | A terminated metal holds the quota for a few more minutes; the scripts have a retry loop. |
+
+**Graviton (`c7g.*`, arm64).** EC2's arm64 instances boot UEFI only, so the path is the UEFI
+stub (`sh kernel/uefi-stub/build.sh aarch64` after every kernel build — it carries the kernel
+inside) on an ESP, and `tools/mk-ami.sh`/`infra/aws/ec2-boot-talaria.sh` take `ARCH=arm64`:
+
+```sh
+ARCH=arm64 ENVF=~/.talaria-lab/lab.env PEM=~/.talaria-lab/talaria-v11.pem \
+  infra/aws/ec2-boot-talaria.sh "talaria.pci=1 talaria.ip=dhcp talaria.ntp=aws talaria.mode=proc" \
+  c7g.large kernel/target/a64-services/ext2-ch.img
+```
+
+Unlike an x86 metal, a Graviton HAS a console: the 16550 behind PCI that the SPCR names, and
+`get-console-output` shows the kernel's log. Give it `talaria.ntp=aws`: the instance has no PTP
+clock on its ENA and no paravirtual clock, and without a reference the wall clock drifts by the
+crystal (+15 ppm on a `c7g.large`, 1.3 s a day); with it the clock stays within tens of
+microseconds of the Amazon Time Sync Service (§6.8). `c7g.metal` serves as the KVM stand for
+the arm64 regression (`infra/aws/kvm-stand-aarch64.sh`).
 
 ## 10. The observability
 
