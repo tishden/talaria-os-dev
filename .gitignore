@@ -55,6 +55,7 @@ services/nginx/build/
 bench/suite/tlgen/tlgen
 bench/suite/tlgen/tlgen.host
 bench/suite/tlgen/tlgen.asan
+bench/suite/tlgen/tlgen.a64
 bench/suite/results/
 bench/suite/infra/terraform/.terraform/
 bench/suite/infra/terraform/terraform.tfstate*

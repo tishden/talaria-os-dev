@@ -53,13 +53,18 @@
     # Talaria on four cores would be unfair IN OUR favour. The tlgen generator has
     # one thread, for it the isolation is an instrument. The server keeps nohz_full and
     # rcu_nocbs (the tick goes away, the balancing does not) and the unit's CPUAffinity.
+    # ON arm64 (a Graviton stand, ARCH=arm64) the x86 half has no meaning and is left out:
+    # the C-state and P-state drivers, the TSC, MCE and `idle=poll` (x86's; arm64 has no
+    # polling idle in this kernel — a Graviton guest idles in WFI). The rest is the same set:
+    # the tick, RCU, mitigations, THP, the watchdogs. The architecture comes from the facts,
+    # so a mismatched stand cannot get the other machine's list.
     - name: Kernel parameters for low latency
       ansible.builtin.command: >-
         grubby --update-kernel=ALL --args="{{ 'isolcpus=' ~ dp_cores if role == 'loadgen' else '' }}
         nohz_full={{ dp_cores }} rcu_nocbs={{ dp_cores }} rcu_nocb_poll
-        intel_idle.max_cstate=0 processor.max_cstate=1 idle=poll
-        intel_pstate=disable nosoftlockup mce=ignore_ce audit=0
-        mitigations=off tsc=reliable clocksource=tsc nmi_watchdog=0
+        {{ 'intel_idle.max_cstate=0 processor.max_cstate=1 idle=poll intel_pstate=disable mce=ignore_ce tsc=reliable clocksource=tsc' if ansible_architecture == 'x86_64' else '' }}
+        nosoftlockup audit=0
+        mitigations=off nmi_watchdog=0
         transparent_hugepage=never skew_tick=1"
       register: grubby
       changed_when: true

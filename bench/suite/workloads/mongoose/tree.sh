@@ -8,9 +8,15 @@ REPO=$(cd "$HERE/../../../.." && pwd)
 # mongoose prints two lines PER REQUEST, and on Talaria that goes to serial:
 # the speed of the console is measured instead of the server (on a local run the
 # test case produced not a single point because of it).
-[ -f "$REPO/services/mongoose/mongoose_srv" ] || { echo "no services/mongoose/mongoose_srv (see services/mongoose/README.md, build with -DMG_ENABLE_LOG=0)"; exit 1; }
+. "$HERE/../../lib/arch.sh"
 mkdir -p "$OUT/etc"
-cp "$REPO/services/mongoose/mongoose_srv" "$OUT/mongoose_srv"
+if [ "$ARCH" = arm64 ]; then
+    a64_need "$A64/mongoose_srv" services/build-aarch64.sh   # MG_ENABLE_LOG=0 there too
+    cp "$A64/mongoose_srv" "$OUT/mongoose_srv"
+else
+    [ -f "$REPO/services/mongoose/mongoose_srv" ] || { echo "no services/mongoose/mongoose_srv (see services/mongoose/README.md, build with -DMG_ENABLE_LOG=0)"; exit 1; }
+    cp "$REPO/services/mongoose/mongoose_srv" "$OUT/mongoose_srv"
+fi
 # The same page as nginx's: the test cases must differ by server, not by
 # response size.
 python3 - "$OUT/index.html" <<'PY'

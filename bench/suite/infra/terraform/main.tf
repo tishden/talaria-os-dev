@@ -39,6 +39,11 @@ variable "region"        { default = "ap-northeast-1" }
 // docs/MEASUREMENTS.md was taken on it: 4 vCPU, enough for housekeeping 0-1 and
 // for the data plane 2-3.
 variable "instance_type" { default = "c6i.xlarge" }
+// THE MACHINE: x86_64 or arm64 (a Graviton stand, docs/ARM64-PLAN.md phase 9). It picks the
+// Linux side's AL2023 image; the Talaria AMI carries its own (register-image --architecture),
+// and the instance type must be of the same machine (stand-up.sh passes c7g.xlarge for arm64:
+// 4 vCPU as c6i.xlarge, but four physical cores — Graviton has no SMT, on either side).
+variable "arch" { default = "x86_64" }
 variable "talaria_ami"   { default = "" }               // from bench/suite/infra/mk-ami.sh
 // PRINTING COUNTERS TO SERIAL IS OFF BY DEFAULT.
 //
@@ -166,7 +171,7 @@ resource "aws_security_group" "stand" {
 }
 
 data "aws_ssm_parameter" "al2023" {
-  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-${var.arch == "arm64" ? "arm64" : "x86_64"}"
 }
 
 // ── The Linux pair ───────────────────────────────────────────────────────────

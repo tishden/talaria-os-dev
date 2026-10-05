@@ -3,6 +3,8 @@
 # TWO manifests (server and generator) in one image.
 #
 #   mk-ami.sh <workload> [--local-only]
+#   ARCH=arm64 mk-ami.sh <workload>   — a Graviton image: the arm64 tree (tree.sh), tlgen.a64,
+#                                       the aarch64 UEFI stub with the kernel inside
 #
 # One image for both roles — because on a "Talaria against Talaria" stand both
 # machines must boot from ONE image: otherwise two builds are compared rather than
@@ -20,9 +22,10 @@ REPO=$(cd "$SUITE/../.." && pwd)
 WD="$SUITE/workloads/$WL"
 [ -d "$WD" ] || { echo "no workload $WL"; exit 1; }
 . "$WD/meta.env"
-[ -x "$SUITE/tlgen/tlgen" ] || { echo "no tlgen — run make -C bench/suite/tlgen"; exit 1; }
+. "$SUITE/lib/arch.sh"
+[ -x "$TLGEN_BIN" ] || { echo "no $TLGEN_BIN — run make -C bench/suite/tlgen$([ "$ARCH" = arm64 ] && echo ' a64')"; exit 1; }
 
-OUT=${OUT:-$HOME/.talaria-lab/bench-$WL.img}
+OUT=${OUT:-$HOME/.talaria-lab/bench-$WL$([ "$ARCH" = arm64 ] && echo -a64).img}
 mkdir -p "$(dirname "$OUT")"
 TREE=$(mktemp -d)
 trap 'rm -rf "$TREE"' EXIT
@@ -30,7 +33,7 @@ trap 'rm -rf "$TREE"' EXIT
 echo "== the workload tree $WL"
 "$WD/tree.sh" "$TREE" | sed 's/^/   /'
 
-cp "$SUITE/tlgen/tlgen" "$TREE/tlgen"
+cp "$TLGEN_BIN" "$TREE/tlgen"
 cp "$WD/manifest" "$TREE/cell.manifest"
 cat > "$TREE/loadgen.manifest" <<'M'
 # The load generator's role: a job receiver on :9100.
@@ -56,8 +59,15 @@ fi
 # the suite `ec2all-20260905-133810` turned out to have been taken on THREE different kernels, and
 # there was nothing to tie a point to a commit with. `KERNEL=` substitutes another kernel
 # (an A/B on EC2); by default it is the current build.
-KERN=${KERNEL:-$REPO/kernel/target/x86_64-talaria/release/talaria}
+KERN=${KERNEL:-$TL_KERNEL_DEFAULT}
 [ -f "$KERN" ] || { echo "no kernel $KERN — build it first"; exit 1; }
+if [ "$ARCH" = arm64 ]; then
+    # On arm64 the kernel travels INSIDE the UEFI stub (tools/mk-ami.sh): KERNEL= cannot
+    # substitute it, and a stub older than the kernel is an AMI with the previous kernel.
+    [ -z "${KERNEL:-}" ] || { echo "REFUSAL: KERNEL= is x86-only (arm64's kernel is inside the stub)"; exit 1; }
+    STUB=$REPO/kernel/uefi-stub/target/aarch64-unknown-uefi/release/talaria-uefi-stub.efi
+    [ -f "$STUB" ] && [ ! "$STUB" -ot "$KERN" ] || { echo "REFUSAL: the aarch64 stub is missing or older than the kernel — sh kernel/uefi-stub/build.sh aarch64"; exit 1; }
+fi
 echo "== kernel: $KERN"
 KSHA=$(sha256sum "$KERN" | cut -c1-16)
 KTREE=$(git -C "$REPO" describe --always --dirty 2>/dev/null || echo '?')
@@ -73,6 +83,6 @@ printf 'STAND_KERNEL_SHA=%s\nSTAND_KERNEL_TREE=%s\nSTAND_KERNEL_BUILT=%s\n' "$KS
 export KERN
 
 echo "== AMI (image -> volume -> snapshot -> register-image)"
-"$REPO/infra/aws/talaria-deploy.sh" \
+"$REPO/infra/aws/talaria-deploy.sh" --arch "$ARCH" \
     --data "$OUT" --mode proc --smp "${SMP:-4}" --net dhcp --userdata \
     --name "tlbench-$WL-$(date +%Y%m%d-%H%M%S)" --ami-only
