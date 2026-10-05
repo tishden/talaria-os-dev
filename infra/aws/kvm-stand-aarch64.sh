@@ -22,6 +22,7 @@
 #   BISECT="f3f06bc a843638" VARIANTS=dir ABROUNDS=5    # the A/B of a regression: futexlat + svccost on
 #                                                       # each commit and each dir/*.patch over HEAD
 #   ABONLY=1 ...                                        # the A/B alone: no gate, numbers, soak or loop
+#   CUSTOM="cmd" ...                                    # a targeted run: the command after the build, then down
 #
 # The ring-3 set travels as BINARIES: kernel/user/aarch64/ (`make -C kernel/user aarch64` on the
 # dev box — the cross musl is there, the stand's Amazon Linux has none) is uploaded next to the
@@ -154,6 +155,18 @@ T3=$(date +%s); echo "built after $((T3-T2)) s" | tee -a "$LOGD/timing.log"
 # The UEFI stub carries the kernel inside: after the kernel, before the gate (its UEFI block
 # is skipped without a fresh stub).
 rrun stub 900 '. $HOME/.cargo/env && cd talaria && kernel/uefi-stub/build.sh aarch64' || { echo "the UEFI stub did not build — $LOGD/stub.log (the gate will skip its UEFI block)"; tail -5 "$LOGD/stub.log"; }
+
+# CUSTOM="cmd": a targeted run — the command (in the tree, after the build) and nothing else;
+# its /tmp/custom comes home. E.g. CUSTOM="SOAK_APPEND=talaria.ptlog=1 PAR=24 MODES='tsync futexlat'
+# kernel/soak-aarch64.sh 96 /tmp/custom".
+if [ -n "${CUSTOM:-}" ]; then
+  echo "== CUSTOM: $CUSTOM =="
+  rrun custom 5400 "cd talaria && $CUSTOM" || true
+  tail -30 "$LOGD/custom.log" || true
+  ssh $SSH_OPTS ec2-user@"$IP" 'tar -C /tmp -c custom 2>/dev/null' | tar -x -C "$LOGD" 2>/dev/null || true
+  T4=$(date +%s); echo "CUSTOM done after $((T4-T0)) s; logs: $LOGD"
+  exit 0
+fi
 
 if [ "${UPONLY:-0}" = 1 ]; then
   KEEP=1
