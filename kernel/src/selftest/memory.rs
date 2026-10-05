@@ -47,6 +47,21 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             println!("talaria: the UAF test — an access after munmap must give a #PF");
             crate::user::run_expect_fault(UAF);
         }
+        "allocfail" => {
+            // A REFUSED REQUEST LEAVES THE ALLOCATOR WHOLE (docs/ENGINEERING-NOTES.md item 49):
+            // one more frame than the bump has left must fail, the bump must keep every frame it
+            // had, and the next small allocation must still succeed. The old order moved the
+            // pointer before the bound check — the refusal took the rest of the bump with it.
+            let left = crate::mem::bump_left();
+            let refused = crate::mem::alloc_contig(left + 1).is_none();
+            let after = crate::mem::bump_left();
+            let small = crate::mem::alloc_contig(16);
+            println!("allocfail: the bump had {} frames, a request of {} refused={}, it has {} after, a 64 KB block after it: {}",
+                left, left + 1, refused, after, if small.is_some() { "yes" } else { "NO" });
+            if let Some(b) = small { crate::mem::free_contig(b, 16); }
+            if refused && after == left && small.is_some() { println!("allocfail: ALL OK"); } else { println!("allocfail: FAIL"); }
+            crate::suite::park()
+        }
         "identhole" => {
             // A MINE OF THE CLASS "an identity address under someone else's AS". The kernel addresses physical
             // frames by their identity address (zeroing a fresh frame, a COW copy,

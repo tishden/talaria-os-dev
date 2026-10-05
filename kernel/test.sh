@@ -372,6 +372,7 @@ for spec in \
   "talaria.test=identhole|identhole: U/S cleared on the removed page: OK|identhole: the removed page is closed to ring 3 (identity is kept for THE KERNEL, not for the workload — otherwise a UAF)" \
   "talaria.test=identhole|identhole: the identity invariant in the workload's AS: holes 0 substitutions 0 read-only 0|identhole: in the whole 0..4GB window of the workload's address space there is not a single hole (kstat paging prints the same counter)" \
   "talaria.test=wxorx|wxorx: ALL CHECKS PASSED|wxorx: W^X + NX + a guard page + a live #PF" \
+  "talaria.test=allocfail|allocfail: ALL OK|allocfail: a refused contiguous request leaves the bump whole (it used to take the rest with it: a Graviton's refused fscache=512 panicked the next kernel stack)" \
   "talaria.test=sharedpd|sharedpd: the gigabyte 0x80000000 was split for a device window: OK|sharedpd: the shared gigabyte of the kernel PDPT is split into a directory+table (like the LLQ window of ENA on EC2)" \
   "talaria.test=sharedpd|sharedpd: the kernel's directory after the AS teardown: OK|sharedpd: A MINE — tearing a process's AS down freed the kernel's SHARED directory (the frame into the free list -> a #PF in the NVMe doorbell under any CR3; PostgreSQL on EC2 died after 0.3 s)" \
   "talaria.test=fault|FLIGHT RECORDER: [0-9]+ events|flightrec: the crash dump + the ring of the events (the post-mortem)" \

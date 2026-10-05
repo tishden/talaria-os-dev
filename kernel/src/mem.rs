@@ -639,6 +639,9 @@ pub fn alloc_contig_aligned(n: u64, align: u64) -> Option<u64> {
 
 /// Allocate n contiguous frames: first a first-fit in the free list (reclaim), otherwise the bump.
 #[track_caller]
+/// Frames the bump still has between its pointer and the end (`talaria.test=allocfail`).
+pub fn bump_left() -> u64 { END.load(Ordering::Relaxed).saturating_sub(NEXT.load(Ordering::Relaxed)) / FRAME }
+
 pub fn alloc_contig(n: u64) -> Option<u64> {
     if n == 0 { return None; }
     fl_lock();
@@ -679,8 +682,14 @@ pub fn alloc_contig(n: u64) -> Option<u64> {
             let _ = NEXT.compare_exchange(base, re, Ordering::Relaxed, Ordering::Relaxed);
             continue;
         }
+        // THE BOUND BEFORE THE CAS. The pointer used to move first and the bound be checked after:
+        // a request that did not fit returned None with NEXT already past END, and every bump
+        // allocation after it failed. On a Graviton (844 MB below 4 GB) mongodb's manifest asked
+        // for a 512 MB cache, was refused — and the next kernel stack, 64 KB, panicked the launch
+        // (`alloc_kstack().unwrap()`, docs/ENGINEERING-NOTES.md item 49).
+        if end > END.load(Ordering::Relaxed) { return None; }
         if NEXT.compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
-        if end <= END.load(Ordering::Relaxed) { crate::metrics::add_frames(n); fc_alloc(base, n); return Some(base); } else { return None; }
+        crate::metrics::add_frames(n); fc_alloc(base, n); return Some(base);
     }
 }
 static RES_BASE: AtomicU64 = AtomicU64::new(0);
