@@ -1,4 +1,5 @@
 mdpipe
+mdpipe-a64
 *.img
 *.log
 out/
