@@ -1919,6 +1919,112 @@ SKIP), x86 `test.sh` **507/0** + host 22/0 (six `ntp` checks new), kernel-unit 3
 tests new), `talaria.test=obs` with the PMU difference's plausibility on both, clippy clean on
 both.
 
+### 10.15. Phase 9 begins: the scoreboard's path on a Graviton; the cache counter; the mdpipe tail named (2026-10-05)
+
+**The scoreboard's arm64 path** (`bench/suite`, `ARCH=arm64`, `lib/arch.sh` — one switch for the
+whole EC2 path). The workload trees take the arm64 builds: Redis and mongoose cross-built
+static (`services/build-aarch64.sh`); nginx, PostgreSQL 16, MariaDB 10.11 and MongoDB 4.0.5 are
+Alpine's own aarch64 packages (`services/apkroot.sh`, factored out of `build-aarch64-db.sh`)
+put at x86's paths, so the manifests, the specs and their measured settings stay ONE file for
+both machines (nginx's configure runs its test programs and does not cross-build; the Alpine
+binary is the same on both sides of the stand). `tlgen` reads `CNTVCT_EL0` (`make a64`). The
+AMI is the aarch64 stub (`mk-ami.sh` refuses a stub older than the kernel), terraform takes
+AL2023 arm64 and `c7g.xlarge` (4 vCPU as x86's `c6i.xlarge`, four physical cores — no SMT on
+either side), the playbook leaves out the x86-only kernel parameters. `a64-smoke.sh` boots every
+arm64 image under TCG in both roles (6 workloads, 15 cases, the generator role on Talaria arm64
+with `netidle`: all PASS); `ARCH=arm64 infra/smoke.sh redis` on a `c7g.large` 11/0 with the
+inventory matching. The scoreboard itself: §10.17.
+
+**The cache counter on a Graviton VM** (the next-session list's item 4). The boot dropped a
+working counter: LL_CACHE_MISS_RD is not declared there, the fallback L2D_CACHE_REFILL is and
+counts (0.99 per line over a random 64 MB walk), but the "does it move" check is an ALU loop.
+Now only the instructions and the branches are judged by moving (as x86 judges its fixed
+counters), and an event with no counter prints "- (no counter)" (`top`, `perf`) instead of a
+zero. `talaria.test=pmu` gained `pmu-ev:` — every candidate cache event on the last counter
+(borrowed and given back where there is no spare, a `c7g.large` has two) across the walk.
+`docs/ENGINEERING-NOTES.md` item 46, `docs/MEASUREMENTS.md` §10.11.
+
+**The mdpipe tail on a Graviton** (item 2). Ten runs: p99 33.5-36 us in the default wait tier
+`wfe(monitor)`, 6.8 us with `talaria.sync=hlt`, 4.6-5.7 us on Linux on the same type. The
+theory "Nitro wakes a `wfe` sleeper late" was measured and refuted (`talaria.test=wakeprobe`:
+a store 140 ns, an SGI 2.3-2.5 us under `wfe` and `wfi` alike, after 30 us .. 1 ms of sleep); a
+first probe that switched the tier on the store's wake alone was built and dropped the same
+hour. The tier's traffic differs (2.4x the futex waits, 2.3x the reschedule IPIs); which part
+of its policy makes the tail is open, and `talaria.sync=hlt` is the measured lever meanwhile.
+Item 47.
+
+**The direct map**: the plan is §10.16.
+
+### 10.16. The identity window's real fix: a kernel direct map (the plan, 2026-10-05)
+
+§10.9 ended with "the real fix of the identity window is a kernel direct map in the higher
+half", and the GB0 alias of §10.13 was its first, narrow piece. This is the plan; no code yet.
+The line numbers are `bb198d8`'s.
+
+**What leans on virt == phys today.** The contract is written down three times — P1
+(`paging.rs:12`), `IDENT_HI` (`paging.rs:284`) and L3 (`user.rs:23`) — and the kernel has no
+heap: every buffer is a frame from `mem::alloc_*`, used as a pointer as it is. Five kinds:
+
+| kind | where | about |
+|---|---|---|
+| (a) a frame used as a kernel pointer | the page-table walks (`paging.rs`: ~56 entry dereferences, ~49 table casts), fresh-frame zeroing and the COW copy, the ELF loader and the stack builder (`user.rs`), the FS cache and its buffers (`ext2.rs`), the refcount table (`mem.rs`), the vDSO, the ITS tables, the kernel-stack poison, probes and self-tests | ~150 sites |
+| (b) a kernel pointer given to a device | the NVMe PRPs (`nvme.rs`, `fs.rs`), the ENA rings and buffers in `.bss` (`ena.rs:126` says "phys == virt"), the ITS tables, x86's PV-EOI word; virtio's arena already asks `paging::virt_to_phys` | ~20 sites |
+| (c) page-table entries | they store physical addresses already; every walker dereferences them through the identity | the walkers |
+| (d) MMIO | arm64's GB0 goes through `mmu::DEV_SLOT`/`mmio_va`; every other device gigabyte (x86's GB3, `map_mmio_1g` for BARs, Graviton's PCI window) is identity | `pci.rs`, `paging.rs` |
+| (e) code before any new map exists | x86's 32-bit entry with its static 4 GiB of 2M pages, the AP trampoline at 0x8000, arm64's `early_enable`, the DTB/ACPI parsing, the UEFI stub's hand-off | the boot paths |
+
+The user-visible part is the hard one: a `MAP_SHARED`/shm mapping returns the frame's
+identity address to ring 3 and opens it in the process's private copy of the kernel gigabyte
+(`syscall.rs` around 2250), and the identity modes (`cell`, `run_disk`) run ring 3 in the
+kernel's own space by design.
+
+**The design.** `mem::kva(pa)`/`kptr::<T>(pa)`/`kpa(va)`; today's `paging::virt_to_phys` (a walk
+of the current tables) becomes `walk_phys`. The allocator, the refcount and the entries stay
+keyed by the physical address and are translated where they are dereferenced; the drivers'
+entry points take a `Pa` newtype, so a kernel pointer handed to a device does not compile. The
+map lives in top-level slot 256 on both machines — x86 `0xFFFF_8000_0000_0000`, arm64 TTBR0's
+L0[256] (`0x0000_8000_0000_0000`, above `USER_TOP`, which `user_range_ok` already enforces):
+1 GiB leaves, supervisor, never executable, Normal WB, ONLY the firmware map's RAM (a device
+or a hole must never be cacheable — on arm64 that is an architectural aliasing fault). The
+slots exist before the first address space, so `copy_kernel_pml4` (`paging.rs:2164`, slots
+1..511) gives every process the map as it gives the kernel today. **TTBR1 is not needed for
+this**: a high TTBR0 slot keeps §4.3's one table and is the same code as x86 — §8's row stays
+true until the image itself moves. Kernel stacks move to a window below the map with their
+own 4K tables and a guard page there, which retires the per-space guard dance
+(`sched.rs:2105`) and means no direct-map leaf is ever split at run time (on arm64 that would
+be break-before-make on memory other cores use).
+
+**The stages**, each with both regressions green:
+
+1. The helpers as the identity, every site converted (paging; the drivers with `Pa`; the FS,
+   the loader and COW; the rest), a census meter like `census-aarch64.sh` counting what is
+   left; gate `dmapid` (`kpa(kva(x)) == x` for low, high, `.bss` and stack frames). No
+   behaviour change.
+2. The map beside the identity, `kva` switched to it; gate `dmap` (written through the map,
+   read through the identity: the low allocator, the high area, the 17 GB refcount top, a NUMA
+   node; a fresh process and a fork child have the slot).
+3. The kernel-stack window; `kstackguard` adapted, a new `kstackwin` (an overflow faults on the
+   named guard in a process, a fork child, after a refused fork), `forkap` x16.
+4. (a) Shared mappings get a chosen user address instead of the identity one; (b) RAM's
+   identity leaves leave process spaces, first behind `talaria.dmap=strict`. Gate
+   `dmapstrict`: no identity RAM leaf in a process; a `MAP_FIXED` over a former high-area
+   gigabyte succeeds and the kernel's writes to those frames do not show there; an x86 ET_EXEC
+   at 0x4000_0000 loads; `highmem`/`identhole` rewritten; PostgreSQL's shared memory on both.
+   **The risky stage**: a missed conversion is a ring-0 fault.
+5. The MMIO window on x86 and every device gigabyte on arm64 behind `mmio_va`.
+6. The 4 GiB cut lifted: one allocator over all RAM, several high areas, a DMA32 pool only for
+   what needs it (the trampoline, the AP's 32-bit CR3, 32-bit devices).
+7. Later: the image in the higher half (x86 −2 GiB, `code-model: kernel`; arm64 linked high),
+   where TTBR1 is reconsidered; ClickHouse's high-base kernel retires.
+
+**The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
+a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
+check on every queued address); arm64 attribute aliasing (map RAM only, never split a leaf);
+the semantics of shared and zero-syscall regions; every top slot existing before the first
+space (keep the `AS_LIVE` alarm). Open: whether structures should store kernel addresses
+(the cache, the rings) or translate on use — translate first; whether the reference space
+ever drops the identity (the identity modes need it).
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its

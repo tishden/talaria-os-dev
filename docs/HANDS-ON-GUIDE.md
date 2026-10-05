@@ -1101,7 +1101,7 @@ ntp: sample 2 from 169.254.169.123: the error -209 us, the round trip 53 us (the
 CPU   [0]10.3% [1]4.0%
 MEMORY 3.9G in total, free 3.2G (bump 3.1G + returned 141M), the kernel 55M; handed out 237K/s
 FLOW   syscalls 27k/s, switches 14k/s, faults in total 60 (COW 0), steals 0
-PMU    over the interval, over 2 cores: IPC 0.77, LLC misses 0 (0.00/1000i), branch misses 0 (0.00/1000i)
+PMU    over the interval, over 2 cores: IPC 0.75, LLC misses 13458024 (7.19/1000i), branch misses - (no counter)
 …
 mdpipe: total — ticks 599996, samples 599996, clock went backwards 0 times (max 0 ns)
 mdpipe: stage latency, ns: p50=1610 p90=5606 p99=34837 p99.9=50018 max=1017629
@@ -1113,11 +1113,16 @@ suite: the whole list is done — powering the machine off (ACPI S5, …)
 - `talaria.ntp=aws` — a Graviton has no PTP clock on its ENA and no paravirtual clock: the
   firmware's clock was 121 ms off, the first SNTP answer set the base before the workload,
   and the second, 16 s later, found the clock 0.2 ms off with the crystal's +14 ppm taken up.
-- `PMU` on a `c7g.large` has two event counters: the instructions and one more event. Its
-  CHAIN (two counters as one 64-bit) is declared but does not carry, so the kernel widens the
-  32-bit counters itself (`talaria.pmuchain=1` would use it).
+- `PMU` on a `c7g.large` has two event counters: the instructions and one more event — the
+  L2 refills (the core does not declare a last-level-cache event; the miss column is that L2's),
+  so the branch column says `- (no counter)`. Its CHAIN (two counters as one 64-bit) is declared
+  but does not carry, so the kernel widens the 32-bit counters itself (`talaria.pmuchain=1`
+  would use it).
 - The stage latency: a `p50` of 1.6 us against 2.5 on the `c6i.large` above; the `p99` is
-  34.8 us against 6.2 — the tail is the Graviton run's own and not yet explained.
+  34.8 us against 6.2. The tail is the default wait tier's on a Graviton VM (`wfe(monitor)`):
+  with `--extra "talaria.sync=hlt"` the same run gives p50 2.6, p99 6.8 us, and Linux on the
+  same type 3.5-4.1 / 4.6-5.7 (`docs/MEASUREMENTS.md` §10.11). The wake itself is not slow
+  there — `talaria.test=wakeprobe` times it — which part of the tier's policy is, is open.
 - `talaria.trace=` is not laid on arm64: the image is an ESP plus the data, and the console
   carries the log.
 
