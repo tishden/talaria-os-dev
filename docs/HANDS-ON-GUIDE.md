@@ -1067,6 +1067,60 @@ the command line is read from the instance's user-data (`USER-GUIDE` §7.1,
 `talaria.userdata=1`). The files off the volume after a run — `infra/aws/read-disk-trace.sh`
 (with `--keep-disk`).
 
+### 11.1. The same on a Graviton (arm64)
+
+The workload is rebuilt for aarch64 (`make a64` in `examples/mdpipe`: the
+`aarch64-linux-musl-cross` toolchain, the same flags) and `talaria-deploy.sh` takes it as it
+is — the architecture comes from the binary's ELF header, the type defaults to `c7g.large`,
+and the image is the UEFI one (EC2's arm64 boots nothing else):
+
+```
+$ infra/aws/talaria-deploy.sh --app examples/mdpipe/mdpipe-a64 \
+      --args "--secs 30 --rate 20000 --workers 2 --out /mdpipe.log" \
+      --type c7g.large --smp 2 --restart 0 --stop-after 150 \
+      --extra "talaria.top=10000 talaria.ntp=aws" --name mdpipe-guide-a64b
+== data image: mdpipe-a64 -> ~/.talaria-lab/mdpipe-guide-a64b-data.img
+== boot image: ~/.talaria-lab/mdpipe-guide-a64b.img
+   cmdline: talaria.pci=1 talaria.mode=cell talaria.ip=dhcp talaria.smp=2 talaria.stop=150 talaria.poweroff=1 talaria.top=10000 talaria.ntp=aws
+   mk-ami: ~/.talaria-lab/mdpipe-guide-a64b.img (89MB): p1 ESP@2048 (23MB, BOOTAA64.EFI + talaria.cfg), p2 data@49152 (64MB <- …-data.img)
+== volume 1 GiB in ap-northeast-1c
+== AMI ami-0123456789abcdef0 (the volume with the instance: DeleteOnTermination=true)
+== deployed
+   instance : i-0123456789abcdef0 (c7g.large)
+```
+
+The console works on a Graviton (the 16550 behind PCI), so the same `get-console-output`:
+
+```
+ena: the PHC (the device's clock): it is NOT declared on this instance type
+netsys: net0 dhcp lease 172.31.1.81/20 gw=172.31.0.1 dns=172.31.0.2
+ntp: sample 1 from 169.254.169.123: the error -121022 us, the round trip 124 us (the best of 3/4) — the boot's base is set onto it, not stepped
+nvme: 00:04.0 BAR0=0x80040000 nsze=2097152 blocks (1024 MB), an IO pair qid=1 of depth 64, …
+mdpipe: start — 2 threads, rate 20000 ticks/s, 30 s, file /mdpipe.log
+ntp: sample 2 from 169.254.169.123: the error -209 us, the round trip 53 us (the best of 4/4), the servo +14 ppm, steps 0 back 0
+CPU   [0]10.3% [1]4.0%
+MEMORY 3.9G in total, free 3.2G (bump 3.1G + returned 141M), the kernel 55M; handed out 237K/s
+FLOW   syscalls 27k/s, switches 14k/s, faults in total 60 (COW 0), steals 0
+PMU    over the interval, over 2 cores: IPC 0.77, LLC misses 0 (0.00/1000i), branch misses 0 (0.00/1000i)
+…
+mdpipe: total — ticks 599996, samples 599996, clock went backwards 0 times (max 0 ns)
+mdpipe: stage latency, ns: p50=1610 p90=5606 p99=34837 p99.9=50018 max=1017629
+mdpipe: OK
+supervise: the workload finished normally (code 0)
+suite: the whole list is done — powering the machine off (ACPI S5, …)
+```
+
+- `talaria.ntp=aws` — a Graviton has no PTP clock on its ENA and no paravirtual clock: the
+  firmware's clock was 121 ms off, the first SNTP answer set the base before the workload,
+  and the second, 16 s later, found the clock 0.2 ms off with the crystal's +14 ppm taken up.
+- `PMU` on a `c7g.large` has two event counters: the instructions and one more event. Its
+  CHAIN (two counters as one 64-bit) is declared but does not carry, so the kernel widens the
+  32-bit counters itself (`talaria.pmuchain=1` would use it).
+- The stage latency: a `p50` of 1.6 us against 2.5 on the `c6i.large` above; the `p99` is
+  34.8 us against 6.2 — the tail is the Graviton run's own and not yet explained.
+- `talaria.trace=` is not laid on arm64: the image is an ESP plus the data, and the console
+  carries the log.
+
 ---
 
 ## 12. The cheat sheet

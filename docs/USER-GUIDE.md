@@ -549,6 +549,10 @@ per-packet hardware timestamps the ENA does not give out at all — see `docs/RO
   default it is SWITCHED OFF: in a real workload a thread asleep on a futex for longer than
   a few seconds is the norm (that is how any thread pool lives), and the kernel would be reporting
   a failure where everything is in order. Switch it on when you are looking for a lost wake-up.
+- `talaria.pmuchain=1` (arm64) — use a declared CHAIN for 64-bit counter pairs. Off by default:
+  a Graviton VM declares CHAIN and its pairs do not carry; below PMUv3p5 the kernel widens the
+  32-bit counters itself, which is exact while a core reads its counters at least once per wrap
+  (the tick's snapshot does, every 20 ms; a dedicated core unread for longer loses the wraps).
 - `talaria.pmutick=0` — do NOT take the PMU counters in the scheduler's tick. By
   default they are taken (seven `rdpmc`s per tick — fractions of a per mille at a slice of 8 ms), and
   without them `top`/`perf` will not show the IPC and the misses per core.
@@ -1204,6 +1208,10 @@ ARCH=arm64 ENVF=~/.talaria-lab/lab.env PEM=~/.talaria-lab/talaria-v11.pem \
   infra/aws/ec2-boot-talaria.sh "talaria.pci=1 talaria.ip=dhcp talaria.ntp=aws talaria.mode=proc" \
   c7g.large kernel/target/a64-services/ext2-ch.img
 ```
+
+The one-command path takes arm64 too: `infra/aws/talaria-deploy.sh --app <aarch64 binary>`
+reads the architecture from the binary's ELF header (or `--arch arm64`, or a Graviton
+`--type`), builds the UEFI image and registers the AMI for arm64 (HANDS-ON-GUIDE §11.1).
 
 Unlike an x86 metal, a Graviton HAS a console: the 16550 behind PCI that the SPCR names, and
 `get-console-output` shows the kernel's log. Give it `talaria.ntp=aws`: the instance has no PTP

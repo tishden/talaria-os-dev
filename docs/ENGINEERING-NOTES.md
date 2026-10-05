@@ -770,6 +770,32 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     sets the base (`wallclock::set_base`) and starts the frequency estimate from it. The same
     run under kvmclock had hidden it — the error was +3 s, a step forward, which the old gate
     expected. **A counter of anomalies needs the boundary where anomalies begin.**
+44. **"A declared event that does nothing."** `top` on a Graviton VM printed an IPC of 6.8e7
+    now and then. A one-core probe on the hardware was clean, so the first suspect was the sum
+    over cores — and two real holes were there: the console took its own core's snapshot while
+    that core's tick could land in the middle of the write, and a reader on another core read a
+    slot while it was being written. Both are closed (a seqlock writer with the core's
+    interrupts masked), but neither was it. The filter added to `top` — a difference no core can
+    produce is named with its raw numbers, not summed — printed `instrs 18446744069769152640`:
+    the count 2^32 below the previous one. A theory followed (the chained pair's high half
+    carries late) and a fix for it, which the next run refuted. Then a probe that reads the
+    pair raw at every wrap: `lo=0xffffffdd -> lo=0x00000001`, the high half 0, five wraps in ten
+    seconds and not one carry. `PMCEID0` declares CHAIN on a `c7g.large`, and the odd counter
+    does not follow the natural wrap. A carry check at boot (the low half set 256 below the
+    wrap, a short loop) PASSED on the same machine — right after a write the pair carried — so
+    a check by the deed could not be trusted either: CHAIN is now opt-in (`talaria.pmuchain=1`)
+    and below PMUv3p5 the reader widens 32-bit counters, which is right on any machine read
+    once per wrap. **"Declared" is a claim; a check by the deed must exercise the same path the
+    use takes — and when a fix is built on a theory, the next run must be able to refute it.**
+45. **"A kernel socket the workload's reset closed, a client nobody drove."** The SNTP client
+    ran in the network stack's pass, and on the Graviton the guide's workload (no network) gave
+    it one pass in 30 s: nobody drives the stack for a workload that does not use it — the
+    client now runs from core 0's tick when a poll is due and the stack has been idle for 2 ms,
+    with a bounded wait for the reply (a reply taken a tick later carries the tick in its round
+    trip). And at the workload's end the supervisor's reset closed every UDP socket but the
+    echo's and the sink's — the clock's too; the next pass panicked on its dangling handle in
+    smoltcp. Both reproduced under TCG with the old binary, both are gated on both machines.
+    **A kernel-owned resource in a table the workload's reset walks is named in that walk.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

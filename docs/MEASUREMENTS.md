@@ -775,6 +775,38 @@ committed, un-checkpointed transaction, then the same volume with phase 2's user
 mode — 6 blocks replayed, `journal2: RECOVERED OK`; `journal=data` — 14 blocks (the data in the
 transaction) replayed, `RECOVERED OK`. Phase 7's second exit gate, on the target hardware.
 
+### 10.10. The whole stand on `e95abf4`, and the guide's workload on a Graviton (2026-10-05)
+
+**The KVM stand** (`kvm-stand-aarch64.sh`, `LOOPN=2`, `c7g.metal`, 59 minutes, destroyed by
+itself; logs `infra/aws/logs/aarch64-20261005-104403/`) on the commit with §10.8's fix:
+
+| step | result |
+| --- | --- |
+| the gate under KVM | **313/0** |
+| the five servers, default wait / `netmix` | 15/0 / 15/0 (the JVM's speedup4 3.975 / 3.996, park p50 0.43 / 0.44 us; ClickHouse's B12 in 5 s) |
+| the soak, 13 modes × 50 boots one at a time | **0 of 650** (tsync, futexlat, syncbench among them) |
+| the parallel detector, 6 modes × 96 boots, 24 at once | **0 of 576** |
+| the gate twice more in a loop | 0 of 2 failed |
+| UDP RTT p50, polling / `netirq=1` / `netirq=1 netpark=0` | 11.7 / 24.0 / 11.5 us |
+| TCP keep-alive, polling / `netirq=1` | 14.1 / 26.2 us per request |
+| futex RTT p50 same-core / cross-core | 540 / 540 ns |
+| `mbench` syscall / svc round trip with and without the FP save | 155 ns / 133 and 114 ns |
+
+`netmix` costs nothing under KVM (the servers' numbers are the same in both modes) and stays
+off by default: on hardware the product's waiter is a dedicated core's spinner.
+
+**The guide's workload on a `c7g.large`** (`examples/mdpipe`, `make a64`, `talaria-deploy.sh`
+with the binary's architecture; 2 cores, 20000 ticks/s, 30 s; HANDS-ON-GUIDE §11.1):
+p50 1.6 us, p90 5.6, p99 34.8, p99.9 50, the clock never backwards — against p50 2.5 / p99 6.2
+on a `c6i.large` (x86's §11). The Graviton's p99 is its own and not yet explained.
+
+**The PMU on a Graviton VM**: PMUv3p4, two event counters plus the cycle counter, the
+instructions on a chained pair — which does not chain: `top` showed an IPC of 6.8e7 now and
+then, and a raw read of the pair at every wrap showed the low half wrapping five times in ten
+seconds with the high half at 0 (`docs/ENGINEERING-NOTES.md` item 44); CHAIN is opt-in now
+(`talaria.pmuchain=1`) and the reader widens 32-bit counters. The busy loop's IPC 1.99 (two instructions a cycle, a mul-add chain), a halted core's
+cycles do not count (0.15-1.5 M in 100 ms of `wfi`).
+
 ## 11. Reproducing any of this
 
 ```sh
