@@ -2046,6 +2046,31 @@ pub static DELIV_SAMECPU: core::sync::atomic::AtomicU64 = core::sync::atomic::At
 pub static DELIV_OTHERCPU: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// A DHCP client's event (a lease/a renewal/a loss) ON THE INTERFACE idx: apply
 /// the address/gateway/DNS (musl's resolver reads /etc/resolv.conf — regenerate it).
+/// The SNTP client from the tick (core 0): a workload that does not use the network does not drive
+/// the stack, and the client in the pass never ran — one sample in 30 s on a Graviton. When a poll
+/// is due and nobody has passed the stack for 2 ms, the tick drives it: a pass sends the burst's
+/// query, and the reply is waited for by passes for at most 500 us (Amazon's round trip is 50) —
+/// a reply taken a tick later would carry the tick in its round trip, half of it as an error.
+/// A late reply ends the waiting for this tick; at most 2 ms of a tick in all. From a tick the
+/// stack's lock is only TRIED (`net_enter`), as from the card's line.
+pub fn ntp_tick() {
+    if unsafe { CFG_NTP }.is_none() || !ready() || crate::percpu::cpu_id() != 0 { return; }
+    let hz = unsafe { HZ };
+    let st = unsafe { &*addr_of_mut!(NTP) };
+    let t0 = tsc::rdtsc();
+    if st.b.sent == 0 && t0 < st.next { return; }
+    if t0.wrapping_sub(LAST_POLL_TSC.load(core::sync::atomic::Ordering::Relaxed)) < hz / 500 { return; }
+    let (wait, cap) = (hz / 2000, hz / 500);
+    loop {
+        poll_forced();
+        let st = unsafe { &*addr_of_mut!(NTP) };
+        let now = tsc::rdtsc();
+        if st.b.sent == 0 || now.wrapping_sub(t0) > cap { break; }
+        if st.b.got < st.b.sent && now.wrapping_sub(st.last_tx) > wait { break; }
+        core::hint::spin_loop();
+    }
+}
+
 /// The SNTP client's step in the stack's pass: take the replies, finish a burst into one sample
 /// for the servo, send the burst's next query when it is due. In the pass, under the stack's
 /// lock, like the DHCP client — so it runs wherever the stack is driven, workload or idle.
@@ -3982,8 +4007,11 @@ pub fn reset_all() {
     for i in 0..NS { if tt()[i].k != K::Free { abort_slot(i); } }
     for i in 0..NU {
         if uu()[i].used {
-            // the kernel echo and the sink belong to THE KERNEL rather than to the workload: they must not be torn down.
-            let owned_by_kernel = ifopt(uu()[i].ifx as usize).is_some_and(|f| f.ke == uu()[i].h || f.ks == uu()[i].h);
+            // the kernel echo, the sink and the clock's SNTP client belong to THE KERNEL rather than to the
+            // workload: they must not be torn down (the SNTP socket was, at a workload's end on a Graviton,
+            // and the next pass panicked on its dangling handle in smoltcp).
+            let owned_by_kernel = ifopt(uu()[i].ifx as usize)
+                .is_some_and(|f| f.ke == uu()[i].h || f.ks == uu()[i].h || f.nt == uu()[i].h);
             if owned_by_kernel { continue; }
             if uu()[i].h.is_some() { us(i).close(); }
             detach_udp(i);

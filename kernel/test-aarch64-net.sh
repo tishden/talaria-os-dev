@@ -33,7 +33,7 @@ ip link show tap0 >/dev/null 2>&1 || { echo "  FAIL  net: no tap0 (the container
 # through the firmware instead (the UEFI stub under edk2).
 bootn() {
   rm -f $O; local drv=""
-  if [ -n "${3:-}" ]; then cp "/w/$3" /tmp/run.img; drv="-drive id=d0,file=/tmp/run.img,format=raw,if=none -device virtio-blk-device,drive=d0"; fi
+  if [ -n "${3:-}" ]; then case "$3" in /*) cp "$3" /tmp/run.img;; *) cp "/w/$3" /tmp/run.img;; esac; drv="-drive id=d0,file=/tmp/run.img,format=raw,if=none -device virtio-blk-device,drive=d0"; fi
   qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp "$1" -m 1024 -display none -serial file:$O ${FWOPT:-} \
     -kernel "${KERNEL:-/w/$IMG}" -append "console=ttyAMA0 $2 talaria.smp=$1" \
     -netdev tap,id=n0,ifname=tap0,script=no,downscript=no \
@@ -260,6 +260,14 @@ LIM=3000; [ "$KVM" = 1 ] && LIM=1000
 if [ -n "$E" ] && [ "${E#[-+]}" -lt "$LIM" ]; then ok "ntp: the guest's wall clock is ${E} us from the reference, judged from outside (< $LIM)"
 else bad "ntp: the guest's wall clock against the reference ($R)"; fi
 refute "$BAD" "ntp: no trap"
+stopq
+# A workload that never touches the network does not drive the stack: the client runs from the
+# tick (netsys::ntp_tick); at its end the supervisor's reset must keep the kernel's socket (it
+# closed it once and the next pass panicked in smoltcp — on a Graviton).
+python3 /w/kernel/tools/talaria-pack -o /tmp/ntpcell.img --app /w/kernel/user/aarch64/idleshoot >/dev/null 2>&1
+bootn 2 "talaria.mode=cell talaria.ntp=10.0.0.1,1" /tmp/ntpcell.img; waitfor "supervise: code|PANIC" 180; sleep 1
+assert "ntp: sample 4 from 10\.0\.0\.1: .* steps 0 back 0" "ntp: the samples go on under a workload that does not use the network (the tick drives the client)"
+refute "PANIC|handle does not refer" "ntp: the supervisor's reset at the workload's end keeps the kernel's SNTP socket"
 stopq; kill $NTPP 2>/dev/null
 
 # The network services of phase 7's first step (services/build-aarch64.sh): mongoose answers
