@@ -816,9 +816,12 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     timed only the store and switched the tier on it, was built and refuted the same hour; it
     did not ship. What does differ is the tier's traffic: in 30 s 349 k futex waits against
     123 k, waits ended by "the word itself" 316 k against 123 k, 131 k IPI reschedules of a core
-    whose current task sleeps against 61 k (the `stat:` block's wake-delivery line). Which part
-    of the wfe tier's policy turns that traffic into a 34 us p99 is the next item to find; until
-    then `talaria.sync=hlt` is the measured lever on a Graviton VM. **Measure the primitive before blaming it — and when the probe says "not
+    whose current task sleeps against 61 k (the `stat:` block's wake-delivery line). Then the
+    knobs, one instance each: `talaria.wakepreempt=0` — p99 8.2 us; `nosteal`, `slice=150000` —
+    no change; `nowakebal` — 12. The woken worker waits on a BUSY core until the running task has
+    run the wake-preemption threshold: the wfe tier puts it there and `wfi+ipi` does not. Why the
+    tier changes the placement is the next item; `talaria.sync=hlt` and `wakepreempt=0` are the
+    measured levers on a Graviton VM meanwhile. **Measure the primitive before blaming it — and when the probe says "not
     it", the probe stays as an instrument and the policy that used it does not.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:

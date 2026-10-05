@@ -819,7 +819,10 @@ same hour (the stage latency, us):
 | Talaria, the default tier `wfe(monitor)` | 10 | 1.59-1.75 | 5.5-6.0 | **33.5-36.1** | 43-46 (96-110 with `talaria.stat=`) |
 | Talaria, `talaria.sync=hlt` (`wfi+ipi`) | 2 | 2.6-2.7 | 6.3-6.4 | **6.8** | 8.6-8.9 |
 | Talaria, `talaria.sysprof=1` (the profile perturbs the timing) | 1 | 1.89 | 5.6 | 8.2 | 36.9 |
-| Linux 6.18 (AL2023) | 15 | 3.5-4.1 | 4.1-4.4 | **4.6-5.7** | 5.5-15.5 (one run 4881: a host hiccup) |
+| Talaria, wfe + `talaria.wakepreempt=0` (a woken thread preempts at once) | 1 | 2.41 | 6.4 | **8.2** | 36.7 |
+| Talaria, wfe + `talaria.nowakebal=1` | 1 | 1.16 | 10.2 | 12.0 | 37.4 |
+| Talaria, wfe + `talaria.nosteal=1` / `talaria.slice=150000` | 1 + 1 | 1.58 / 1.72 | 5.5 / 5.7 | 32.9 / 34.9 | 37.3 / 38.9 |
+| Linux 6.18 (AL2023) | 18 | 3.5-4.2 | 4.1-4.5 | **4.6-5.7** | 5.5-15.5 (one run 4881: a host hiccup) |
 
 The `stat:` block over the same 30 s, wfe / hlt: futex waits 591 k / 246 k (ended by "the
 word itself" 316 k / 123 k), FUTEX_WAKE 374 k / 124 k, IPI reschedules of a core whose current
@@ -836,9 +839,11 @@ medians of four, ns, two instances):
 | an SGI, under `wfi` | 2209-2289 | 2249-2316 | 2254-2325 | 2494-2591 |
 
 The Nitro host wakes a `wfe` sleeper as fast as a `wfi` one, by either means, at every length:
-the 34 us is the wfe tier's policy (its traffic above), not its wake —
-`docs/ENGINEERING-NOTES.md` item 47. `talaria.sync=hlt` is the measured lever until the
-policy's share is found. Under TCG, for comparison: 0.6-1.6 / 4.3-6.2 / 16-51 us.
+the 34 us is the wfe tier's policy, not its wake — and the knobs name the part: with
+`talaria.wakepreempt=0` the p99 is 8.2 us, i.e. the woken worker waits on a BUSY core for the
+running task to have run the wake-preemption threshold, and the wfe tier lands it there where
+`wfi+ipi` does not (`docs/ENGINEERING-NOTES.md` item 47). `talaria.sync=hlt` (p99 6.8) and
+`talaria.wakepreempt=0` (8.2) are the measured levers until that placement is understood. Under TCG, for comparison: 0.6-1.6 / 4.3-6.2 / 16-51 us.
 
 **The cache counter on a `c7g.large`** (`talaria.test=pmu`, `pmu-ev:` — each event on the last
 counter across a random walk of 64 MB, 1 M line loads): L2D_CACHE_REFILL (0x17) 0.99 per
