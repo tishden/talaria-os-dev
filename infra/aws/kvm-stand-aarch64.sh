@@ -128,7 +128,7 @@ fi
 
 # The large services' volumes (services/build-aarch64-db.sh on the dev box: the PostgreSQL and
 # MariaDB data come from the x86 builds there) travel as sparse files, compressed.
-DBIMGS=$(cd "$REPO/kernel/target" 2>/dev/null && ls a64-services/ext2-pg.img a64-services/ext2-mdb.img a64-services/ext2-mongo.img a64-services/ext2-jvm.img 2>/dev/null | tr '\n' ' ')
+DBIMGS=$(cd "$REPO/kernel/target" 2>/dev/null && ls a64-services/ext2-pg.img a64-services/ext2-mdb.img a64-services/ext2-mongo.img a64-services/ext2-jvm.img a64-services/ext2-ch.img 2>/dev/null | tr '\n' ' ')
 if [ -n "$DBIMGS" ]; then
   # A FILE AND A RESUMABLE COPY, not a pipe: the first try streamed ~600 MB of tar through one
   # ssh, the connection blinked ("client_loop: send disconnect: Broken pipe") and `set -e`
