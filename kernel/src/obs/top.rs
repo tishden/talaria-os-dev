@@ -202,6 +202,14 @@ pub fn pmu_line() {
         // the difference of a value with itself, i.e. zero, and it would blur the total.
         if p.valid && p.pmu_seq[c] != 0 && seq != p.pmu_seq[c] {
             let x = s.delta(&p.pmu[c]);
+            // A difference no core can produce is not added: more cycles than 16 per tick of
+            // the counter (no core runs 16x its timer), or an IPC above 8. One such core used
+            // to wrap the sum into an IPC of tens of millions; now it is named with its numbers.
+            if !x.plausible() {
+                crate::println!("PMU    core {}: an impossible difference (cycles {} instrs {} over {} counter ticks) — left out",
+                    c, x.cycles, x.instrs, x.tsc);
+                continue;
+            }
             d.cycles += x.cycles; d.instrs += x.instrs;
             d.llc_miss += x.llc_miss; d.llc_ref += x.llc_ref;
             d.br_miss += x.br_miss; d.br_ret += x.br_ret;

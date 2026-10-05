@@ -349,6 +349,7 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
         percpu::init(me);
         unsafe { gic::enable_local(ppi); for sgi in 0..16u32 { gic::enable_local(sgi); } }
         super::pmu::NARROW.store(crate::cmdline::flag(cmdline, "talaria.pmunarrow"), Ordering::Relaxed);
+        super::pmu::USE_CHAIN.store(crate::cmdline::flag(cmdline, "talaria.pmuchain"), Ordering::Relaxed);
         crate::boot_shared(si, cmdline, cpu::counter_hz(), None);
     }
     // The bring-up's EL0 probes call the vDSO through the KERNEL's tables, so the image is

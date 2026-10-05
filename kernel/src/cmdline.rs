@@ -332,6 +332,7 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.ntp", Kind::Check(ntp_ok), "the wall clock's reference: SNTP to aws (169.254.169.123) or a.b.c.d, optionally ,<poll s> (default 16)"),
     once("talaria.pci", Kind::Flag, "bring PCI up (ECAM/ivshmem)"),
     many("talaria.pin", Kind::Text, "a thread placement rule"),
+    once("talaria.pmuchain", Kind::Flag, "arm64: use a declared CHAIN for 64-bit counter pairs (off: a Graviton VM declares it and does not carry)"),
     once("talaria.pmunarrow", Kind::Flag, "arm64: the PMU's counters at 32 bits, widened by the reader (a test of the no-CHAIN path)"),
     once("talaria.pmutick", Kind::Num, "taking the PMU counters in the tick, ms (0 — off)"),
     once("talaria.pollgap", Kind::Num, "an idle stack pass no more often than every N ns"),
