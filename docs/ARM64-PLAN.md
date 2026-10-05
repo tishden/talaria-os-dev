@@ -1886,13 +1886,38 @@ timestamps), the midpoint pair and the burst.
 **The pulled plug on EBS** — phase 7's second exit gate: `ec2-crash-test.sh` on `c7g.large`,
 ordered and `journal=data`, both `RECOVERED OK` after `stop-instances --force`.
 
+**The guide on a Graviton, and what it found.** `talaria-deploy.sh` takes arm64 (`--arch`, or
+the binary's `e_machine`, or a Graviton type; the UEFI image through `mk-ami.sh`, the AMI
+`--architecture arm64 --boot-mode uefi`, no disk trace — the console works), `examples/mdpipe`
+builds for aarch64 (`make a64`), and HANDS-ON-GUIDE §11.1 is the run on a `c7g.large` — phase 8's
+last exit gate. The run found three defects, each reproduced under TCG with the old binary and
+now gated (`docs/ENGINEERING-NOTES.md` items 44-45):
+* the supervisor's reset at a workload's end closed the SNTP socket with the workload's UDP
+  sockets, and the next pass panicked in smoltcp on the dangling handle;
+* a workload that does not use the network does not drive the stack, so the client in the pass
+  sampled once in 30 s — it now runs from core 0's tick when a poll is due and the stack has
+  been idle 2 ms, with a bounded wait (≤ 500 us a query, ≤ 2 ms a tick) so the round trip does
+  not carry a tick;
+* `top`'s IPC of 6.8e7: a `c7g.large` declares CHAIN and its odd counter never carries (a raw
+  probe: five wraps of the low half in ten seconds, the high half 0; a carry check at boot passed —
+  right after a write it carries); CHAIN is opt-in now (`talaria.pmuchain=1`), below PMUv3p5 the
+  reader widens 32-bit counters, and `top` refuses (and prints raw) a difference no core can
+  produce. On the way, the per-core snapshot slot became a seqlock
+  with the writer's interrupts masked.
+
+**The KVM stand on `e95abf4`** (the TODO's "the whole stand on HEAD"): the gate 313/0 under KVM,
+the five servers 15/0 in both wait modes, the soak 0 of 650, the parallel detector 0 of 576, two
+more gate runs clean (`docs/MEASUREMENTS.md` §10.10). `netmix` stays off by default — under KVM
+it changes nothing measurable.
+
 Phase 7 stands complete against its table: the services on `virt` and under KVM (§10.13),
 ClickHouse on the Graviton itself, the power cut on a `c7g` with EBS. Phase 6's
 "wall-clock reference decision" is made: SNTP everywhere, the PHC where it exists.
 
-Gates after the session: arm64 `test-aarch64.sh` **336/0** under TCG (four `ntp` checks new, no
-SKIP), x86 `test.sh` **505/0** + host 22/0 (four `ntp` checks new), kernel-unit 302/0 (six `ntp`
-tests new), clippy clean on both.
+Gates after the session: arm64 `test-aarch64.sh` **338/0** under TCG (six `ntp` checks new, no
+SKIP), x86 `test.sh` **507/0** + host 22/0 (six `ntp` checks new), kernel-unit 302/0 (six `ntp`
+tests new), `talaria.test=obs` with the PMU difference's plausibility on both, clippy clean on
+both.
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
