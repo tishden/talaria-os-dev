@@ -2896,6 +2896,7 @@ fn rust_schedule_inner(cur_rsp: u64) -> u64 {
     // stamps that the kernel hands out apart from the workload stand on it. The path is cheap and
     // bounded by construction (tsc::wall_tick), otherwise it would have no place here.
     crate::tsc::wall_tick();
+    crate::netsys::ntp_tick(); // the network reference, when nobody drives the stack (bounded, see there)
     tp(2, &mut tpt);
     let n = NREADY.load(Ordering::SeqCst);
     if n == 0 { return bsp_stay(idle, cur0, cur_rsp); }

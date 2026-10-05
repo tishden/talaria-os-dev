@@ -153,6 +153,8 @@ else rm -f "$IMG/disk_glibc.img"; fi
 
 # the talaria-pack disk for the test of the canonical launch (talaria.mode=cell, RELEASE-1.0 §2.1/2.2)
 python3 "$REPO/kernel/tools/talaria-pack" -o "$IMG/disk_cell.img" --app "$REPO/kernel/user/cppdtor" >/dev/null 2>&1 || echo "talaria-pack: disk_cell.img was not built"
+# ntp under a workload that never touches the network (idleshoot: 5 s of threads, mmap, sleeps)
+python3 "$REPO/kernel/tools/talaria-pack" -o "$IMG/disk_ntpcell.img" --app "$REPO/kernel/user/idleshoot" >/dev/null 2>&1 || echo "talaria-pack: disk_ntpcell.img was not built"
 # V1.9: the same production path, but the layout of the threads is given IN THE MANIFEST
 # (not on the command line): talaria-pack itself writes pin=/spread= into /cell.manifest.
 python3 "$REPO/kernel/tools/talaria-pack" -o "$IMG/disk_sched.img" \
@@ -1069,6 +1071,14 @@ assert "ntp: sample 8 from 10\.0\.0\.1: .* steps 0 back 0" "ntp: eight samples, 
 R=$(python3 /w/kernel/tools/ntpcmp.py 10.0.0.2 7777 10.0.0.1 2>&1); E=$(echo "$R" | sed -n 's/.*reference = \([-+][0-9]*\) us.*/\1/p')
 if [ -n "$E" ] && [ "${E#[-+]}" -lt 1000 ]; then echo "  PASS  ntp: the guest's wall clock is ${E} us from the reference, judged from outside"; PASS=$((PASS+1))
 else echo "  FAIL  ntp: the guest's wall clock against the reference ($R)"; FAIL=$((FAIL+1)); fi
+stopq $q
+# A workload that never touches the network does not drive the stack: the client runs from the
+# tick then (netsys::ntp_tick). And at the workload's end the supervisor's reset must leave the
+# kernel's socket alone — it closed it once, and the next pass panicked in smoltcp (a Graviton).
+q=$(bootdn "talaria.mode=cell talaria.ntp=10.0.0.1,1" /img/disk_ntpcell.img)
+for _ in $(seq 1 40); do grep -q "supervise: code\|PANIC" /tmp/o.log 2>/dev/null && break; sleep 0.5; done; sleep 1
+assert "ntp: sample 4 from 10\.0\.0\.1: .* steps 0 back 0" "ntp: the samples go on under a workload that does not use the network (the tick drives the client)"
+refute "PANIC|handle does not refer" "ntp: the supervisor's reset at the workload's end keeps the kernel's SNTP socket"
 stopq $q
 q=$(boot "talaria.mode=userver talaria.ntp=10.0.0.9,1" net)
 assert_slow "netsys: ntp: no sample in 3 s" "ntp: a silent server is said, and the boot goes on"
