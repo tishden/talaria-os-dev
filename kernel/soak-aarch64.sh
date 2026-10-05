@@ -23,7 +23,6 @@ OUT=${2:-$REPO/kernel/target/a64-soak}
 IMG=kernel/target/aarch64-talaria/release/talaria.img
 TD=kernel/target/a64-disks
 [ -f "$REPO/$IMG" ] || { echo "there is no $IMG — run kernel/build-aarch64.sh first"; exit 1; }
-[ -f "$REPO/$TD/ext2.img" ] || { echo "there is no $TD/ext2.img — run kernel/test-aarch64.sh once first"; exit 1; }
 mkdir -p "$OUT"
 ACCEL="-cpu max"
 [ "$(uname -m)" = "aarch64" ] && [ -c /dev/kvm ] && ACCEL="-enable-kvm -cpu host"
@@ -67,6 +66,8 @@ BAD='\[trap\]|PANIC|is spoilt|\[futex\] IT HAS HUNG|AN UNEXPECTED SIGSEGV|an unk
 echo "== the arm64 soak: $N boots of each mode, $SMP cores, $ACCEL, $PAR at a time ($(nproc) host cores) =="
 echo "$TABLE" | while IFS='|' read -r name append disk want; do
   case " ${MODES:-$(echo "$TABLE" | cut -d'|' -f1 | tr '\n' ' ')} " in *" $name "*) ;; *) continue;; esac
+  # a mode with a disk needs the image the gate leaves (kernel/test-aarch64.sh once); one without runs anyway
+  if [ -n "$disk" ] && [ ! -f "$REPO/$TD/$disk.img" ]; then echo "  soak: $name — SKIPPED: there is no $TD/$disk.img (run kernel/test-aarch64.sh once)"; continue; fi
   fails=0; i=1; t0=$(date +%s)
   while [ $i -le "$N" ]; do
     # a batch of PAR boots at once, each on its own copy of the disk; then each is judged

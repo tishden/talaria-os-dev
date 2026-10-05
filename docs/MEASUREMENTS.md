@@ -665,6 +665,56 @@ changed is outside `kernel/src` — `build.rs` began embedding the `tsync` set, 
 grew, everything after the embedded data moved — so the next A/B is the embedding alone
 (and an image padded to the same size without it). The barriers and the atomics stay.
 
+### 10.7. Phase 7 on the metal: the five servers under KVM; the step is the layout's (2026-10-05)
+
+`c7g.metal` (`kvm-stand-aarch64.sh` at `192ff25`, the services' volumes uploaded as sparse
+tarballs, `BISECT=ea24e3f VARIANTS=infra/aws/ab-layout ABROUNDS=6`; provisioned in 98 s, the
+kernel built in 439 s). `kernel/test-aarch64-db.sh` under KVM, Neoverse V1, four vCPUs:
+
+| server | the product's wait (spinning) | `talaria.netmix=1000000` |
+| --- | --- | --- |
+| PostgreSQL 16.14 (Alpine aarch64) | 15/15 checks of the set; answers in 3 s | answers in 1 s |
+| MariaDB 10.11.18 | answers in 1 s | 2 s |
+| MongoDB 4.0.5 (Alpine 3.9, dynamic) | 3 s | 2 s |
+| Temurin 21 aarch64, `Bench all` | speedup4 **3.98**, park/unpark p50 **0.40 us** | 3.99, 0.42 us |
+| ClickHouse 25.8 (the official arm64 ET_EXEC) | B12's set in **5 s**, exit 0 | 5 s |
+
+Both rows 15/0: validate.sh B10-B12's arm64 twin on hardware. The x86 B11 thresholds
+(speedup4 > 2.2, park p50 < 10 us) are passed with margin; the JVM's park p50 on x86 under
+KVM is 4.1 us (`services/jvm`, this session).
+
+The PMU on a Neoverse V1 through KVM: **PMUv3p4**, 6 event counters + the cycle counter, the
+width CHAIN pairs (32-bit counters, no PMUv3p5 `LP`); the events found by `PMCEID`:
+`INST_RETIRED` 0x08, `LL_CACHE_MISS_RD` 0x37, `BR_MIS_PRED_RETIRED` 0x22 — no LLC-reference
+and no branch-retired counter is exposed. The gate's loop: 60 000 660 cycles, 120 000 057
+instructions, IPC 1.99.
+
+The A/B of §10.6's open question, six interleaved rounds, the median p50 in ns (the variants
+are patches over `192ff25`):
+
+| variant | futex cross | futex same | condvar cross |
+| --- | --- | --- | --- |
+| `ea24e3f` | 539 | 540 | 1984 |
+| `notsync` (no `tsync/` embedded: the image 143 KB smaller) | 534 | 533 | 2064 |
+| `tsyncpad` (a blob of tsync's 143 424 bytes in its place) | 532 | 533 | 2033 |
+
+Both of today's variants are at `ea24e3f`'s level, with and without the embedded set: the
++30-50 ns "step" of §10.5-§10.6 does not belong to any code or to the embedding — today's
+tree moved everything again (the kernel's `.bss` grew by 4 MB this session) and the step is
+gone. It was the layout's lottery; nothing to chase. (HEAD's own `futexlat` runs, not
+interleaved: 567 and 546.)
+
+The numbers otherwise as before: udp p50 11.3 us (polling), tcp 71 882 req/s; `mbench`
+syscall 155 ns, `svccost` 131 ns with the FP/SIMD save and 113 without; the ring, icache and
+bbm probes clean (0 wrong values, 0 TLB conflict aborts over 51 M reads).
+
+Two failures, both one class: the gate's `tsync` and one of three `futexlat` boots died on
+their FIRST instruction — a level-3 permission fault ("not executable") on the static
+image's first page at 0x5000_0000, the task on the kernel's own tables (`run_threaded`). The
+soak: `syncbench` 7 of 50, the rest 0; the parallel detector (24 boots at once):
+`futexlat` 10 of 96, `syncbench` 13 of 96, `forkap`/`shmrace`/`memrace`/`piperace` 0. Never
+under TCG, in any CPU model (`-cpu max`, `neoverse-v1`). See §10.8.
+
 ## 11. Reproducing any of this
 
 ```sh
