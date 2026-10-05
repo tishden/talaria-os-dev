@@ -1950,9 +1950,9 @@ theory "Nitro wakes a `wfe` sleeper late" was measured and refuted (`talaria.tes
 a store 140 ns, an SGI 2.3-2.5 us under `wfe` and `wfi` alike, after 30 us .. 1 ms of sleep); a
 first probe that switched the tier on the store's wake alone was built and dropped the same
 hour. The tier's traffic differs (2.4x the futex waits, 2.3x the reschedule IPIs), and the knobs
-name the part: `talaria.wakepreempt=0` takes the p99 to 8.2 us — the woken worker waits on a busy
-core for the wake-preemption threshold. Why the wfe tier puts it there is open; `talaria.sync=hlt`
-(6.8) and `wakepreempt=0` (8.2) are the measured levers meanwhile. Item 47.
+move it: `talaria.wakepreempt=0` takes the p99 to 8.2 us. The wake latency itself is mostly
+under 20 us in both tiers, so what that knob changes is open; `talaria.sync=hlt` (6.8) and
+`wakepreempt=0` (8.2) are the measured levers meanwhile. Item 47.
 
 **The direct map**: the plan is §10.16.
 

@@ -839,17 +839,19 @@ medians of four, ns, two instances):
 | an SGI, under `wfi` | 2209-2289 | 2249-2316 | 2254-2325 | 2494-2591 |
 
 The Nitro host wakes a `wfe` sleeper as fast as a `wfi` one, by either means, at every length:
-the 34 us is the wfe tier's policy, not its wake — and the knobs name the part: with
-`talaria.wakepreempt=0` the p99 is 8.2 us, i.e. the woken worker waits on a BUSY core for the
-running task to have run the wake-preemption threshold, and the wfe tier lands it there where
-`wfi+ipi` does not (`docs/ENGINEERING-NOTES.md` item 47). `talaria.sync=hlt` (p99 6.8) and
+the 34 us is the wfe tier's policy, not its wake — and a knob moves it: with
+`talaria.wakepreempt=0` (a woken thread preempts at once) the p99 is 8.2 us
+(`docs/ENGINEERING-NOTES.md` item 47). `talaria.sync=hlt` (p99 6.8) and
 `talaria.wakepreempt=0` (8.2) are the measured levers until that placement is understood.
 The `stat:` block's new kick line names it (one more run, wfe): of 129 188 kicks, 2 746 went to
 the woken task's own core (it sleeps in place — the kick ends its wait) and **126 442 to a core
 running ANOTHER task** (md_work0 101 093, md_work1 25 337, each having run ~1 us; asleep at that
-moment: 29). A kick only ends a `wfe`; a running core does not notice it, and the woken worker
-waits until the other one gives the core up. With `wakepreempt=0` exactly those become
-reschedules with the hint — hence its 8.2 us. Under TCG, for comparison: 0.6-1.6 / 4.3-6.2 / 16-51 us.
+moment: 29). A kick only ends a `wfe`; a running core does not notice it. But the same block's
+"wakeup -> cpu" histogram says the woken thread mostly does not wait long: under 5 us 194-213 k,
+5-20 us 50-81 k, 20-50 us 1.2-2.0 k, beyond 50 us under 1 k, of 251-290 k wakeups — while a
+p99 of 34 us needs ~6 k of the 600 k ticks beyond it. So the tail is not the wake's latency
+either; what `wakepreempt=0` changes to remove it is open (in `wfi+ipi` the same histogram is
+5.6-5.9 k under 5 us and 108-117 k at 5-20 us: slower wakes, no tail). Under TCG, for comparison: 0.6-1.6 / 4.3-6.2 / 16-51 us.
 
 **The cache counter on a `c7g.large`** (`talaria.test=pmu`, `pmu-ev:` — each event on the last
 counter across a random walk of 64 MB, 1 M line loads): L2D_CACHE_REFILL (0x17) 0.99 per
