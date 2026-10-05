@@ -1832,6 +1832,15 @@ register file carried, ClickHouse's runs are clean (6 of 6, four with the push o
 stealing push off). Also: `get_mempolicy`/`set_mempolicy`/`mbind` (one node: the default
 policy, accepted) — arm64's ClickHouse asks at start-up.
 
+**On the metal** (`docs/MEASUREMENTS.md` §10.7-§10.8): the five servers under KVM 15/0 with the
+product's spinning wait and 15/0 with `netmix` (the JVM's speedup4 3.98, park 0.40 us;
+ClickHouse's B12 in 5 s). The stand found one more defect of both machines: the secondary
+cores ran `syscall::init`, whose global half allocated and re-zeroed the workload's brk heap —
+a test's static image died on its first instruction in 10-17 % of the parallel detector's
+boots; `init_core` closes it (0 of 288 after, 31 of 288 before; ENGINEERING-NOTES item 41).
+The wake path's "step" of §10.11-§10.12 was the layout's lottery: with and without the
+embedded `tsync`, today's tree is at `ea24e3f`'s level.
+
 Gates after the session: `kernel/test-aarch64-db.sh` **14/0** under TCG (the five servers,
 ClickHouse's B12 set in 20 s), arm64 `test-aarch64.sh` **316/0** (`dyn`, `idregs`, `mixwait`,
 `migregs` new), x86 `test.sh` **501/0** + host 22/0 (`mixwait`, `migregs` new), kernel-unit
