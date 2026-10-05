@@ -713,7 +713,28 @@ their FIRST instruction — a level-3 permission fault ("not executable") on the
 image's first page at 0x5000_0000, the task on the kernel's own tables (`run_threaded`). The
 soak: `syncbench` 7 of 50, the rest 0; the parallel detector (24 boots at once):
 `futexlat` 10 of 96, `syncbench` 13 of 96, `forkap`/`shmrace`/`memrace`/`piperace` 0. Never
-under TCG, in any CPU model (`-cpu max`, `neoverse-v1`). See §10.8.
+under TCG, in any CPU model (`-cpu max`, `neoverse-v1`). Found and closed in §10.8.
+
+### 10.8. The first-instruction faults: four targeted runs (2026-10-05)
+
+`kvm-stand-aarch64.sh` with `CUSTOM="PAR=24 MODES='tsync futexlat syncbench'
+kernel/soak-aarch64.sh 96 /tmp/custom"` (the build, the 288 boots, the instance down; ~15
+minutes of a `c7g.metal` each), boots that fail out of 96:
+
+| kernel | instruments | futexlat | syncbench | tsync |
+| --- | --- | --- | --- | --- |
+| `192ff25` (§10.7's detector) | — | 10 | 13 | — |
+| `d9f7d04` (the image's range reserved) | `talaria.ptlog=1` | 0 | 0 | 0 |
+| `d9f7d04` | — | **17** | **13** | **1** |
+| `579113e` (the secondaries arm their entry only) | — | **0** | **0** | **0** |
+
+The second row is the trap: the page-table journal's writes moved the timing and the race
+hid; the same kernel without it failed 31 of 288. The failures' signatures named the cause
+once read together — the code page NX, `udf` where the code was (a SIGILL, EC 0), and a
+SECONDARY core's write fault on the read-only code page from `syscall::init`: the secondaries
+allocated and re-zeroed the workload's brk heap (`docs/ENGINEERING-NOTES.md` item 41). One
+targeted run failed for capacity: no `c7g.metal` in any of the three zones for 18 minutes; the
+next one, minutes later, got one in the first.
 
 ## 11. Reproducing any of this
 

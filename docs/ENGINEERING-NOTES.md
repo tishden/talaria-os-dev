@@ -741,6 +741,21 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     per-core block's accessors read `TPIDR_EL1 + 0x20` before `percpu::init`, when the register
     is 0, and had been reading `virt`'s flash all along. The accessors are null-safe now. A
     mapping at address 0 hides null dereferences; the first thing that unmaps it finds them.
+41. **"A per-core init with a global half."** `syscall::init` armed THIS core's syscall entry
+    and, on the side, the workload's common brk heap: the first call allocated it (128 MB,
+    made NX), a repeated one zeroed its used part — for a workload's restart. The secondary
+    cores called it as they came up (both machines). A secondary up before the launch path
+    allocated the heap before the static image's range was reserved, over the image (the code
+    became NX: the first instruction "not executable"); one up after the workload started
+    zeroed the heap — the code under it (`udf`, a SIGILL), or faulted on the read-only page.
+    Only on the KVM stand, in the parallel detector (futexlat 17 of 96, syncbench 13 of 96),
+    never under TCG in any CPU model: a real core comes up later relative to the boot core.
+    `init_core` is the entry alone; the secondaries call it. Two detours on the way, worth
+    keeping: reserving the embedded image's range (`user::reserve_embedded`, right in itself)
+    looked like the fix because the run that tested it had the page-table journal on — the
+    journal's writes moved the timing and the failures went to 0 of 288; the same kernel
+    without it failed 31 of 288. **Test a fix with the instruments that change timing OFF**,
+    and **an `init` called per core must not own anything global.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
