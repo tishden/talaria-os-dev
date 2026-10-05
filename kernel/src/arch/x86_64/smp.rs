@@ -1151,7 +1151,7 @@ extern "C" fn ap_entry() -> ! {
             crate::percpu::init(id);
             AP_STAGE.store(7, Ordering::SeqCst);
             unsafe { crate::user::setup_gdt_cpu(id, 0); }
-            crate::syscall::init();
+            crate::syscall::init_core(); // the entry only: the heap is the launch path's (see there)
             AP_STAGE.store(8, Ordering::SeqCst);
             crate::sched::ap_loop(id);
         }

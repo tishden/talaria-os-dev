@@ -453,7 +453,7 @@ extern "C" fn rust_ap_main(ctx: u64) -> ! {
         2 => {
             percpu::init(me);
             unsafe { for sgi in 0..16u32 { gic::enable_local(sgi); } }
-            crate::syscall::init();
+            crate::syscall::init_core(); // the entry only: the heap is the launch path's (see there)
             crate::sched::ap_loop(me)
         }
         3 => {
