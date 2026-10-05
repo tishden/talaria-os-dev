@@ -644,6 +644,7 @@ assert 'wakeprobe: a store under wfe: the median wake after 30 us, 100 us, 300 u
 assert 'wakeprobe: an SGI under wfe: the median wake after .* [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: an SGI wakes a wfe sleeper, timed'
 assert 'wakeprobe: an SGI under wfi: the median wake after .* [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: an SGI wakes a wfi sleeper, timed'
 assert 'wakeprobe: OK'                                                     'wakeprobe: every round woke'
+grep -E 'wakeprobe: (a|an) ' "$LOG" | cut -c1-200 | sed 's/^/      /'   # the numbers, for the stand's log
 boot 120 "talaria.test=pmu"
 assert 'talaria: the PMU is on \(PMUv3'                                    'pmu: PMUv3 found and programmed (cycles + event counters)'
 assert 'pmu: [0-9]+ iterations \(rdpmc\): cycles=[0-9]+ instrs=[1-9][0-9]* IPC=' 'pmu: cycles AND retired instructions counted'
@@ -665,7 +666,13 @@ assert 'obs: ALL OK'                                                       'obs:
 assert 'kstat sync: the wait primitive is wfe'                             'obs: kstat names the arm64 wait tier'
 boot 90 "talaria.test=console"
 assert 'perf: SUMMARY  IPC '                                               'console: perf computes the IPC from the counters'
-assert 'perf: SUMMARY  IPC [0-9]+\.[0-9]+, LLC misses - \(no counter\)'      'console: an event without a counter is "-", not a zero (QEMU declares no cache event)'
+# An event the core does not count prints "-" (TCG declares no cache event); under KVM the host's
+# PMU counts it, and the column is a number.
+if [ "$KVM" = 1 ]; then
+  assert 'perf: SUMMARY  IPC [0-9]+\.[0-9]+, LLC misses [0-9]+ '             'console: the LLC column is a count where the core has the event (KVM)'
+else
+  assert 'perf: SUMMARY  IPC [0-9]+\.[0-9]+, LLC misses - \(no counter\)'    'console: an event without a counter is "-", not a zero (QEMU declares no cache event)'
+fi
 if [ -f "$REPO/kernel/user/aarch64/profdeep" ]; then
   boot 120 "talaria.test=profdeep"
   assert 'profdeep: ALL OK'                                                'profdeep: the workload'"'"'s stack unwinds on a live workload (five levels, x29 chain)'
