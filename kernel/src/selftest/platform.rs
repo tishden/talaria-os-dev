@@ -337,6 +337,15 @@ pub fn run(name: &str, cmdline: &str) -> bool {
         "console" => {
             crate::console::selftest();
         }
+        "wakeprobe" => {
+            // What a store and an SGI cost to wake a sleeping core, under wfe and under wfi
+            // (`arch::smp::wake_probe`; docs/ENGINEERING-NOTES.md item 47).
+            #[cfg(target_arch = "aarch64")]
+            crate::smp::wake_probe();
+            #[cfg(not(target_arch = "aarch64"))]
+            println!("wakeprobe: arm64 only (x86 has no wfe tier to probe)");
+            crate::suite::park()
+        }
         "dirtyprot" => {
             // A WRITTEN page that is then write-protected is still written: `protect` rebuilt
             // the leaf without D on both machines, and arm64 kept D in AP[2], which a read-only
@@ -405,6 +414,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             }
             crate::pmu::selftest_idle();
             crate::pmu::selftest_chain();
+            crate::pmu::selftest_events();
             if cycles > 0 { println!("pmu: OK (cycles={} source={})", cycles, source); }
             else { println!("pmu: FAIL (a zero counter)"); }
             crate::suite::park()

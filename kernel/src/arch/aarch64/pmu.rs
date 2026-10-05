@@ -37,8 +37,10 @@
 //! ## Declared versus counting
 //!
 //! As on x86 the declaration is checked against the deed: `PMCEID0/1` says which common
-//! events the core implements, and after programming every counter is read twice around a
-//! short loop — one that did not move is dropped (`NONE`), not reported as a zero. Under
+//! events the core implements, and after programming the counters of what a short loop is sure
+//! to produce (the instructions, the branches) are read twice around it — one that did not
+//! move is dropped (`NONE`), not reported as a zero. A miss event is taken by its declaration:
+//! the loop touches no memory, and a working one would stand still over it. Under
 //! TCG `INST_RETIRED` is implemented only with `-icount`; without it the IPC is honestly
 //! absent.
 //!
@@ -287,7 +289,13 @@ pub fn init_cpu() -> bool {
         pmuserenr_w((1 << 2) | (1 << 3)); // CR | ER: EL0 reads the cycle and event counters
     }
     if !counts(None) { return false; }
-    for l in 0..NL {
+    // ONLY THE EVENTS THE LOOP CERTAINLY PRODUCES are judged by "does it move": the instructions
+    // and the branches retired (x86 checks its fixed cycles and instructions the same way). A
+    // cache miss, a cache access or a mispredicted branch needs no ALU loop to be real: on a
+    // `c7g.large` the declared fallback L2D_CACHE_REFILL counts 0.99 per line over a random walk
+    // (`talaria.test=pmu`, `pmu-ev:`), yet over this loop it stood still — and the boot dropped it,
+    // so `top` showed "LLC misses 0" on every interval (the next-session list's item 4).
+    for l in [L_INS, L_BRR] {
         if IDX[l].load(Ordering::Relaxed) != NONE && !counts(Some(l)) { IDX[l].store(NONE, Ordering::Relaxed); }
     }
     let c = super::cpu::cpu_index();
@@ -330,6 +338,10 @@ fn show(l: usize) -> crate::obs::S<16> {
 }
 
 pub fn available() -> bool { AVAILABLE.load(Ordering::Relaxed) }
+/// Whether a counter carries the LLC misses / the predictor's misses at all (`top` and `perf`
+/// print "-" for one that does not, never a zero that was not measured).
+pub fn has_llc() -> bool { available() && IDX[L_LLCM].load(Ordering::Relaxed) != NONE }
+pub fn has_br() -> bool { available() && IDX[L_BRM].load(Ordering::Relaxed) != NONE }
 pub fn armed_mask() -> u64 { ARMED.load(Ordering::Relaxed) }
 /// The event counters the core has (x86's "GP"); arm64 has no fixed ones but the cycles.
 pub fn ngp() -> u32 { NCTR.load(Ordering::Relaxed) }
@@ -460,4 +472,65 @@ pub fn selftest_idle() {
         core::arch::asm!("msr cntv_cval_el0, {}", "msr cntv_ctl_el0, {}", "isb", in(reg) cval, in(reg) ctl & 1, options(nomem, nostack));
         super::cpu::irq_restore(f);
     }
+}
+
+/// `talaria.test=pmu`, the cache events by DEED: each candidate on the spare counter (the last
+/// one, past the logical events) across a random walk of 64 MB — twice a Graviton3's system
+/// cache, one load per 64-byte line in an order no prefetcher follows (a full-period LCG over
+/// the lines). `PMCEID` says what a core implements; a VM's hypervisor decides what reaches it,
+/// and on a `c7g.large` the LLC-miss of the boot line read 0 (the next-session list, item 4).
+/// The line per event: declared or not, and the count over 1 M line loads.
+pub fn selftest_events() {
+    if !available() { return; }
+    let n = NCTR.load(Ordering::Relaxed).min(MAXCTR);
+    let per = if WIDTH.load(Ordering::Relaxed) == 2 { 2 } else { 1 };
+    let top = (0..NL).filter_map(|l| { let i = IDX[l].load(Ordering::Relaxed); if i == NONE { None } else { Some(i + per - 1) } }).max();
+    crate::println!("pmu-ev: PMCEID0={:#018x} PMCEID1={:#018x} event counters {}", pmceid0(), pmceid1(), n);
+    // The last counter: a spare one, or (a `c7g.large` has two) the last logical event's, borrowed
+    // for the probe and given its event back after it.
+    let Some(spare) = n.checked_sub(1) else { return; };
+    let lent = top.is_some_and(|t| spare <= t);
+    let owner = (0..NL).find(|&l| IDX[l].load(Ordering::Relaxed) == spare);
+    if lent { crate::println!("pmu-ev: no spare counter — counter {} is borrowed from {:?} and given back", spare,
+        owner.map(|l| ["instructions", "LLC-miss", "predictor-miss", "LLC-ref", "branches"][l])); }
+    const PAGES: u64 = 16384; // 64 MB
+    let Some(buf) = crate::mem::alloc_contig(PAGES) else { crate::println!("pmu-ev: no 64 MB to walk"); return; };
+    let p = buf as *const u8;
+    let lines = PAGES * 4096 / 64;
+    // the first touch maps nothing (the direct map), but it fills the TLB walk caches: one pass first
+    let walk = || { let (mut k, mut s) = (0u64, 0u64); for _ in 0..lines { k = (k.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)) & (lines - 1);
+        s = s.wrapping_add(unsafe { core::ptr::read_volatile(p.add((k * 64) as usize)) } as u64); } core::hint::black_box(s); };
+    walk();
+    const EV: [(u32, &str); 12] = [(0x37, "LL_CACHE_MISS_RD"), (0x36, "LL_CACHE_RD"), (0x2A, "L3D_CACHE_REFILL"),
+        (0x2B, "L3D_CACHE"), (0x17, "L2D_CACHE_REFILL"), (0x16, "L2D_CACHE"), (0x03, "L1D_CACHE_REFILL"),
+        (0x04, "L1D_CACHE"), (0x13, "MEM_ACCESS"), (0x19, "BUS_ACCESS"), (0x2D, "L2D_TLB_REFILL"), (0x05, "L1D_TLB_REFILL")];
+    let f = super::cpu::irq_flags();
+    unsafe { super::cpu::irq_disable(); }
+    for &(ev, name) in EV.iter() {
+        unsafe {
+            pmcntenclr_w(1 << spare);
+            evtype_w(spare, ev as u64);
+            evcnt_w(spare, 0);
+            pmcntenset_w(1 << spare);
+            super::cpu::isb();
+        }
+        let c0 = pmccntr_r();
+        walk();
+        let (v, c1) = (evcnt_r(spare) & 0xFFFF_FFFF, pmccntr_r());
+        crate::println!("pmu-ev: {:#04x} {:<17} declared={} count={} per line {}.{:02} (cycles {})", ev, name,
+            has_event(ev) as u8, v, v / lines, v * 100 / lines % 100, c1.wrapping_sub(c0));
+    }
+    unsafe {
+        pmcntenclr_w(1 << spare);
+        if let Some(l) = owner {
+            // back to its event; a widened one restarts its wraps from this zero
+            evtype_w(spare, EVT[l].load(Ordering::Relaxed) as u64);
+            evcnt_w(spare, 0);
+            let c = super::cpu::cpu_index().min(MAXCPU - 1);
+            LO[c][l].store(0, Ordering::Relaxed);
+            pmcntenset_w(1 << spare);
+        }
+        super::cpu::irq_restore(f);
+    }
+    crate::mem::free_contig(buf, PAGES);
 }

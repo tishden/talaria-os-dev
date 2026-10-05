@@ -274,3 +274,109 @@ pub fn start_from_cmdline(cmdline: &str) {
     }
     crate::println!("talaria: the SMP scheduler: the online cores mask={:#x}", crate::percpu::ONLINE.load(Ordering::SeqCst));
 }
+
+// ── `talaria.test=wakeprobe`: what each way of waking a sleeping core costs ────────────────
+//
+// `wfe(monitor)` is the arm64 MWAIT: a sleeper arms the exclusive monitor on the futex word (or
+// its core's doorbell) and waits in `wfe`; a waker stores, and where the policy wants the core
+// rescheduled it sends an SGI to it, still asleep in `wfe`. `wfi+ipi` sleeps in `wfi` and is
+// always woken by an SGI. The probe times all three on the first secondary, sleeping as a futex
+// waiter does, after 30 us, 100 us, 300 us and 1 ms of sleep, four rounds each, and prints each
+// way's per-length medians. Built for one question (docs/ENGINEERING-NOTES.md item 47): does a
+// Graviton VM, where `examples/mdpipe`'s stage p99 is 34 us in the wfe tier and 6.8 us with
+// `talaria.sync=hlt`, wake a `wfe` sleeper late? It does not — a store 140 ns, an SGI 2.3-2.5 us
+// under `wfe` and under `wfi` alike, at every length — so the tail is the wfe tier's POLICY, not
+// its wake. The tier is not chosen by this probe.
+const WP_LEN: [u64; 4] = [30_000, 100_000, 300_000, 1_000_000];
+const WP_REP: usize = 4;
+const WP_WAYS: usize = 3;
+const WP_N: usize = WP_WAYS * WP_LEN.len() * WP_REP;
+const WP_WAY_NAME: [&str; WP_WAYS] = ["a store under wfe", "an SGI under wfe", "an SGI under wfi"];
+/// The word the sleeper monitors, alone in its line: a store next to it (the kick flag, the round
+/// counter) would clear the monitor and turn an SGI round into a store round.
+#[repr(align(128))]
+struct Line(AtomicU32);
+static WP_WORD: Line = Line(AtomicU32::new(0));
+static WP_KICK: Line = Line(AtomicU32::new(0));
+static WP_READY: Line = Line(AtomicU32::new(0));
+static WP_WOKE: [AtomicU64; WP_N] = [const { AtomicU64::new(0) }; WP_N];
+fn wp_way(k: usize) -> usize { k / (WP_LEN.len() * WP_REP) }
+fn wp_len(k: usize) -> usize { k % WP_LEN.len() }
+
+/// `talaria.test=wakeprobe`: the first secondary up through the probe, the medians printed.
+pub fn wake_probe() {
+    lapic_enable();
+    AP_HOOK.store(wfe_probe_ap as fn(usize) -> ! as usize as u64, Ordering::SeqCst);
+    AP_MODE.store(3, Ordering::SeqCst);
+    if start_cpu(1) { wfe_probe_judge(); crate::println!("wakeprobe: OK"); }
+    else { crate::println!("wakeprobe: FAIL — the AP did not come up (-smp 2 is required)"); }
+}
+
+/// The secondary's half, then mode 2's own start (the SGIs, the syscall entry, the pickup loop).
+fn wfe_probe_ap(me: usize) -> ! {
+    unsafe {
+        cpu::irq_disable();
+        for sgi in 0..16u32 { gic::enable_local(sgi); }
+    }
+    for k in 0..WP_N {
+        let want = k as u32 + 1;
+        let w0 = WP_WORD.0.load(Ordering::Acquire);
+        WP_READY.0.store(want, Ordering::Release);
+        match wp_way(k) {
+            // SAFETY (all three): W1/W3/W4 of sync.rs — a kernel word, on the core that sleeps, the
+            // interrupt window exactly the wait instruction.
+            0 => while WP_WORD.0.load(Ordering::Acquire) == w0 { unsafe { crate::sync::kwait_once(WP_WORD.0.as_ptr(), w0); } },
+            1 => while WP_KICK.0.load(Ordering::Acquire) != want { unsafe { crate::sync::kwait_once(WP_WORD.0.as_ptr(), w0); } },
+            _ => while WP_KICK.0.load(Ordering::Acquire) != want { unsafe { cpu::irq_enable_halt_disable(); } },
+        }
+        WP_WOKE[k].store(cpu::counter(), Ordering::Release);
+    }
+    crate::syscall::init_core();
+    crate::sched::ap_loop(me)
+}
+
+/// The boot core's half. A sleeper not woken in 5 ms gets another SGI and the
+/// round counts as 5 ms; 100 ms without the secondary's word ends the probe with the tier as it was.
+fn wfe_probe_judge() {
+    let hz = cpu::counter_hz().max(1);
+    let ns = |t: u64| (t as u128 * 1_000_000_000 / hz as u128) as u64;
+    let ticks = |n: u64| timer::ticks_for_ns(n);
+    let ap = apic_of(1) as u64;
+    let wake_sgi = crate::idt::WAKE_VECTOR as u32;
+    let mut d = [0u64; WP_N];
+    for k in 0..WP_N {
+        let want = k as u32 + 1;
+        let t0 = cpu::counter();
+        while WP_READY.0.load(Ordering::Acquire) != want {
+            if cpu::counter().wrapping_sub(t0) > ticks(100_000_000) { crate::println!("wakeprobe: the secondary did not arm round {}", k); return; }
+            core::hint::spin_loop();
+        }
+        let s0 = cpu::counter();
+        while cpu::counter().wrapping_sub(s0) < ticks(WP_LEN[wp_len(k)]) { core::hint::spin_loop(); }
+        let t = cpu::counter();
+        if wp_way(k) == 0 { WP_WORD.0.fetch_add(1, Ordering::Release); }
+        else { WP_KICK.0.store(want, Ordering::Release); gic::send_sgi(ap, wake_sgi); }
+        let mut kicked = false;
+        loop {
+            let w = WP_WOKE[k].load(Ordering::Acquire);
+            if w != 0 { d[k] = ns(w.wrapping_sub(t)); break; }
+            let el = cpu::counter().wrapping_sub(t);
+            if !kicked && el > ticks(5_000_000) { kicked = true; WP_KICK.0.store(want, Ordering::Release); gic::send_sgi(ap, wake_sgi); }
+            if el > ticks(100_000_000) { crate::println!("wakeprobe: round {} never woke", k); return; }
+            core::hint::spin_loop();
+        }
+        if kicked { d[k] = d[k].max(5_000_000); }
+    }
+    let mut med = [[0u64; 4]; WP_WAYS];
+    for way in 0..WP_WAYS {
+        for l in 0..WP_LEN.len() {
+            let mut v = [0u64; WP_REP];
+            let mut j = 0;
+            for k in 0..WP_N { if wp_way(k) == way && wp_len(k) == l { v[j] = d[k]; j += 1; } }
+            v.sort_unstable();
+            med[way][l] = v[WP_REP / 2];
+        }
+        crate::println!("wakeprobe: {}: the median wake after 30 us, 100 us, 300 us, 1 ms of sleep: {} {} {} {} ns",
+            WP_WAY_NAME[way], med[way][0], med[way][1], med[way][2], med[way][3]);
+    }
+}

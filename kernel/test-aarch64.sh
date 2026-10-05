@@ -639,6 +639,11 @@ echo "== observability on arm64: PMUv3, the profile with stacks, the gdb stub ==
 # instruction is one cycle, so the IPC is exactly 1.00 — a deterministic judge of the
 # counters and of the 32-bit widening across a wrap (talaria.pmunarrow=1).
 A0=$ACCEL; IC=0; [ "$ACCEL" = "-cpu max" ] && { ACCEL="$ACCEL -icount shift=0"; IC=1; }
+boot 60 "talaria.test=wakeprobe"
+assert 'wakeprobe: a store under wfe: the median wake after 30 us, 100 us, 300 us, 1 ms of sleep: [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: a store wakes a wfe sleeper, timed after four lengths of sleep'
+assert 'wakeprobe: an SGI under wfe: the median wake after .* [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: an SGI wakes a wfe sleeper, timed'
+assert 'wakeprobe: an SGI under wfi: the median wake after .* [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: an SGI wakes a wfi sleeper, timed'
+assert 'wakeprobe: OK'                                                     'wakeprobe: every round woke'
 boot 120 "talaria.test=pmu"
 assert 'talaria: the PMU is on \(PMUv3'                                    'pmu: PMUv3 found and programmed (cycles + event counters)'
 assert 'pmu: [0-9]+ iterations \(rdpmc\): cycles=[0-9]+ instrs=[1-9][0-9]* IPC=' 'pmu: cycles AND retired instructions counted'
@@ -660,6 +665,7 @@ assert 'obs: ALL OK'                                                       'obs:
 assert 'kstat sync: the wait primitive is wfe'                             'obs: kstat names the arm64 wait tier'
 boot 90 "talaria.test=console"
 assert 'perf: SUMMARY  IPC '                                               'console: perf computes the IPC from the counters'
+assert 'perf: SUMMARY  IPC [0-9]+\.[0-9]+, LLC misses - \(no counter\)'      'console: an event without a counter is "-", not a zero (QEMU declares no cache event)'
 if [ -f "$REPO/kernel/user/aarch64/profdeep" ]; then
   boot 120 "talaria.test=profdeep"
   assert 'profdeep: ALL OK'                                                'profdeep: the workload'"'"'s stack unwinds on a live workload (five levels, x29 chain)'
