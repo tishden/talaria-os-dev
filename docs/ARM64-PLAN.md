@@ -2095,9 +2095,17 @@ second defect closed: a `MAP_SHARED|MAP_FIXED` took the private branch and turne
 first fork. `sigtest` checks both (the address `0x6…`, the fixed one shared after a fork); with
 `talaria.sharedid=1` (the identity again) the same binary fails the fixed check — the gate
 catches. x86 514/0, arm64 351/0, x86 `validate.sh` 14/0 (PostgreSQL, MariaDB, MongoDB, the JVM,
-ClickHouse), arm64's databases (PostgreSQL's shared buffers, MariaDB, MongoDB) 10/0. Still
-identity: SysV `shmat` and POSIX `/dev/shm` objects (`shm_region`) — named sharing between
-unrelated processes, the next piece of 4a.
+ClickHouse), arm64's databases (PostgreSQL's shared buffers, MariaDB, MongoDB) 10/0.
+
+The named objects followed the same day: a SysV segment and a POSIX `/dev/shm` object take an
+address in the NAMED WINDOW (`0x7000_0000_0000`..`0x7800_0000_0000`, below the dynamic loader's
+`0x7f00…`), one per object, never reused and the SAME in every process — the identity's one
+property worth keeping, because the futex registry keys a waiter by its address and a futex in
+named memory must wake across unrelated processes. The frames are mapped as shared leaves into
+a space when it attaches (`shwin_attach` at `shmat` and at the object's `mmap`); ivshmem (the
+host's memory) keeps its identity; `talaria.sharedid=1` covers these too. `sigtest` prints both
+addresses (`0x70…`) and checks the POSIX object after a fork as well. x86 515/0, arm64 352/0,
+`validate.sh` 14/0, arm64 databases 10/0.
 
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound

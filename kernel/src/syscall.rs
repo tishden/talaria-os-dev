@@ -917,6 +917,7 @@ static mut SHM_SIZE: [u64; SHM_N] = [0; SHM_N];      // the size by the ftruncat
 static mut SHM_ADDR: [u64; SHM_N] = [0; SHM_N];
 /// How many bytes of the region have been handed out (for handing the access out again in another AS).
 static mut SHM_MAPSZ: [u64; SHM_N] = [0; SHM_N];      // the region's base (0 = not allocated yet)
+static mut SHM_PHYS: [u64; SHM_N] = [0; SHM_N];      // the frames when SHM_ADDR is the named window's address (0: the identity/ivshmem)
 static mut SHM_FD_OBJ: [i8; SHM_N * 4] = [-1; SHM_N * 4]; // the open fds -> the object's index
 // ── THE LOCK OF THE SHM TABLES ───────────────────────────────────────────────
 //
@@ -1028,7 +1029,7 @@ fn shm_lookup(name: &[u8], create: bool) -> Option<usize> {
         for i in 0..SHM_N {
             if SHM_NAME[i][0] == 0 {
                 let n = name.len().min(63); SHM_NAME[i][..n].copy_from_slice(&name[..n]); SHM_NAME[i][n] = 0;
-                SHM_SIZE[i] = crate::pci::ivshmem().1; SHM_ADDR[i] = 0; return Some(i);
+                SHM_SIZE[i] = crate::pci::ivshmem().1; SHM_ADDR[i] = 0; SHM_PHYS[i] = 0; return Some(i);
             }
         }
     }
@@ -1042,6 +1043,32 @@ fn shm_open_fd(obj: usize) -> i64 {
     -24
 }
 /// The base of an object's region: ivshmem (if there is one) or anonymous identity memory by the size.
+// THE NAMED SHARED MEMORY'S WINDOW (docs/ARM64-PLAN.md §10.16, stage 4a). A POSIX `/dev/shm`
+// object or a SysV segment used to be its frames' identity address — one address in every process,
+// which is what lets a futex in it wake across processes (the waiters are keyed by the address).
+// The window keeps that property without the identity: each object gets an address of its own
+// here, never reused, the same in every process, and its frames are mapped into a process's
+// space as shared (non-private) leaves when it attaches — `fork_cow_space` hands them to a child.
+// ivshmem (the host's memory, a device window) keeps its identity. `talaria.sharedid=1`: the
+// identity for these too.
+const SHWIN_BASE: u64 = 0x7000_0000_0000;
+const SHWIN_END: u64 = 0x7800_0000_0000;
+static SHWIN_NEXT: AtomicU64 = AtomicU64::new(SHWIN_BASE);
+/// An address in the window for `len` bytes (a page of separation after it), 0 when it is spent.
+fn shwin_alloc(len: u64) -> u64 {
+    let span = ((len + 0xFFF) & !0xFFF) + 0x1000;
+    let v = SHWIN_NEXT.fetch_add(span, Ordering::SeqCst);
+    if v + span > SHWIN_END { 0 } else { v }
+}
+/// Map the frames [pa, pa + len) at `va` in the current space, the pages not yet there only.
+fn shwin_attach(va: u64, pa: u64, len: u64) {
+    let cr3 = crate::paging::current_cr3() & !0xFFF;
+    for off in (0..len).step_by(4096) {
+        if crate::paging::query(va + off).0 { continue; }
+        crate::paging::map_leaf_shared(cr3, va + off, pa + off, true, true, false);
+    }
+    crate::paging::flush_tlb_now();
+}
 fn shm_region(obj: usize, need: u64) -> u64 {
     // SAFETY: S2 — the POSIX shm table (`SHM_*`). THE CALLER HOLDS `shm_lock()`: this
     // is the compound "find or create", and without the lock two threads creating one
@@ -1050,7 +1077,8 @@ fn shm_region(obj: usize, need: u64) -> u64 {
         // The region has already been handed to another process: the access from ring 3 in THIS AS
         // is opened explicitly (the identity window in a process's AS is closed).
         if SHM_ADDR[obj] != 0 {
-            crate::paging::protect(SHM_ADDR[obj], SHM_MAPSZ[obj], true, false);
+            if SHM_PHYS[obj] != 0 { shwin_attach(SHM_ADDR[obj], SHM_PHYS[obj], SHM_MAPSZ[obj]); }
+            else { crate::paging::protect(SHM_ADDR[obj], SHM_MAPSZ[obj], true, false); }
             return SHM_ADDR[obj];
         }
         let (ib, isz) = crate::pci::ivshmem();
@@ -1065,8 +1093,15 @@ fn shm_region(obj: usize, need: u64) -> u64 {
         let sz = need.max(SHM_SIZE[obj]).max(4096);
         let pages = sz.div_ceil(4096);
         match crate::mem::alloc_contig(pages) {
-            Some(b) => { zero_serviced(b, pages * 4096); crate::paging::protect(b, pages * 4096, true, false); SHM_ADDR[obj] = b; SHM_MAPSZ[obj] = pages * 4096;
-                b }
+            Some(b) => {
+                zero_serviced(b, pages * 4096);
+                let va = if SHARED_IDENT.load(Ordering::Relaxed) { 0 } else { shwin_alloc(pages * 4096) };
+                SHM_MAPSZ[obj] = pages * 4096;
+                if va == 0 { crate::paging::protect(b, pages * 4096, true, false); SHM_ADDR[obj] = b; return b; }
+                SHM_ADDR[obj] = va; SHM_PHYS[obj] = b;
+                shwin_attach(va, b, pages * 4096);
+                va
+            }
             None => 0,
         }
     }
@@ -2929,11 +2964,12 @@ fn do_select(nfds: usize, rs: u64, ws: u64, es: u64, to_ms: i64) -> i64 {
         wait_window();
     }
 }
-// ── System V shm (PostgreSQL's interlock segment): a region of identity memory, shared through a fork ──
+// ── System V shm (PostgreSQL's interlock segment): a region in the named window (or the identity), shared through a fork ──
 const SV_N: usize = 8;
 static mut SV_KEY: [u64; SV_N] = [0; SV_N];
 static mut SV_ADDR: [u64; SV_N] = [0; SV_N];
 static mut SV_SIZE: [u64; SV_N] = [0; SV_N];
+static mut SV_PHYS: [u64; SV_N] = [0; SV_N]; // the frames when SV_ADDR is the window's address (0: the identity)
 fn sysv_shmget(key: u64, size: u64, flags: u64) -> i64 {
     // SAFETY: S2 — the SysV shm table (`SV_*`). THE CALLER HOLDS `shm_lock()`, for the
     // same reason as the POSIX one: `shmget(IPC_CREAT)` is a find-or-create.
@@ -2946,10 +2982,11 @@ fn sysv_shmget(key: u64, size: u64, flags: u64) -> i64 {
             if SV_ADDR[i] == 0 {
                 let pages = size.max(4096).div_ceil(4096);
                 let b = match crate::mem::alloc_contig(pages) { Some(b) => b, None => return -12 };
-                // DMAP: dual — a fresh frame that shmat hands to ring 3 at its identity address
                 core::ptr::write_bytes(crate::mem::kptr::<u8>(b), 0, (pages * 4096) as usize);
-                crate::paging::protect(b, pages * 4096, true, false);
-                SV_KEY[i] = key; SV_ADDR[i] = b; SV_SIZE[i] = pages * 4096;
+                let va = if SHARED_IDENT.load(Ordering::Relaxed) { 0 } else { shwin_alloc(pages * 4096) };
+                if va == 0 { crate::paging::protect(b, pages * 4096, true, false); SV_ADDR[i] = b; SV_PHYS[i] = 0; }
+                else { SV_ADDR[i] = va; SV_PHYS[i] = b; } // mapped into a space at its shmat
+                SV_KEY[i] = key; SV_SIZE[i] = pages * 4096;
                 return i as i64 + 1;
             }
         }
@@ -2961,7 +2998,12 @@ fn sysv_shmat(id: u64, _addr: u64) -> i64 {
     // SAFETY: S2 — the SysV shm table (`SV_*`). THE CALLER HOLDS `shm_lock()`: the row is
     // read and its region is handed to this address space, while a neighbour may be
     // creating a segment in a free row right now.
-    unsafe { if i >= SV_N || SV_ADDR[i] == 0 { return -22; } crate::paging::protect(SV_ADDR[i], SV_SIZE[i], true, false); SV_ADDR[i] as i64 }
+    unsafe {
+        if i >= SV_N || SV_ADDR[i] == 0 { return -22; }
+        if SV_PHYS[i] != 0 { shwin_attach(SV_ADDR[i], SV_PHYS[i], SV_SIZE[i]); }
+        else { crate::paging::protect(SV_ADDR[i], SV_SIZE[i], true, false); }
+        SV_ADDR[i] as i64
+    }
 }
 fn sysv_shmctl(id: u64, cmd: u64, buf: u64) -> i64 {
     let i = id.wrapping_sub(1) as usize;
