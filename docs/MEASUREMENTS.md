@@ -877,6 +877,59 @@ thousand instructions) over mdpipe, where it showed 0.
 | futex RTT p50 same-core / cross-core; condvar same-core | 500 / 500 / 2641 ns |
 | `mbench` syscall; svc round trip with the FP save | 156 ns; 130 ns |
 
+### 10.13. The first arm64 scoreboard: Talaria against Linux on Graviton3 (2026-10-05/06)
+
+`ARCH=arm64 bench/suite/run-remote-all.sh` (ARM64-PLAN phase 9): four `c7g.xlarge` (4 vCPU =
+four physical cores, 8 GB) per workload in one cluster placement group — a Talaria server and a
+Talaria generator from one AMI (the aarch64 stub), a Linux server and a Linux generator on AL2023
+arm64 (kernel 6.18, the playbook's tuning) — the same workload tree and the same `tlgen` binary on
+both sides, the ladder at 10/25/50/75/90 % of the lower of the two ceilings, three repeats of 60 s,
+the SERVICE latency judged (README §3.1: a point counts at a ratio below 0.95 or above 1.05; a
+scoreboard judges WITHIN a workload, each workload is its own bring-up). Two runs: redis, mongoose
+and mysql on `bb198d8` (`results/ec2all-a64-20261005-153336`); nginx, PostgreSQL and mongodb on
+`e8981e5` (`results/ec2all-a64-20261005-235147`) — their first bring-ups found three defects
+(below) and were re-taken with the fixes.
+
+| workload | p50 | p99 | p99.9 | p99.99 | points | ceilings, Talaria / Linux, k req/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| redis | 0 / 4 / 16 | **19 / 1 / 0** | 17 / 1 / 2 | 8 / 2 / 10 | 80 | ping 98.9 / 141.5, get 95.0 / 131.4 |
+| mongoose | 0 / 9 / 1 | **10 / 0 / 0** | 9 / 1 / 0 | 9 / 1 / 0 | 40 | — |
+| nginx | 3 / 4 / 2 | **8 / 1 / 0** | 7 / 2 / 0 | 9 / 0 / 0 | 36 | nop 98.2 / 146.1, file 79.4 / 94.3 |
+| mysql | 1 / 6 / 3 | **8 / 2 / 0** | 8 / 2 / 0 | 9 / 1 / 0 | 40 | select1 61.2 / 43.3, pk 47.6 / 33.0 |
+| postgresql | 4 / 3 / 2 | 3 / 2 / 4 | 3 / 1 / 5 | 4 / 1 / 3 | 35 | select1 42.1 / 43.8, pk 15.5 / 25.2 |
+| mongodb | **9 / 4 / 2** | 9 / 3 / 3 | 10 / 3 / 2 | **13 / 1 / 1** | 60 | ping 53.5 / 61.7, find 23.9 / 23.5, insert 20.2 / 20.7 |
+
+In a cell: Talaria faster / parity / slower. What the rows say:
+
+* **The tail is Talaria's on four of five workloads.** p99 at the middle rates: redis 57-59 us
+  against 87-95 (Linux's p99/p50 is 2.2-2.4, ours 1.2-1.3), mongoose 63-66 against 93-97, nginx
+  57-63 against 67-90, mysql 76-80 against 86-124 and at the top rates 62-81 us against 0.4-3.0 ms
+  where Linux's MariaDB falls over before its ceiling (`select1` p99.9 7.9 ms at 39 k req/s).
+* **The median is Linux's on redis** (1-12 us at every rate; 54-59 against 44-52 at the top) and
+  equal elsewhere; **the ceilings are Linux's on the network-only servers** (redis -30 %, nginx
+  /nop -33 %, PostgreSQL pk -38 %) and Talaria's on MariaDB (+41-44 %). The closed-loop ceiling
+  is 8 connections per generator, so it carries the generator's own system too (the Talaria pair
+  is Talaria on both ends); the generator's open-loop debt at the top rate is up to 25 us on the
+  Talaria side against 2.5 (printed in every report) — part of the median gap is the instrument's
+  node, to be split off by an A/B with a Linux generator (ab-phase.sh).
+* **The rare outliers are ours at low rates:** redis p99.99 285-558 us at 10-25 k req/s against
+  116-130, max 0.5-0.9 ms against 0.2-0.4.
+* **mongodb is Talaria's on `find`** (p50 84-91 against 100-117 us, p99 102-115 against 125-276)
+  and on `insert`'s median and far tail (p50 87-90 against 89-115; p99.99 2.3-3.7 ms against
+  0.8-8.6), **Linux's on `insert`'s p99 at the middle and top rates** (235-350 against 184-293 us
+  — the write path's tail, ROADMAP's old item on EBS) and on `ping`'s median at the top two rates.
+* **PostgreSQL is mixed:** `pk` p50 100-109 against 115-123 us (ours), p99 143-149 against
+  131-144 (theirs), the top `pk` point is our overload (the lower ceiling); `select1` p99 80-92
+  against 72-104 and 1.1 ms where Linux collapses at 31.6 k req/s.
+
+**What the first bring-ups found** (the scoreboard as a test, ENGINEERING-NOTES 48-49): nginx's
+Linux side refused to start (Alpine's arm64 nginx is built `--user=nginx`, the tree had no such
+user — the TCG smoke runs only the Talaria side); PostgreSQL's Talaria side died at start
+(`could not map anonymous shared memory`: the FS cache took half of the 844 MB below 4 GB) and
+mongodb's panicked at launch (a refused 512 MB cache resize took the rest of the bump allocator).
+All three are fixed and gated; the TCG reproduction in the Graviton's memory shape is
+`virt` 10 GB with `talaria.lowmem=850`.
+
 ## 11. Reproducing any of this
 
 ```sh

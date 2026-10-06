@@ -2034,6 +2034,27 @@ space (keep the `AS_LIVE` alarm). Open: whether structures should store kernel a
 (the cache, the rings) or translate on use — translate first; whether the reference space
 ever drops the identity (the identity modes need it).
 
+### 10.17. The first arm64 scoreboard (2026-10-05/06)
+
+Phase 9's exit gate — "a first arm64 scoreboard in `docs/MEASUREMENTS.md` with the same judging
+rules" — is met: `docs/MEASUREMENTS.md` §10.13, six workloads on four `c7g.xlarge` per bring-up,
+Talaria against AL2023 arm64 with the same trees and the same `tlgen`. In one line: **the tail
+is Talaria's** (p99 won on redis 19/1/0, mongoose 10/0/0, nginx 8/1/0, mysql 8/2/0; MariaDB's
+ceiling +41-44 %), **the median and the closed-loop ceiling of the network-only servers are
+Linux's** (redis p50 0/4/16, ceilings -30..-38 % on redis, nginx /nop, PostgreSQL pk), and
+PostgreSQL is mixed; mongodb is Talaria's on 9 of 15 medians and 13 of 15 p99.99, Linux's on
+`insert`'s p99 at the middle and top rates. 291 points in all.
+
+The scoreboard was also the port's largest test so far: three defects only a Graviton's own
+memory map and a root-run Linux side could show (§10.15; ENGINEERING-NOTES 48-49), each now
+reproduced under TCG in that shape and gated.
+
+What phase 9 leaves open, in the order the numbers rank it: the median and the ceilings on the
+network path (first split the generator's share with a Linux generator — the Talaria node's
+open-loop debt is up to 25 us at the top rate); redis's rare 0.3-0.9 ms outliers at low rates;
+PostgreSQL `pk`'s ceiling; the wfe tier's mdpipe tail (§10.15); the lazy FP save (the svc round
+trip is 130 ns with the save, 113 without — 17 ns, under the noise of any row above).
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its
