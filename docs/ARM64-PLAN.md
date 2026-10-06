@@ -2184,8 +2184,14 @@ elimination.
 The regressions: the default build x86 526/0 + host 22/0, arm64 362/0 (UEFI with the NVMe BAR above
 4 GiB included); a strict-by-default build (`TALARIA_STRICT=1`) x86 528/0 + 22/0, arm64 362/0,
 x86 `validate.sh` 14/0 (PostgreSQL, MariaDB, MongoDB, the JVM, ClickHouse), arm64's databases
-10/0; kernel-unit 302/0. Next: strict as the default (the databases on the machines under it),
-then stage 6.
+10/0; kernel-unit 302/0. On the machines (`variants.sh`, mdpipe, `smp=4`): a `c7g.xlarge` maps one
+device gigabyte besides GB0 (`0x8000_0000`, the ENA and the NVMe) and gives p99 2.27 us (strict
+2.58, Linux 4.8 in the same hour); a `c6i.xlarge` maps GB3, its ENA's LLQ is write-combining in the
+window (`0xffff_c000_3e80_0000`) and gives p99 5.49 us (strict 5.55, Linux 8.3-9.3). The A/B
+variant `talaria.mwin=0` taught the lesson of strict once more: from user-data it arrives after
+the window is built and did nothing — such a `=0` (for `dmap`, `kwin`, `mwin`) now says it is
+IGNORED instead of passing in silence. Next: strict as the default (the databases on the machines
+under it), then stage 6.
 
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound

@@ -443,6 +443,15 @@ pub fn boot_shared(start_info: u64, mut cmdline: &'static str, tsc_hz: u64, earl
     // Stage 4b of the direct map, by the FINAL cmdline: strict builds nothing at boot, it only
     // shapes the process spaces made from here on — so EC2's user-data can turn it on.
     paging::strict_init(cmdline::has(cmdline, "talaria.dmap", "strict"));
+    // The other three are built at boot from the image's own command line; a `=0` that only the
+    // final one carries (EC2 user-data) came too late — say so instead of silently not applying it.
+    for (knob, on) in [("talaria.dmap", mem::DMAP_ON.load(core::sync::atomic::Ordering::Relaxed)),
+                       ("talaria.kwin", paging::KWIN_ON.load(core::sync::atomic::Ordering::Relaxed)),
+                       ("talaria.mwin", paging::MWIN_ON.load(core::sync::atomic::Ordering::Relaxed))] {
+        if on && cmdline::num(cmdline, knob) == Some(0) {
+            println!("talaria: {}=0 IS IGNORED — it arrived after the boot built the mechanism (user-data?); it works only on the image's command line", knob);
+        }
+    }
 
     // ── The built-in self-checks (`talaria.test=<name>`) and the production modes
     //    (`talaria.mode=<name>`). Both parse THE WHOLE NAME (crate::cmdline) rather than
