@@ -2045,6 +2045,24 @@ identity leaf itself (stage 4 rewrites them); `mem::init` reading the boot hand-
 map exists (kind (e): it must stay the identity); `kva` must stay the identity until the map is
 built in `paging::init` (stage 2's ordering). The `Pa` newtype for the drivers is not done yet.
 
+**Stage 2 is done (2026-10-06).** `paging::dmap_init` builds the map right after
+`paging::init`, before any address space: slot 256 of the reference table (x86
+`0xFFFF_8000_0000_0000`, arm64 TTBR0 `0x0000_8000_0000_0000` = `USER_TOP`), the firmware map's
+RAM rounded inward to 2 MiB, a 1G leaf for a gigabyte that is RAM end to end and 2M leaves for
+the rest, supervisor, NX, pre-dirtied (arm64's DBM), one implementation through `mmu::enc`. A
+bit per 2 MiB (`kaddr.rs`, 32 KiB) says what it covers; `kva` translates only that, and every
+other address keeps its identity and is counted (`DMAP_MISS`) — under QEMU x86 22 k such calls
+per boot, the last one `0xbfffffc6`: the ACPI tables in a reserved region, the first thing stage 4
+must give a kind of its own. `talaria.dmap=0` is the identity everywhere (the A/B and the
+fallback). The two regressions on the map: one failure each, the same probe (`dirtyprot` wrote
+through `kptr` and read the identity leaf's dirty bit — a `// DMAP:` site; it writes through
+the identity now); then x86 511/0, arm64 348/0, with gates for the map ON by default and OFF
+by the knob. On the machines (`infra/aws/variants.sh`, mdpipe, the map ON): a `c7g.xlarge` maps
+8026 MB (6 1G + 941 2M leaves) and gives the morning's numbers (p99 34.0 on two cores, 2.1 on
+four, against 32.9-34.0 and 2.6 without the map); a `c6i.xlarge` (tboot) maps 8044 MB (5 1G +
+1462 2M) and gives p99 7.6 / 6.3 against Linux's 10.7 in the same hour. Not done from the stage's gate list: a NUMA node's area and the refcount top are
+covered by the same RAM walk, not tested separately.
+
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
 check on every queued address); arm64 attribute aliasing (map RAM only, never split a leaf);

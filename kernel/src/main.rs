@@ -218,6 +218,7 @@ extern "C" fn rust_main(start_info: u64) -> ! {
     println!("talaria: free frames = {}", mem::free_frames());
     rebootat("mem", cmdline);
     paging::init(); // our own page tables (1G) instead of the static boot tables
+    paging::dmap_init(cmdline::num(cmdline, "talaria.dmap") != Some(0)); // RAM once more at mem::DMAP_BASE (ARM64-PLAN §10.16)
     fr::record(fr::PAGING, 0);
     rebootat("paging", cmdline);
 

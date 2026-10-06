@@ -81,15 +81,21 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 let p = crate::mem::kptr::<u64>(pa);
                 let back = crate::mem::kpa_of(p);
                 // SAFETY: `pa` is RAM this test owns (a fresh frame, its own `.bss`/stack word).
-                let rt = unsafe {
+                // Written through the kernel's pointer (the map, when it is on), read back through
+                // it and through the identity: one frame, two addresses, the same word.
+                let (rt, id) = unsafe {
                     let old = core::ptr::read_volatile(p);
                     core::ptr::write_volatile(p, 0xD1A9_0000_0000_0000 | pa);
                     let v = core::ptr::read_volatile(crate::mem::kptr::<u64>(back));
+                    let w = core::ptr::read_volatile(crate::mem::vptr::<u64>(pa));
                     core::ptr::write_volatile(p, old);
-                    v
+                    (v, w)
                 };
-                let ok = back == pa && crate::mem::kpa(crate::mem::kva(pa)) == pa && rt == (0xD1A9_0000_0000_0000 | pa);
-                println!("dmapid: {} pa={:#x} kva={:#x} back={:#x} {}", what, pa, crate::mem::kva(pa), back, if ok { "OK" } else { "FAIL" });
+                let via_map = crate::mem::kva(pa) != pa;
+                let ok = back == pa && crate::mem::kpa(crate::mem::kva(pa)) == pa && rt == (0xD1A9_0000_0000_0000 | pa)
+                    && id == rt && via_map == crate::mem::DMAP_ON.load(core::sync::atomic::Ordering::Relaxed);
+                println!("dmapid: {} pa={:#x} kva={:#x} back={:#x} identity-read {} {}", what, pa, crate::mem::kva(pa), back,
+                    if id == rt { "same" } else { "DIFFERS" }, if ok { "OK" } else { "FAIL" });
                 if !ok { bad += 1; }
             };
             match low { Some(f) => check("low frame", f), None => { println!("dmapid: no low frame"); } }
@@ -99,6 +105,9 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             let v = crate::mem::vaddr(core::ptr::addr_of!(BSS_WORD));
             if crate::mem::vaddr(crate::mem::vptr::<u64>(v)) != v { bad += 1; println!("dmapid: vptr/vaddr FAIL"); }
             if let Some(f) = low { crate::mem::free_contig(f, 1); }
+            println!("dmapid: the direct map {} at {:#x}; kva of an address outside it: {} (the last {:#x})",
+                if crate::mem::DMAP_ON.load(core::sync::atomic::Ordering::Relaxed) { "ON" } else { "OFF" }, crate::mem::DMAP_BASE,
+                crate::mem::DMAP_MISS.load(core::sync::atomic::Ordering::Relaxed), crate::mem::DMAP_MISS_LAST.load(core::sync::atomic::Ordering::Relaxed));
             if low.is_some() && bad == 0 { println!("dmapid: ALL OK"); } else { println!("dmapid: FAIL ({} bad)", bad); }
             crate::suite::park()
         }
