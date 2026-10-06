@@ -35,7 +35,7 @@ static NIOAPIC: AtomicU32 = AtomicU32::new(0);
 pub fn note(addr: u64, gsi_base: u32) {
     let n = NIOAPIC.load(Ordering::Relaxed) as usize;
     if n >= MAXIOAPIC { return; }
-    BASE[n].store(addr, Ordering::SeqCst);
+    BASE[n].store(crate::arch::mmio_va(addr), Ordering::SeqCst); // the kernel's pointer (the devices' window)
     GSI_BASE[n].store(gsi_base, Ordering::SeqCst);
     NIOAPIC.store(n as u32 + 1, Ordering::SeqCst);
 }
@@ -52,6 +52,8 @@ unsafe fn write(b: u64, reg: u32, val: u32) {
     core::ptr::write_volatile(crate::mem::devptr::<u32>(b + 0x10), val);
 }
 
+/// The kernel's pointer to controller `i`'s registers (0: none) — the devices' window gate.
+pub fn base(i: usize) -> u64 { if i < count() { BASE[i].load(Ordering::Relaxed) } else { 0 } }
 /// How many lines the controller `i` has (from the version register).
 pub fn lines_of(i: usize) -> u32 {
     if i >= count() { return 0; }
@@ -97,6 +99,6 @@ pub fn dump() {
     if !available() { crate::println!("ioapic: it was not found in the MADT"); return; }
     for i in 0..count() {
         crate::println!("ioapic[{}]: the base {:#x}, lines {}, the GSIs from {}",
-            i, BASE[i].load(Ordering::Relaxed), lines_of(i), GSI_BASE[i].load(Ordering::Relaxed));
+            i, crate::arch::mmio_pa(BASE[i].load(Ordering::Relaxed)), lines_of(i), GSI_BASE[i].load(Ordering::Relaxed));
     }
 }

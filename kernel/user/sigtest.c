@@ -85,6 +85,12 @@ int main(int argc, char **argv) {
   int *fx = mmap((void *)0x6f0000000000ul, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
   if (fx != MAP_FAILED) *fx = 1;
   printf("sigtest: MAP_SHARED at %p, MAP_SHARED|MAP_FIXED at %p\n", (void *)shared, (void *)fx);
+  /* a private MAP_FIXED below 4 GiB: refused while the kernel's identity is there, granted under
+     talaria.dmap=strict where the process space has none (RAM in the direct map, devices in their
+     window) — the gate reads which; either way it must stay private after the fork */
+  int *lo = mmap((void *)0xa0000000ul, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+  if (lo != MAP_FAILED) { lo[0] = 1; lo[1024] = 2; }
+  printf("sigtest: a low MAP_FIXED at 0xa0000000: %s\n", lo == MAP_FAILED ? "refused" : (lo == (int *)0xa0000000ul ? "granted" : "MOVED"));
   int shmid = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600);
   int *sv = shmid >= 0 ? (int *)shmat(shmid, 0, 0) : (int *)-1; if (sv != (int *)-1) *sv = 1;
   CHECK(shmid >= 0 && sv != (int *)-1, "shmget/shmat");
@@ -99,7 +105,7 @@ int main(int argc, char **argv) {
   pid_t me = getpid();
   pid_t pid = fork();
   if (pid == 0) {
-    *shared = 42; *priv = 42; if (sv != (int *)-1) *sv = 43; if (fx != MAP_FAILED) *fx = 44; if (ps != MAP_FAILED) *ps = 45;
+    *shared = 42; *priv = 42; if (lo != MAP_FAILED) lo[0] = 46; if (sv != (int *)-1) *sv = 43; if (fx != MAP_FAILED) *fx = 44; if (ps != MAP_FAILED) *ps = 45;
     printf("sigtest: child pid=%d ppid=%d (parent %d) %s\n", getpid(), getppid(), me, getppid() == me ? "ok" : "MISMATCH");
     write(p2[1], "ready", 5);
     while (!got_usr1) pause();
@@ -112,6 +118,8 @@ int main(int argc, char **argv) {
   CHECK(fx != MAP_FAILED && *fx == 44, "MAP_SHARED|MAP_FIXED visible to parent");
   CHECK(ps != MAP_FAILED && *ps == 45, "POSIX shm visible to parent");
   CHECK(*priv == 1, "MAP_PRIVATE isolated (COW)");
+  CHECK(lo == MAP_FAILED || (lo == (int *)0xa0000000ul && lo[0] == 1 && lo[1024] == 2), "a low MAP_FIXED isolated (COW)");
+  CHECK(lo == MAP_FAILED || munmap(lo, 8192) == 0, "a low MAP_FIXED unmapped");
   CHECK(sv == (int *)-1 || *sv == 43, "sysv shm visible to parent");
   CHECK(kill(pid, SIGUSR1) == 0, "kill child SIGUSR1");
   pid_t w = waitpid(pid, &status, 0);

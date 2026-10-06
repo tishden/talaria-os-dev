@@ -249,16 +249,15 @@ static mut L1DEV: Table = Table([0; 512]);
 // the DEVICE sees (an MSI doorbell, an ITS command's redistributor) stays physical (`mmio_pa`).
 pub const DEV_SLOT: usize = 384;
 pub const DEV_BASE: u64 = (DEV_SLOT as u64) << 39;
-static DEV_ALIAS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-/// The kernel's pointer to a device register at physical `pa`: the alias for GB0 once the MMU
-/// is on, the identity otherwise (before the MMU, and for every other gigabyte).
+const _: () = assert!(DEV_BASE == crate::mem::MWIN_BASE); // the alias IS the devices' window's gigabyte 0
+/// The kernel's pointer to a device register at physical `pa`: the devices' window
+/// (`paging::mmio_va` — GB0 is window gigabyte 0 from the moment the MMU is on, any other
+/// device gigabyte once `paging::mwin_init` has run), the identity otherwise.
 #[inline]
-pub fn mmio_va(pa: u64) -> u64 {
-    if pa < (1 << 30) && DEV_ALIAS.load(core::sync::atomic::Ordering::Relaxed) { DEV_BASE + pa } else { pa }
-}
+pub fn mmio_va(pa: u64) -> u64 { crate::paging::mmio_va(pa) }
 /// The physical address behind a pointer `mmio_va` gave (what a device is told).
 #[inline]
-pub fn mmio_pa(va: u64) -> u64 { if (DEV_BASE..DEV_BASE + (1 << 30)).contains(&va) { va - DEV_BASE } else { va } }
+pub fn mmio_pa(va: u64) -> u64 { crate::paging::mmio_pa(va) }
 /// The alias's L1 entry for `paging::init`'s root: GB0 as a Device block, supervisor.
 pub fn dev_alias_l1_entry() -> u64 { device_block(0) }
 
@@ -313,7 +312,7 @@ pub unsafe fn early_enable(rams: &[(u64, u64)], devs: &[u64]) {
         options(nostack),
     );
     enable_here();
-    DEV_ALIAS.store(true, core::sync::atomic::Ordering::Relaxed);
+    crate::mem::mwin_publish(0, 0); // GB0 is the devices' window gigabyte 0 (L1DEV above)
     super::uart::rebase();
 }
 

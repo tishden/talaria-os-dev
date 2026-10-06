@@ -57,6 +57,13 @@ pub fn virtio_mmio_slot(i: usize) -> Option<(usize, usize)> {
     let base = kmain::VIRTIO_WINDOWS[i].load(core::sync::atomic::Ordering::Relaxed);
     if base == 0 { None } else { Some((mmu::mmio_va(base) as usize, 0x200)) } // the kernel's pointer
 }
+/// The devices' window gate (`talaria.test=mwin`): the device pointers this machine keeps.
+pub fn mwin_pointers() -> [(&'static str, u64); 4] {
+    let (d, r) = gic::frames();
+    [("gicd", d), ("gicr", r), ("its", its::base()), ("uart", uart::base_va())]
+}
+/// A device's ID word read through the kernel's pointer (the distributor's TYPER; 0: none).
+pub fn mwin_witness() -> u32 { gic::typer() }
 /// The kernel's pointer to a device register at physical `pa` (the devices' alias for GB0,
 /// `mmu::DEV_SLOT`), and back — shared code applies it where it reads a base itself.
 pub fn mmio_va(pa: u64) -> u64 { mmu::mmio_va(pa) }

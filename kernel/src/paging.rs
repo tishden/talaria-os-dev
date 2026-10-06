@@ -255,6 +255,138 @@ pub fn kwin_init(enabled: bool) -> bool {
 }
 pub static KWIN_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+// ── THE DEVICES' WINDOW (docs/ARM64-PLAN.md §10.16, stage 5) ──────────────────────────
+// Top-level slot 384 (`mem::MWIN_BASE`): the device registers at addresses of their own, one
+// physical gigabyte per window gigabyte, given out the first time `mmio_va` meets an address
+// of that gigabyte (`mem::mwin_*` keeps which is which). arm64's GB0 alias (`mmu::DEV_SLOT`,
+// window gigabyte 0, claimed before the MMU is on) was the first piece of it. A gigabyte with
+// no RAM in it is one 1G leaf; a gigabyte that also holds RAM gets a directory whose 2M leaves
+// cover only the pieces with no RAM in them (a device mapping must never alias RAM: on arm64
+// that is a mismatched-attributes fault, on x86 a UC alias of WB lines). Uncached (x86 PCD|PWT,
+// arm64 Device-nGnRE), supervisor, never executable. The slot's table exists before the first
+// address space, so every space shares every leaf in it, and a leaf, once written, is never
+// removed — no shootdown, no break-before-make (a WC split, `map_mmio_wc`, is the one change,
+// as it was on the identity). `talaria.mwin=0`: every device by its identity (arm64's GB0
+// alias stays — the gigabyte is ring 3's there).
+pub static MWIN_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static MWIN_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Build the window's top-level table; true when `mmio_va` gives window addresses.
+pub fn mwin_init(enabled: bool) -> bool {
+    use core::sync::atomic::Ordering;
+    let k = KERNEL_PML4.load(Ordering::Relaxed);
+    if !enabled || k == 0 {
+        crate::println!("talaria: the devices' window is OFF ({}) — the kernel reaches device registers by their identity",
+            if !enabled { "talaria.mwin=0" } else { "no own tables" });
+        return false;
+    }
+    let slot = ((crate::mem::MWIN_BASE >> 39) & 0x1FF) as usize;
+    // SAFETY: P1 + P2 — the slot is empty (x86) or holds the GB0 alias `init` built (arm64), and
+    // no address space exists yet; the frame is fresh and zeroed before the entry points at it.
+    unsafe {
+        let pml4 = kptr::<Pte>(k);
+        if AS_LIVE.load(Ordering::Relaxed) > 0 {
+            crate::println!("paging: AN ALARM: the devices' window is built after {} address spaces — they do not have it", AS_LIVE.load(Ordering::Relaxed));
+        }
+        if pte_r(pml4.add(slot)) & PTE_P == 0 {
+            let Some(t) = crate::mem::alloc_frame() else { return false; };
+            core::ptr::write_bytes(kptr::<u8>(t), 0, 4096);
+            pte_w(pml4.add(slot), t | PTE_P | PTE_RW);
+        }
+    }
+    MWIN_ON.store(true, Ordering::SeqCst);
+    crate::println!("talaria: the devices' window is ON at {:#x} (slot {})", crate::mem::MWIN_BASE, slot);
+    true
+}
+/// Does RAM (the firmware map's usable ranges, exactly) touch [lo, hi).
+fn ram_touches(lo: u64, hi: u64) -> bool {
+    (0..crate::mem::ram_regions()).any(|i| { let (b, l) = crate::mem::ram_region(i); l != 0 && b < hi && b + l > lo })
+}
+/// The window's PDPT entry for window gigabyte `i` (decoded).
+/// # Safety
+/// P1 + P2 — a read of the shared window table; the window exists (`MWIN_ON`).
+unsafe fn mwin_e3(i: u64) -> *mut Pte {
+    let pml4 = kptr::<Pte>(KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed));
+    let e4 = pte_r(pml4.add(((crate::mem::MWIN_BASE >> 39) & 0x1FF) as usize));
+    kptr::<Pte>(e4 & ADDR_MASK).add(i as usize)
+}
+/// Is the window's leaf for `pa` (in window gigabyte `i`) there.
+fn mwin_present(i: u64, pa: u64) -> bool {
+    // SAFETY: P1 + P2 — read-only walks of the shared window table.
+    unsafe {
+        let e3 = pte_r(mwin_e3(i));
+        if e3 & PTE_P == 0 { return false; }
+        if e3 & PTE_PS != 0 { return true; }
+        pte_r(kptr::<Pte>(e3 & ADDR_MASK).add(((pa >> 21) & 0x1FF) as usize)) & PTE_P != 0
+    }
+}
+/// The kernel's pointer to the device register at physical `pa`: its window address once the
+/// window exists (the gigabyte is mapped the first time it is met), the identity before that,
+/// with the window OFF, or for a piece that holds RAM (counted: `mem::MWIN_MISS`).
+pub fn mmio_va(pa: u64) -> u64 {
+    use core::sync::atomic::Ordering;
+    let on = MWIN_ON.load(Ordering::Acquire);
+    if let Some(i) = crate::mem::mwin_find(pa >> 30) {
+        // before the window's own table, only arm64's GB0 is given out (the early map has it)
+        if !on || mwin_present(i, pa) { return crate::mem::MWIN_BASE + (i << 30) + (pa & 0x3FFF_FFFF); }
+    }
+    if !on { return pa; }
+    match mwin_map(pa) {
+        Some(va) => va,
+        None => {
+            crate::mem::MWIN_MISS.fetch_add(1, Ordering::Relaxed);
+            crate::mem::MWIN_MISS_LAST.store(pa, Ordering::Relaxed);
+            pa
+        }
+    }
+}
+/// The physical address behind a pointer `mmio_va` gave (what a device is told).
+#[inline]
+pub fn mmio_pa(va: u64) -> u64 { crate::mem::mwin_pa(va) }
+/// Give `pa`'s gigabyte a window gigabyte (or fill in its 2M piece); None when the piece holds
+/// RAM or the window is full.
+fn mwin_map(pa: u64) -> Option<u64> {
+    use core::sync::atomic::Ordering;
+    let (pgb, glo) = (pa >> 30, (pa >> 30) << 30);
+    let plo = pa & !0x1F_FFFF;
+    if ram_touches(plo, plo + 0x20_0000) { return None; }
+    while MWIN_LOCK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() { core::hint::spin_loop(); }
+    const DEV: u64 = PTE_P | PTE_RW | PTE_PS | PTE_UC | PTE_NX;
+    let (mut newgb, mut pieces) = (false, 512);
+    // SAFETY: P1 + P2 + P3 — under the window's lock: an entry of the shared window table goes
+    // from empty to a leaf (or a fresh, filled directory) once; nothing maps it before it is
+    // published (`tables_published`) and the gigabyte is recorded (`mwin_publish`).
+    let r = unsafe {
+        let (i, fresh) = match crate::mem::mwin_find(pgb) { Some(i) => (i, false), None => match crate::mem::mwin_claim() { Some(i) => (i, true), None => (u64::MAX, false) } };
+        if i == u64::MAX { None } else {
+            let e3 = mwin_e3(i);
+            if fresh {
+                if !ram_touches(glo, glo + (1 << 30)) {
+                    pte_w(e3, glo | DEV);
+                } else if let Some(t) = crate::mem::alloc_frame() {
+                    core::ptr::write_bytes(kptr::<u8>(t), 0, 4096);
+                    let mut n = 0;
+                    for m in 0..512u64 {
+                        let a = glo + (m << 21);
+                        if !ram_touches(a, a + 0x20_0000) { pte_w(kptr::<Pte>(t).add(m as usize), a | DEV); n += 1; }
+                    }
+                    mmu::tables_published();
+                    pte_w(e3, t | PTE_P | PTE_RW);
+                    pieces = n;
+                }
+                mmu::tables_published();
+                if pte_r(e3) & PTE_P != 0 { crate::mem::mwin_publish(i, pgb); newgb = true; }
+            }
+            if mwin_present(i, pa) { Some(crate::mem::MWIN_BASE + (i << 30) + (pa & 0x3FFF_FFFF)) } else { None }
+        }
+    };
+    MWIN_LOCK.store(false, Ordering::Release);
+    if let (Some(va), true) = (r, newgb) {
+        crate::println!("paging: the devices' window: physical gigabyte {:#x} at {:#x}{}", glo, va & !0x3FFF_FFFF,
+            if pieces < 512 { " (it holds RAM too: only the 2M pieces without RAM)" } else { "" });
+    }
+    r
+}
+
 // ── STRICT: RAM'S IDENTITY OUT OF THE PROCESS SPACES (docs/ARM64-PLAN.md §10.16, stage 4b) ─────
 // `talaria.dmap=strict`: a process space (`new_process_space`) keeps the identity leaves only
 // where the kernel still needs them — its own image and what lies below it in its gigabyte, and
@@ -296,15 +428,56 @@ pub fn strict() -> bool { STRICT.load(core::sync::atomic::Ordering::Relaxed) }
 pub fn strict_drops(va: u64) -> bool {
     strict() && va >= STRICT_KEEP.load(core::sync::atomic::Ordering::Relaxed) && crate::mem::dmap_covers(va)
 }
+/// Does strict take the whole identity gigabyte at `g` out of a process space: the devices'
+/// window is on, no RAM is in it (the kernel reaches its devices through the window; a
+/// gigabyte of nothing is nobody's), and it holds no ivshmem (handed to ring 3 by its identity).
+pub fn strict_gb_drops(g: u64) -> bool {
+    let g = g & !((1u64 << 30) - 1);
+    if !strict() || !MWIN_ON.load(core::sync::atomic::Ordering::Relaxed) || ram_touches(g, g + (1 << 30)) { return false; }
+    let (ib, isz) = crate::pci::ivshmem();
+    !(ib != 0 && ib < g + (1 << 30) && ib + isz > g)
+}
+/// The gate's count (`dmapstrict`): identity gigabytes with no RAM in them (the devices', the
+/// holes') in space `pml4`'s first top-level slot — 0 in a process space under strict.
+pub fn strict_devgb_in(pml4: u64) -> u64 {
+    // SAFETY: P1 + P2 — a read-only walk of a space the caller owns.
+    unsafe {
+        let e4 = pte_r(kptr::<Pte>(pml4 & ADDR_MASK));
+        if e4 & PTE_P == 0 { return 0; }
+        let pdpt = kptr::<Pte>(e4 & ADDR_MASK);
+        (0..512u64).filter(|&l3| {
+            let (g, e3) = (l3 << 30, pte_r(pdpt.add(l3 as usize)));
+            e3 & PTE_P != 0 && (e3 & PTE_PS == 0 || e3 & 0x000F_FFFF_C000_0000 == g) && strict_gb_drops(g)
+        }).count() as u64
+    }
+}
+/// May a process put a `MAP_FIXED` mapping at [vaddr, vaddr + pages) below 4 GiB: only under
+/// strict, and only where its space has no identity leaf left — RAM the map covers (above the
+/// image) and gigabytes with no RAM (devices in the window, holes). The image, the firmware's
+/// tables and anything the kernel still reaches by its identity stay refused.
+pub fn fixed_low_ok(vaddr: u64, pages: u64) -> bool {
+    if !strict() { return false; }
+    let end = vaddr.saturating_add(pages * 4096).min(4u64 << 30);
+    let mut c = vaddr & !0x1F_FFFF;
+    while c < end {
+        if !strict_drops(c) && !strict_gb_drops(c) { return false; }
+        c += 0x20_0000;
+    }
+    true
+}
 /// For a kernel fault's dump: was `addr` RAM by its identity, touched in a process space under strict.
 pub fn strict_miss(addr: u64) -> bool {
     strict_drops(addr) && current_cr3() & ADDR_MASK != kernel_cr3() & ADDR_MASK
 }
+/// The same for a device (or a hole) by its identity: a gigabyte with no RAM, dropped by strict.
+pub fn strict_dev_miss(addr: u64) -> bool {
+    addr < USER_TOP && strict_gb_drops(addr) && current_cr3() & ADDR_MASK != kernel_cr3() & ADDR_MASK
+}
 /// The leaf `unmap_proc` leaves at an identity address: none at all where strict dropped it.
 #[inline]
-fn proc_ident_leaf(va: u64) -> u64 { if strict_drops(va) { 0 } else { ident_leaf(va) } }
+fn proc_ident_leaf(va: u64) -> u64 { if strict_drops(va) || strict_gb_drops(va) { 0 } else { ident_leaf(va) } }
 #[inline]
-fn proc_ident_leaf_2m(va: u64) -> u64 { if strict_drops(va) { 0 } else { ident_leaf_2m(va) } }
+fn proc_ident_leaf_2m(va: u64) -> u64 { if strict_drops(va) || strict_gb_drops(va) { 0 } else { ident_leaf_2m(va) } }
 /// Take RAM's identity out of a fresh process space (`pdpt`: its private copy of the kernel's
 /// PDPT, slot 0 of the root; `kgb`: its private gigabyte, whose PD is `pd0`). A 1G leaf the map
 /// covers in part is split in THIS space (its PDPT is a copy, the kernel's leaf stays).
@@ -333,6 +506,9 @@ unsafe fn strict_strip(pdpt: *mut Pte, pd0: *mut Pte, kgb: usize) {
             }
             continue;
         }
+        // a gigabyte with no RAM at all: its devices are in the window, nothing of it is the
+        // kernel's by its identity in a process space any more (ivshmem's stays: ring 3's by it)
+        if strict_gb_drops(g) { pte_w(pdpt.add(l3), 0); continue; }
         if e3 & PTE_PS == 0 { continue; } // a shared directory of the kernel (a device's gigabyte split for WC)
         if e3 & 0x000F_FFFF_C000_0000 != g { continue; } // not an identity leaf
         let covered = (0..512u64).filter(|m| strict_drops(g + (m << 21))).count();
@@ -941,8 +1117,10 @@ pub use mmu::{pat_read, PAT_VALUE};
 /// gigabyte there lies BAR0 with the registers, for which WC is contraindicated.
 /// true — the whole range has been switched. The descriptor bits are the MMU's
 /// (`arch::mmu::with_wc`: the PAT slot on x86, Normal non-cacheable on arm64).
+/// `phys` is the kernel's address of the range: a devices' window address (`mmio_va`, what
+/// `pci::bar` gives) is split in the window's shared table; anything else is the identity.
 pub fn map_mmio_wc(phys: u64, len: u64) -> bool {
-    if len == 0 || map_mmio_1g(phys) == 0 { return false; }
+    if len == 0 || (!crate::mem::in_mwin(phys) && map_1g(phys, false) == 0) { return false; }
     let (first, last) = (phys & !0xFFF, (phys + len - 1) & !0xFFF);
     // SAFETY: P1 + P2 + P4 — the range belongs to a device (a BAR), not to the allocator; the
     // entries are rewritten with the WC attribute and the range is flushed.
@@ -2213,9 +2391,10 @@ pub fn unmap_ident(vaddr: u64, pages: u64) {
 pub fn ident_check() -> (u64, u64, u64) {
     let (mut holes, mut shadow, mut ro) = (0u64, 0u64, 0u64);
     let (rb, re) = crate::mem::reserved();
-    // under strict a process space has no identity over the map's RAM by design: not a hole
+    // under strict a process space has no identity over the map's RAM, nor over a gigabyte with
+    // no RAM at all (its devices are in the window), by design: not a hole
     let in_proc = current_cr3() & ADDR_MASK != kernel_cr3() & ADDR_MASK;
-    let dropped = |a: u64| in_proc && strict_drops(a);
+    let dropped = |a: u64| in_proc && (strict_drops(a) || strict_gb_drops(a));
     let gb_holes = |g: u64| (0..512u64).filter(|m| !dropped(g + (m << 21))).count() as u64 * 512;
     // SAFETY: P1 + P2 — a read-only walk over the identity window.
     unsafe {
@@ -2391,8 +2570,19 @@ pub fn ident_leaf_overlap(vaddr: u64, pages: u64) -> bool {
     }
     false
 }
-/// The same for a device's MMIO registers (uncached).
-pub fn map_mmio_1g(phys: u64) -> u64 { map_1g(phys, false) }
+/// The same for a device's MMIO registers (uncached). With the devices' window ON the kernel
+/// reaches the registers there (`mmio_va`), and no identity leaf is laid: the gigabyte gets its
+/// window gigabyte now (0: it could not — RAM in its piece, or the window is full).
+pub fn map_mmio_1g(phys: u64) -> u64 {
+    if MWIN_ON.load(core::sync::atomic::Ordering::Acquire) {
+        return if crate::mem::in_mwin(mmio_va(phys)) { phys } else { 0 };
+    }
+    map_1g(phys, false)
+}
+/// A device gigabyte by its IDENTITY, uncached, in the reference table (every later space has
+/// it): what ring 3 is handed by its physical address — ivshmem, the host's memory (`syscall`'s
+/// shm path), and the identity modes' view of it. The kernel itself uses the window.
+pub fn map_mmio_1g_ident(phys: u64) -> u64 { map_1g(phys, false) }
 fn map_1g(phys: u64, cached: bool) -> u64 {
     if phys < 4u64 << 30 { return phys; } // it is already in the identity 0..4 GB (GB3 uncached)
     let l4 = ((phys >> 39) & 0x1FF) as usize;

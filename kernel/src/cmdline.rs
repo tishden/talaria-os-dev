@@ -315,6 +315,7 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.lowmem", Kind::Num, "cap the allocator below 4 GB, MB (a gate: the shape of a machine whose RAM is mostly above)"),
     once("talaria.manifest", Kind::Text, "the path of the workload's manifest"),
     once("talaria.mode", Kind::Word(MODES), "the production mode"),
+    once("talaria.mwin", Kind::Num, "0 — no devices' window: the kernel reaches device registers by their identity (ARM64-PLAN §10.16 stage 5; arm64's GB0 alias stays; the A/B and the fallback)"),
     many("talaria.net", Kind::Text, "an address rule by interface name"),
     once("talaria.netidle", Kind::Flag, "sleeping on the receive ring"),
     once("talaria.netirq", Kind::Check(netirq_ok), "the NIC's line: 0 off / 1 / all / GSI / a-b (the default is polling)"),

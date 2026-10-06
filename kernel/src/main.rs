@@ -220,6 +220,7 @@ extern "C" fn rust_main(start_info: u64) -> ! {
     paging::init(); // our own page tables (1G) instead of the static boot tables
     paging::dmap_init(cmdline::num(cmdline, "talaria.dmap") != Some(0)); // RAM once more at mem::DMAP_BASE (ARM64-PLAN §10.16)
     paging::kwin_init(cmdline::num(cmdline, "talaria.kwin") != Some(0)); // the kernel stacks at addresses of their own, a guard under each in every space
+    if paging::mwin_init(cmdline::num(cmdline, "talaria.mwin") != Some(0)) { smp::lapic_rebase(); } // the device registers at addresses of their own (stage 5)
     fr::record(fr::PAGING, 0);
     rebootat("paging", cmdline);
 
@@ -248,6 +249,9 @@ extern "C" fn rust_main(start_info: u64) -> ! {
     // is needed by the syscall stub, and the legacy silence by the first `sti`; neither is required before
     // NVMe.
     percpu::init(0); // GS.base of the BSP -> PerCpu[0] (the syscall stub reads gs:8 and so on)
+    // SAFETY: core 0 is this one; rsp0 comes with the first ring-3 entry (`user::setup_gdt`). The
+    // TSS now so that the #DF has its IST1 stack from here on (an overflow by a push: a dump).
+    unsafe { user::setup_gdt_cpu(0, 0); }
     // The legacy silence: after a UEFI boot the firmware leaves the 8259 PIC
     // unmasked and LVT0 in ExtINT — the very first sti would catch a storm of PIT IRQs
     // with a foreign vector. We mask both PICs and all the LVTs before any interrupt window.

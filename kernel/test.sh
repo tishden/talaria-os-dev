@@ -378,6 +378,8 @@ for spec in \
   "talaria.test=dmapid talaria.dmap=0|dmapid: the direct map OFF at .* outside it: 0 |dmapid: talaria.dmap=0 leaves the identity for everything (the A/B and the fallback), and no kva is a miss" \
   "talaria.test=dmapstrict talaria.dmap=strict|dmapstrict: ALL OK|dmapstrict: under talaria.dmap=strict a process space and its fork child carry no identity leaf over the map's RAM, the kernel's space keeps them, the kernel's write through the map does not show in the process's own page at the frame's former identity address (ARM64-PLAN §10.16 stage 4b)" \
   "talaria.test=dmapstrict talaria.dmap=strict talaria.kwin=0|talaria.dmap=strict REFUSED|dmapstrict: strict refuses to start without the stacks' window (an identity kernel stack would be RAM by its identity)" \
+  "talaria.test=mwin|mwin: ALL OK|mwin: the kernel reaches every device through the devices' window (slot 384): the LAPIC and the IOAPIC pointers are window addresses that round-trip, a process space shares the window's table and reads the same ID word, no mmio_va fell back to the identity (ARM64-PLAN §10.16 stage 5)" \
+  "talaria.test=mwin talaria.mwin=0|mwin: the devices' window OFF .* misses 0 |mwin: talaria.mwin=0 leaves every device at its identity (the A/B and the fallback)" \
   "talaria.test=identhole talaria.dmap=strict|identhole: ALL CHECKS PASSED|identhole: under strict a munmap leaves no leaf at all (not the identity one), the kernel writes the frames through the map, no unintended hole" \
   "talaria.test=sharedpd|sharedpd: the gigabyte 0x80000000 was split for a device window: OK|sharedpd: the shared gigabyte of the kernel PDPT is split into a directory+table (like the LLQ window of ENA on EC2)" \
   "talaria.test=sharedpd|sharedpd: the kernel's directory after the AS teardown: OK|sharedpd: A MINE — tearing a process's AS down freed the kernel's SHARED directory (the frame into the free list -> a #PF in the NVMe doorbell under any CR3; PostgreSQL on EC2 died after 0.3 s)" \
@@ -454,6 +456,8 @@ for spec in \
   "talaria.test=kstackguard|kstackguard: ALL OK|kstackguard: a forked task kernel stack is guarded in the CHILD space and the kernel one, released with no hole" \
   "talaria.test=kstackguard|kstackguard: the child, the parent and a later space share the window.s tables: OK|kstackguard: the kernel stacks' window (slot 257): one guard for every space, never mapped (ARM64-PLAN §10.16 stage 3)" \
   "talaria.test=kstackguard talaria.kwin=0|kstackguard: ALL OK|kstackguard: talaria.kwin=0 — the identity stacks with the per-space guard still pass the old gate (the fallback)" \
+  "talaria.test=kstackpush|#DF on its own stack \\(IST1\\).*CR2=0xffff8080000|kstackpush: a kernel stack overflowed by a PUSH: the #PF cannot deliver, the #DF runs on its own IST1 stack instead of a triple fault (ARM64-PLAN §10.16 stage 3's leftover)" \
+  "talaria.test=kstackpush|A KERNEL STACK OVERFLOW: CR2 is the GUARD page|kstackpush: the dump names the window stack's guard page" \
   "talaria.test=fork|fork: THE MEMORY WAS CLONED|fork: the clone of the address space (the copy semantics of the memory)" \
   "talaria.test=exec|musl static binary -> Talaria OS|exec: a musl binary in the process's private AS (a CR3 switch)" \
   "talaria.test=procs|sched: all the 2 task.s. have finished|procs: two processes in separate ASes under the scheduler (a per-process CR3)" \
@@ -556,13 +560,15 @@ assert "symlink-test: ALL OK" "symlink: the ext2 links (a read through a link, a
 q=$(bootd "talaria.test=sigtest" /img/disk_ext2.img); sleep 2
 assert "sigtest: MAP_SHARED at 0x6[0-9a-f]{11}, MAP_SHARED\|MAP_FIXED at 0x6f0000000000" "proc: an anonymous MAP_SHARED has an address of its own (the mmap region, not the frames' identity) and a MAP_SHARED|MAP_FIXED is honoured — both stay shared after a fork (ARM64-PLAN §10.16 stage 4a)"
 assert "sigtest: SysV shm at 0x70[0-9a-f]{10}, POSIX shm at 0x70[0-9a-f]{10}" "proc: SysV and POSIX shm in the named window (one non-identity address in every process, so a futex in it still wakes across processes), shared after a fork (ARM64-PLAN §10.16 stage 4a)"
+assert "sigtest: a low MAP_FIXED at 0xa0000000: (refused|granted)" "proc: a MAP_FIXED below 4 GiB answers (refused while the kernel's identity is in the process space; granted under a strict-by-default build)"
 assert "sigtest: ALL OK" "proc: the fd tables/dup2/pipe/cwd/readdir + the signals(handler,mask,kill,SIGCHLD,SIGTERM,a sigwait thread,signalfd) + fork(COW,mprotect-RO,MAP_SHARED,SysV shm,the memory at exit) + eventfd/timerfd/procfs/openat(dirfd)/a file mmap"; stopq $q
 q=$(bootd "talaria.test=sigtesthi talaria.dmap=strict" /img/disk_ext2.img); sleep 2
 assert "sigtest: ALL OK" "proc: sigtest LINKED AT 0x40000000 (RAM's former identity, GB1) under strict — the image, its forks (COW) and its shared memory where the kernel's identity used to be (ARM64-PLAN §10.16 stage 4b)"
-refute "RAM BY ITS IDENTITY|CRASH DUMP" "proc: the image at 1 GiB under strict — no kernel access missed its kva, no crash"; stopq $q
+refute "RAM BY ITS IDENTITY|DEVICE BY ITS IDENTITY|CRASH DUMP" "proc: the image at 1 GiB under strict — no kernel access missed its kva, no crash"; stopq $q
 q=$(bootd "talaria.test=sigtest talaria.dmap=strict" /img/disk_ext2.img); sleep 2
 assert "sigtest: ALL OK" "proc: the same under talaria.dmap=strict — no identity RAM in the process spaces, fork/COW/MAP_SHARED/shm/signals intact (ARM64-PLAN §10.16 stage 4b)"
-refute "RAM BY ITS IDENTITY|CRASH DUMP" "proc: under strict no kernel access missed its kva, no crash"; stopq $q
+assert "sigtest: a low MAP_FIXED at 0xa0000000: granted" "proc: under strict a private MAP_FIXED below 4 GiB is granted where the space has no identity (RAM in the map, a gigabyte of nothing), stays private after a fork and unmaps (ARM64-PLAN §10.16 stage 5)"
+refute "RAM BY ITS IDENTITY|DEVICE BY ITS IDENTITY|CRASH DUMP" "proc: under strict no kernel access missed its kva, no crash"; stopq $q
 q=$(bootd "talaria.test=ext2v" /img/disk_ext2.img); sleep 1
 assert "ext2v: .*PERSISTED OK" "ext2v: the data survived a reboot (the write-back cache was flushed at the fsync/exit_group)"; stopq $q
 

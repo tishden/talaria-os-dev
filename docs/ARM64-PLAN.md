@@ -2146,6 +2146,47 @@ if an address space already exists); and an arm64 AMI carries the kernel inside 
 a stub built before the last kernel build shipped the old kernel without a word, so
 `tools/mk-ami.sh` now rebuilds a stub older than the kernel.
 
+**Stage 5 is done (2026-10-06).** The devices' window: top-level slot 384 on both machines (x86
+`0xFFFF_C000_0000_0000`, arm64 TTBR0 `0x0000_C000_0000_0000` — arm64's GB0 alias of §10.13 was its
+first gigabyte). `mmio_va(pa)` gives a device's gigabyte a window gigabyte the first time it meets
+it (`paging::mwin_map`, the registry `mem::mwin_*`): a gigabyte with no RAM is one 1G leaf, a
+gigabyte that also holds RAM gets only its RAM-free 2M pieces (a device mapping never aliases RAM),
+uncached, supervisor, never executable; a leaf once written stays, so no shootdown. x86 moved its
+LAPIC (`smp::LAPIC_VA`, which the EOI stub reads too), the IOAPICs, the microvm's virtio-mmio grid
+and the default ECAM onto it; arm64 its console on a Graviton's GB3; both machines the PCI BARs and
+ECAM windows above 4 GiB — which had bypassed `mmio_va` altogether: `pci::bar` returned the physical
+address on that path, and the identity leaf `map_mmio_1g` laid made it work. With the window on,
+no identity leaf is laid for a device above 4 GiB any more; ivshmem keeps one (ring 3 is handed it
+by its identity). `talaria.mwin=0` is the identity again (arm64's GB0 stays in the window). Gate
+`talaria.test=mwin`: every device pointer the machine keeps (x86 the LAPIC and the IOAPIC; arm64 the
+GIC's two frames, the ITS, the UART and the ECAM at 256 GiB) is a window address that round-trips,
+a process space shares the window's table and reads the same ID register, and no `mmio_va` fell
+back to the identity (`mem::MWIN_MISS`, the meter like `DMAP_MISS`).
+
+Under strict a process space then loses the identity of every gigabyte with no RAM in it
+(`paging::strict_gb_drops`: its devices are in the window, a hole is nobody's; ivshmem's gigabyte
+stays) — x86's GB3, and GB1-2 on a small machine; `dmapstrict` counts them (3 in the kernel's
+space, 0 in a process's under QEMU x86). And a `MAP_FIXED` below 4 GiB is granted wherever the
+space has no identity left (`paging::fixed_low_ok`: the map's RAM above the image, those
+gigabytes); the image and whatever the kernel still reaches by its identity stay refused.
+`sigtest` maps `0xA000_0000` privately, forks, checks the copy and unmaps. A kernel fault on
+such an address names itself in the dump ("A DEVICE BY ITS IDENTITY in a process space").
+
+Stage 3's leftover closed with it: an overflow by a push. x86's #DF runs on IST1 (a window stack
+per core, given in `gdt::setup_gdt_cpu`; the boot core's TSS is loaded at boot now, not at the
+first ring-3 entry), and arm64's EL1 entries ask, before the stub saves its frame, whether
+sp − 1 KiB is a window stack's guard page (`TPIDRRO_EL0` is the one scratch register there) and
+dump on an emergency stack. Gate `talaria.test=kstackpush` on both: a window stack driven into its
+guard by pushes ends in a dump that names the guard. Before, x86 triple-faulted and arm64 faulted
+on its own frame forever — both without a word, the shape ENGINEERING-NOTES 52 had to find by
+elimination.
+
+The regressions: the default build x86 526/0 + host 22/0, arm64 362/0 (UEFI with the NVMe BAR above
+4 GiB included); a strict-by-default build (`TALARIA_STRICT=1`) x86 528/0 + 22/0, arm64 362/0,
+x86 `validate.sh` 14/0 (PostgreSQL, MariaDB, MongoDB, the JVM, ClickHouse), arm64's databases
+10/0; kernel-unit 302/0. Next: strict as the default (the databases on the machines under it),
+then stage 6.
+
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
 check on every queued address); arm64 attribute aliasing (map RAM only, never split a leaf);

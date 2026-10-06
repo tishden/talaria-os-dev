@@ -242,8 +242,9 @@ pub fn run(name: &str, cmdline: &str) -> bool {
         "pci" => {
             let (b, s) = crate::pci::ivshmem();
             if b != 0 { // write a marker into the host's shared memory and read it back
-                unsafe { core::ptr::write_volatile(crate::mem::devptr::<u64>(b), 0x5441_4C41_5249_4131); }
-                let v = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u64>(b + 8)) };
+                let k = crate::arch::mmio_va(b); // ivshmem() is the physical address (ring 3 gets it)
+                unsafe { core::ptr::write_volatile(crate::mem::devptr::<u64>(k), 0x5441_4C41_5249_4131); }
+                let v = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u64>(k + 8)) };
                 println!("pci-test: ivshmem base={:#x} size={} the marker was written, host@8={:#x}", b, s, v);
             } else { println!("pci-test: ivshmem was not found"); }
             crate::suite::park()

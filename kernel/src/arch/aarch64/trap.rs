@@ -276,12 +276,34 @@ vectors_el1:
     .balign 128
     b vec_\n
 .endm
+/* An entry at EL1 on SP_EL1 first asks whether the stack it is about to save on is a window
+   stack at its guard (ARM64-PLAN §10.16 stage 3's leftover). Nothing pushes for the core, but
+   the stub's own frame (288 + 528 bytes) would: a store into the guard faults, the fault's
+   entry saves on the same dead stack and faults again — forever, no word (the x86 triple
+   fault's twin). The test: sp - 1 KiB in the window's slot (top-level 257) and in page 0 of its
+   64 KiB slot. x0 is parked in TPIDRRO_EL0, which nothing else uses (zeroed again). */
+.macro VECTOR_KSTK n
+    .balign 128
+    msr tpidrro_el0, x0
+    mov x0, sp
+    sub x0, x0, #0x400
+    lsr x0, x0, #39
+    cmp x0, #257
+    b.ne 1f
+    mov x0, sp
+    sub x0, x0, #0x400
+    and x0, x0, #0xF000
+    cbz x0, kstk_ovf_\n
+1:  mrs x0, tpidrro_el0
+    msr tpidrro_el0, xzr
+    b vec_\n
+.endm
     VECTOR 0
     VECTOR 1
     VECTOR 2
     VECTOR 3
-    VECTOR 4
-    VECTOR 5
+    VECTOR_KSTK 4
+    VECTOR_KSTK 5
     VECTOR 6
     VECTOR 7
     VECTOR 8
@@ -340,6 +362,34 @@ vec_\kind:
     eret
 .endm
 
+/* The overflow: onto the emergency stack (one for the machine — it is a fatal path), the
+   interrupted sp kept in SP_EL0 for the frame's `usp`, then `trap` with kind 16 + n. */
+.macro KSTK_OVF n
+kstk_ovf_\n:
+    mov x0, sp
+    msr sp_el0, x0
+    adrp x0, KSTK_EMERG_TOP
+    add x0, x0, :lo12:KSTK_EMERG_TOP
+    mov sp, x0
+    mrs x0, tpidrro_el0
+    msr tpidrro_el0, xzr
+    SAVE_FRAME 0
+    mrs x1, sp_el0
+    str x1, [sp, #248]
+    mov x0, #(16 + \n)
+    mov x1, sp
+    bl trap
+    b .
+.endm
+KSTK_OVF 4
+KSTK_OVF 5
+
+.section .bss
+.balign 16
+KSTK_EMERG: .space 16384
+KSTK_EMERG_TOP:
+.section .text
+
 STUB_FATAL 0
 STUB_SCHED 1, 0, irq_entry
 STUB_FATAL 2
@@ -374,6 +424,7 @@ fn kind_name(kind: u64) -> &'static str {
         "sync from EL0 (AArch64)", "IRQ from EL0 (AArch64)", "FIQ from EL0 (AArch64)", "SError from EL0 (AArch64)",
         "sync from EL0 (AArch32)", "IRQ from EL0 (AArch32)", "FIQ from EL0 (AArch32)", "SError from EL0 (AArch32)",
     ];
+    if kind >= 16 { return "A KERNEL STACK OVERFLOW (the entry found sp at the window's guard)"; }
     NAMES[(kind & 15) as usize]
 }
 
@@ -413,6 +464,14 @@ extern "C" fn trap(kind: u64, f: &Frame) -> ! {
     crate::println!("[trap]   x30={:#018x}", f.lr);
     if crate::paging::strict_miss(f.far) {
         crate::println!("[trap] <-- RAM BY ITS IDENTITY in a process space (talaria.dmap=strict): a kernel access that missed its kva");
+    }
+    if crate::paging::strict_dev_miss(f.far) {
+        crate::println!("[trap] <-- A DEVICE BY ITS IDENTITY in a process space (talaria.dmap=strict): a kernel access that missed its mmio_va");
+    }
+    if kind >= 16 {
+        let slot = f.usp.wrapping_sub(crate::mem::KWIN_BASE) / (crate::sched::KSTACK_PAGES * 4096);
+        crate::println!("[trap] <-- A KERNEL STACK OVERFLOW: sp={:#x} is at the GUARD page of the kernel stacks' window, slot {} ({} at EL1; the dump runs on the emergency stack)",
+            f.usp, slot, if kind == 20 { "a sync exception" } else { "an IRQ" });
     }
     if crate::mem::in_kwin(f.far) && crate::paging::kwin_frame(f.far).is_none() {
         let slot = (f.far - crate::mem::KWIN_BASE) / (crate::sched::KSTACK_PAGES * 4096);

@@ -51,6 +51,17 @@ pub unsafe fn setup_gdt_cpu(cpu: usize, kstack_top: u64) {
     g[5] = 0x0020FA0000000000; // 0x28 user code64 (DPL3) -> CS 0x2B
     TSS[cpu].rsp0 = kstack_top;
     super::percpu::set_kstack_top(kstack_top);
+    // IST1: the double fault's own stack. A kernel stack overflowed by a PUSH faults on the
+    // guard, the #PF cannot push its frame there either, and the #DF that follows needs a stack
+    // that is not the dead one — without it the machine triple-faults with no word (ARM64-PLAN
+    // §10.16 stage 3's leftover). A window stack (its own guard) when there is one.
+    let ist = core::ptr::addr_of_mut!(TSS[cpu].ist).cast::<u64>();
+    if core::ptr::read_unaligned(ist) == 0 {
+        let top = crate::sched::kstack_from_window()
+            .or_else(|| crate::mem::alloc_contig(4).map(|b| crate::mem::kva(b) + 4 * 4096)).unwrap_or(0);
+        core::ptr::write_unaligned(ist, top);
+        if top != 0 { super::idt::df_on_ist(); }
+    }
     let base = crate::mem::vaddr(core::ptr::addr_of!(TSS[cpu]));
     let limit = (size_of::<Tss>() - 1) as u64;
     let low = limit & 0xFFFF

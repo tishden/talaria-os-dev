@@ -13,6 +13,12 @@ pub static AP_MODE: AtomicU8 = AtomicU8::new(0);
 pub static AP_HOOK: AtomicU64 = AtomicU64::new(0);
 
 const LAPIC: u64 = 0xFEE0_0000;
+/// The kernel's pointer to the xAPIC window: its identity until the devices' window exists, its
+/// window address after (`lapic_rebase`, ARM64-PLAN §10.16 stage 5). `lapic_eoi` reads it too.
+#[unsafe(no_mangle)]
+pub static LAPIC_VA: AtomicU64 = AtomicU64::new(LAPIC);
+/// Move the xAPIC window onto the devices' window (once, on the boot core, before any AP).
+pub fn lapic_rebase() { LAPIC_VA.store(crate::arch::mmio_va(LAPIC), Ordering::SeqCst); }
 const TRAMP: u64 = 0x8000; // physical, real-mode SIPI vector 0x08
 
 pub static AP_ALIVE: AtomicU64 = AtomicU64::new(0);
@@ -53,7 +59,7 @@ fn x2_msr(reg: u64) -> u32 { 0x800 + (reg >> 4) as u32 }
 
 unsafe fn lapic_write(reg: u64, val: u32) {
     if X2APIC.load(Ordering::Relaxed) { wrmsr(x2_msr(reg), val as u64); }
-    else { core::ptr::write_volatile(crate::mem::devptr::<u32>(LAPIC + reg), val); }
+    else { core::ptr::write_volatile(crate::mem::devptr::<u32>(LAPIC_VA.load(Ordering::Relaxed) + reg), val); }
 }
 
 /// Enable the LAPIC: mask all the LVTs (so as not to catch unexpected vectors),
@@ -125,7 +131,7 @@ pub fn lapic_enable() {
 }
 unsafe fn lapic_read(reg: u64) -> u32 {
     if X2APIC.load(Ordering::Relaxed) { rdmsr(x2_msr(reg)) as u32 }
-    else { core::ptr::read_volatile(crate::mem::devptr::<u32>(LAPIC + reg)) }
+    else { core::ptr::read_volatile(crate::mem::devptr::<u32>(LAPIC_VA.load(Ordering::Relaxed) + reg)) }
 }
 
 /// Write the ICR (send an IPI). In xAPIC that is TWO accesses to the MMIO — the upper
@@ -326,8 +332,8 @@ lapic_eoi:
     xor %edx, %edx
     wrmsr
     ret
-2:  mov $0xFEE000B0, %rax    /* xAPIC: a write into the MMIO window */
-    movl $0, (%rax)
+2:  mov LAPIC_VA(%rip), %rax /* xAPIC: a write into the MMIO window (EOI = +0xB0) */
+    movl $0, 0xB0(%rax)
 1:  ret
 "#, options(att_syntax));
 
