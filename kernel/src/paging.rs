@@ -277,6 +277,12 @@ pub fn strict_init(want: bool) -> bool {
         crate::println!("talaria: talaria.dmap=strict REFUSED — it needs the direct map and the stacks' window (talaria.kwin=0?)");
         return false;
     }
+    // the process spaces made before would keep the identity: refuse rather than half-apply
+    let live = AS_LIVE.load(Ordering::Relaxed);
+    if live > 0 {
+        crate::println!("talaria: talaria.dmap=strict REFUSED — {} address spaces exist already", live);
+        return false;
+    }
     STRICT_KEEP.store((crate::mem::kernel_hi() + 0x1F_FFFF) & !0x1F_FFFF, Ordering::Relaxed);
     STRICT.store(true, Ordering::SeqCst);
     crate::println!("talaria: the direct map is STRICT: process spaces carry no identity leaf over the map's RAM (the image below {:#x} stays)",

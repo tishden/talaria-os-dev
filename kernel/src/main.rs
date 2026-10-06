@@ -220,7 +220,6 @@ extern "C" fn rust_main(start_info: u64) -> ! {
     paging::init(); // our own page tables (1G) instead of the static boot tables
     paging::dmap_init(cmdline::num(cmdline, "talaria.dmap") != Some(0)); // RAM once more at mem::DMAP_BASE (ARM64-PLAN §10.16)
     paging::kwin_init(cmdline::num(cmdline, "talaria.kwin") != Some(0)); // the kernel stacks at addresses of their own, a guard under each in every space
-    paging::strict_init(cmdline::has(cmdline, "talaria.dmap", "strict")); // stage 4b: RAM's identity out of the process spaces
     fr::record(fr::PAGING, 0);
     rebootat("paging", cmdline);
 
@@ -437,6 +436,9 @@ pub fn boot_shared(start_info: u64, mut cmdline: &'static str, tsc_hz: u64, earl
         c
     } else { cmdline };
     trace::mark("the cmdline is ready (the network/user-data are done)");
+    // Stage 4b of the direct map, by the FINAL cmdline: strict builds nothing at boot, it only
+    // shapes the process spaces made from here on — so EC2's user-data can turn it on.
+    paging::strict_init(cmdline::has(cmdline, "talaria.dmap", "strict"));
 
     // ── The built-in self-checks (`talaria.test=<name>`) and the production modes
     //    (`talaria.mode=<name>`). Both parse THE WHOLE NAME (crate::cmdline) rather than
