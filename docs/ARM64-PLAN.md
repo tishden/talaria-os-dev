@@ -2109,8 +2109,9 @@ memory map and a root-run Linux side could show (§10.15; ENGINEERING-NOTES 48-4
 reproduced under TCG in that shape and gated.
 
 What phase 9 leaves open, in the order the numbers rank it: the median and the ceilings on the
-network path (first split the generator's share with a Linux generator — the Talaria node's
-open-loop debt is up to 25 us at the top rate); redis's rare 0.3-0.9 ms outliers at low rates;
+network path — split on 2026-10-06 (`docs/MEASUREMENTS.md` §10.14): under the Linux generator the
+Talaria redis server has a flat 38-40 us median and a ceiling 14-17 % above Linux's, so the gap is
+the Talaria GENERATOR's client path, the next thing to measure; redis's rare 0.3-0.9 ms outliers at low rates;
 PostgreSQL `pk`'s ceiling; the wfe tier's mdpipe tail (§10.15); the lazy FP save (the svc round
 trip is 130 ns with the save, 113 without — 17 ns, under the noise of any row above).
 

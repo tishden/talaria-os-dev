@@ -964,6 +964,41 @@ mongodb's panicked at launch (a refused 512 MB cache resize took the rest of the
 All three are fixed and gated; the TCG reproduction in the Graviton's memory shape is
 `virt` 10 GB with `talaria.lowmem=850`.
 
+### 10.14. Whose is the network gap on a Graviton: the generator's (2026-10-06)
+
+§10.13 gave the network-only servers' median and closed-loop ceiling to Linux (redis p50 0/4/16,
+ceilings -30..-38 %), with a caveat: each side is measured by its own generator, and the Talaria
+generator's open-loop debt reached 25 us at the top rate. One bring-up of the redis stand
+(`c7g.xlarge` ×4, `results/ec2genab-a64-redis-20261006-093445`) separated the two: phase A as the
+scoreboard takes it (each side its own generator), phase L the Talaria server under the LINUX
+generator over A's ladder (`ab-phase.sh GEN=linux`), phase R phase A's Talaria side again (the
+drift check: every p50 within 1.00-1.05 of A), then the closed-loop ceiling of the Talaria server
+probed by the Linux generator (`run-remote.sh` `capacity()`, three probes, spread 0-1 %).
+
+The median, us (ping; get/set/mixed alike):
+
+| rate, req/s | Talaria server, Linux generator | Talaria server, Talaria generator | Linux server, Linux generator |
+| --- | --- | --- | --- |
+| 10 167 | 38.3 | 39.9 | ~43 |
+| 50 837 | 38.4 | 45.2 | ~46 |
+| 91 506 | **38.0** | 55.1 | ~44 |
+
+The ceiling, req/s:
+
+| case | Talaria server, Linux generator | Linux server, Linux generator | Talaria server, Talaria generator |
+| --- | --- | --- | --- |
+| ping | **165 164** | 144 535 | 101 674 |
+| get | **152 309** | 132 753 | 97 218 |
+| set | **144 759** | 124 125 | 95 073 |
+
+(The Linux server's medians are phase A's through the scoreboard's ratio; its ceilings phase A's.)
+Measured by the same generator, the Talaria redis server holds a flat 38-40 us median up to
+91.5 k req/s and a ceiling 14-17 % above Linux's. **Every median and ceiling point redis lost on the
+scoreboard is the Talaria GENERATOR's** — the client side of the network path (many connections,
+a send and a receive per request on the load node), which the scoreboard's rule "each side its
+own generator" charged to the server. That client path is the next thing to measure; the
+scoreboard's verdicts on the servers stand as they were taken.
+
 ## 11. Reproducing any of this
 
 ```sh
