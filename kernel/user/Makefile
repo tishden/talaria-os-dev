@@ -26,10 +26,15 @@ ASMBIN  := uaftest sfilter
 # libtsync
 TSYNC   := tsync/tsynctest tsync/syncbench tsync/fiberbench tsync/tsynctest.dyn
 
-all: $(CBINS) mhello mprintf launcher profdeep crashme $(CPPBINS) $(ASMELF) $(ASMBIN) $(TSYNC) dyn/hello
+all: $(CBINS) sigtest-hi mhello mprintf launcher profdeep crashme $(CPPBINS) $(ASMELF) $(ASMBIN) $(TSYNC) dyn/hello
 
 $(CBINS): %: %.c tal_arch.h
 	$(MUSL) sh -c 'musl-gcc -O2 $(LDF) -o $@ $< && strip $@'
+
+# sigtest linked at 1 GiB — inside RAM's former identity on x86 (GB1): it loads and works only when
+# a process space has none of it (`talaria.dmap=strict`, docs/ARM64-PLAN.md §10.16 stage 4b).
+sigtest-hi: sigtest.c tal_arch.h
+	$(MUSL) sh -c 'musl-gcc -O2 -static -no-pie -Wl,-Ttext-segment=0x40000000 -o $@ $< && strip $@'
 
 # AS A SEPARATE RULE: the gate of the stack unwinding requires frame pointers
 # (otherwise there is no chain of frames at all) and does NOT tolerate strip (otherwise

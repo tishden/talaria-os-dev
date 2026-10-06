@@ -65,7 +65,7 @@ fi
 # kernel/user/*.
 (cd "$REPO/kernel" && python3 mkfs.py "$IMG/disk.img" >/dev/null) || echo "mkfs.py: disk.img was not built (no kernel/user/mhello?)"
 # The ext2 image for the tests of the RW FS and of the process model (it is recreated: the tests write onto the disk)
-E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
+E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
 # the symlinks in the image: a "fast" one (the target inside the inode) to a file and to a directory —
 # exactly what the launch with the runtime from Ubuntu stumbled over (/lib64/ld-linux… is a symlink)
 mkdir -p "$E2/dir"; echo inside > "$E2/dir/inside.txt"
@@ -557,6 +557,9 @@ q=$(bootd "talaria.test=sigtest" /img/disk_ext2.img); sleep 2
 assert "sigtest: MAP_SHARED at 0x6[0-9a-f]{11}, MAP_SHARED\|MAP_FIXED at 0x6f0000000000" "proc: an anonymous MAP_SHARED has an address of its own (the mmap region, not the frames' identity) and a MAP_SHARED|MAP_FIXED is honoured — both stay shared after a fork (ARM64-PLAN §10.16 stage 4a)"
 assert "sigtest: SysV shm at 0x70[0-9a-f]{10}, POSIX shm at 0x70[0-9a-f]{10}" "proc: SysV and POSIX shm in the named window (one non-identity address in every process, so a futex in it still wakes across processes), shared after a fork (ARM64-PLAN §10.16 stage 4a)"
 assert "sigtest: ALL OK" "proc: the fd tables/dup2/pipe/cwd/readdir + the signals(handler,mask,kill,SIGCHLD,SIGTERM,a sigwait thread,signalfd) + fork(COW,mprotect-RO,MAP_SHARED,SysV shm,the memory at exit) + eventfd/timerfd/procfs/openat(dirfd)/a file mmap"; stopq $q
+q=$(bootd "talaria.test=sigtesthi talaria.dmap=strict" /img/disk_ext2.img); sleep 2
+assert "sigtest: ALL OK" "proc: sigtest LINKED AT 0x40000000 (RAM's former identity, GB1) under strict — the image, its forks (COW) and its shared memory where the kernel's identity used to be (ARM64-PLAN §10.16 stage 4b)"
+refute "RAM BY ITS IDENTITY|CRASH DUMP" "proc: the image at 1 GiB under strict — no kernel access missed its kva, no crash"; stopq $q
 q=$(bootd "talaria.test=sigtest talaria.dmap=strict" /img/disk_ext2.img); sleep 2
 assert "sigtest: ALL OK" "proc: the same under talaria.dmap=strict — no identity RAM in the process spaces, fork/COW/MAP_SHARED/shm/signals intact (ARM64-PLAN §10.16 stage 4b)"
 refute "RAM BY ITS IDENTITY|CRASH DUMP" "proc: under strict no kernel access missed its kva, no crash"; stopq $q

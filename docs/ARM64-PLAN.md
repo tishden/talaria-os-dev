@@ -2132,8 +2132,19 @@ the stacks' window now (ENGINEERING-NOTES 52). Then, strict by default: x86 525/
 fixed), x86 `validate.sh` 14/0 (PostgreSQL, MariaDB, MongoDB, the JVM, ClickHouse), arm64's
 databases 10/0. The default build after it: x86 520/0 + host 22/0, arm64 356/0 (UEFI blocks
 included), kernel-unit 302/0. Left: strict as the default (after the machines: `variants.sh`, the databases on
-EC2), a `MAP_FIXED` below 4 GiB (still refused: the image and the low devices are there), and
-the gate's "an x86 ET_EXEC at 0x4000_0000" — not written yet.
+EC2), a `MAP_FIXED` below 4 GiB (still refused: the image and the low devices are there).
+
+Then the plan's last gate item: `sigtest` linked at `0x4000_0000` (`kernel/user/sigtest-hi`,
+x86's GB1 of RAM) runs ALL OK under strict — the image, its COW forks and its shared memory
+where the kernel's identity was (`talaria.test=sigtesthi`; it passes without strict too, because
+the loader still reserves an image's identity range below 4 GiB). x86 522/0 + host 22/0, arm64
+356/0. On the machines (`variants.sh`, mdpipe, `smp=4`, the knob in user-data): `c6i.xlarge`
+p99 5.5 us strict / 6.0 without / Linux 8.2; `c7g.xlarge` 2.45 strict / 2.26 without / Linux 7.1
+— the same within a run's spread. Two things the machines taught: a user-data knob arrives after
+`paging::init`, so strict is now set by the FINAL cmdline (it builds nothing at boot; it refuses
+if an address space already exists); and an arm64 AMI carries the kernel inside the UEFI stub —
+a stub built before the last kernel build shipped the old kernel without a word, so
+`tools/mk-ami.sh` now rebuilds a stub older than the kernel.
 
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound

@@ -119,6 +119,12 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/execmt", &[b"execmt"], &[b"HOME=/"]); } }
             crate::suite::park()
         }
+        "sigtesthi" => {
+            // The same binary linked at 0x4000_0000 (x86's GB1 of RAM): under strict the image, its
+            // forks and its shared memory live where the kernel's identity used to be.
+            if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/sigtest-hi", &[b"sigtest"], &[b"HOME=/"]); } }
+            crate::suite::park()
+        }
         "sigtest" => {
             // The process model: fd tables, a pipe, fork+SIGCHLD, kill/handlers, cwd, shm — a musl test from the ext2 disk.
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/sigtest", &[b"sigtest"], &[b"HOME=/"]); } }

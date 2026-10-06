@@ -25,6 +25,13 @@ case "${ARCH:-x86_64}" in
   *)             EFI="$HERE/kernel/uefi-stub/target/x86_64-unknown-uefi/release/talaria-uefi-stub.efi";  BOOTEFI=BOOTX64.EFI;  STUBBUILD="kernel/uefi-stub/build.sh";;
 esac
 [ -f "$EFI" ] || { echo "no $EFI — $STUBBUILD"; exit 1; }
+# The stub CARRIES the kernel: one built before the last kernel build ships the OLD kernel, and
+# nothing in the boot says so (a variant's knob was silently absent on a c7g, 2026-10-06).
+case "$EFI" in *aarch64*) KELF="$HERE/kernel/target/aarch64-talaria/release/talaria";; *) KELF="$HERE/kernel/target/x86_64-talaria/release/talaria";; esac
+if [ -f "$KELF" ] && [ "$KELF" -nt "$EFI" ]; then
+  echo "mk-ami: the stub is older than the kernel — rebuilding it ($STUBBUILD)"
+  sh $HERE/$STUBBUILD >/dev/null || { echo "mk-ami: the stub rebuild failed"; exit 1; }
+fi
 [ -f "$DATA" ] || { echo "no $DATA"; exit 1; }
 
 # The ESP size is computed from the stub itself: it carries the kernel ELF with its
