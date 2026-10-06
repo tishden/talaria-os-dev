@@ -349,6 +349,9 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
         let d = if f.err & 1 == 0 { "not mapped" } else { "protection" };
         let rw = if f.err & 2 != 0 { "a write" } else { "a read" };
         crate::println!("║ #PF CR2={:#018x} ({}, {})", cr2, d, rw);
+        if crate::paging::strict_miss(cr2) {
+            crate::println!("║ <-- RAM BY ITS IDENTITY in a process space (talaria.dmap=strict): a kernel access that missed its kva");
+        }
         if crate::mem::in_kwin(cr2) && crate::paging::kwin_frame(cr2).is_none() {
             let slot = (cr2 - crate::mem::KWIN_BASE) / (crate::sched::KSTACK_PAGES * 4096);
             let page = (cr2 - crate::mem::KWIN_BASE) / 4096 % crate::sched::KSTACK_PAGES;

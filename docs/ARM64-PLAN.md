@@ -2107,6 +2107,34 @@ host's memory) keeps its identity; `talaria.sharedid=1` covers these too. `sigte
 addresses (`0x70…`) and checks the POSIX object after a fork as well. x86 515/0, arm64 352/0,
 `validate.sh` 14/0, arm64 databases 10/0.
 
+**Stage 4b is done behind its knob (2026-10-06).** `talaria.dmap=strict`: a process space
+(`new_process_space`, so every fork child too) keeps the identity only where the kernel still
+needs it — its image and what lies below it in its gigabyte, and every 2 MiB the map does NOT
+cover (devices, the firmware's reserved tables such as QEMU's ACPI at `0xbfffffc6`, holes: `kva`
+gives those their identity, so they stay reachable). Every identity leaf over the map's RAM is
+gone (`paging::strict_strip`; a 1G leaf the map covers in part is split in the process's own
+PDPT copy). The kernel's space keeps the identity — the identity modes run ring 3 there. A
+`munmap` leaves no leaf at all instead of the old supervisor identity one (`proc_ident_leaf`), a
+`MAP_FIXED` over a former high-area gigabyte is allowed (`ident_leaf_overlap`), the zero-syscall
+region is mapped at its address explicitly, `talaria.sharedid` is ignored, and a ring-0 fault on
+such an address names itself in the dump ("RAM BY ITS IDENTITY in a process space"). Strict
+refuses to start without the map or the stacks' window. A build with `TALARIA_STRICT` set makes
+it the default — that is how both regressions ran over it. Gate `talaria.test=dmapstrict` (no
+such leaf in a process space and its fork child, the kernel's write through the map does not
+show in the process's own page at the frame's former identity address, a low and a high frame);
+`identhole` and `highmem` know strict; `sigtest` runs once more under strict on both machines.
+
+The whole x86 set over a strict-by-default build found what the gate could not: x86's AP boot
+stack and pickup-loop stack were identity frames, and an AP that switched into a process space
+on one triple-faulted silently (every four-core gate failed, QEMU simply exited). Both come from
+the stacks' window now (ENGINEERING-NOTES 52). Then, strict by default: x86 525/0, arm64 339/0
+(its one failure was `identhole` counting arm64's never-mapped device gigabyte as a hole —
+fixed), x86 `validate.sh` 14/0 (PostgreSQL, MariaDB, MongoDB, the JVM, ClickHouse), arm64's
+databases 10/0. The default build after it: x86 520/0 + host 22/0, arm64 356/0 (UEFI blocks
+included), kernel-unit 302/0. Left: strict as the default (after the machines: `variants.sh`, the databases on
+EC2), a `MAP_FIXED` below 4 GiB (still refused: the image and the low devices are there), and
+the gate's "an x86 ET_EXEC at 0x4000_0000" — not written yet.
+
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
 check on every queued address); arm64 attribute aliasing (map RAM only, never split a leaf);

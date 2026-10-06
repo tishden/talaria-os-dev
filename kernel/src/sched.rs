@@ -2234,6 +2234,13 @@ pub const KSTACK_PAGES: u64 = 16;
 /// a guard one — an overflow gives an honest #PF rather than a silent corruption of a neighbour.
 /// The guard is laid in the ACTIVE space — right for a thread of the current process and for
 /// a kernel task; a stack for ANOTHER space (a fork's child) takes `alloc_kstack_in`.
+/// A stack from the kernel stacks' window, if there is one: an AP's boot stack and its pickup
+/// loop's (x86 allocated both as identity frames, which is RAM by its identity in the process
+/// space the AP switches to — under `talaria.dmap=strict` the AP triple-faulted silently at its
+/// first task). The window's slot has its guard; the stack is never given back (the AP's for life).
+pub fn kstack_from_window() -> Option<u64> {
+    if crate::paging::KWIN_ON.load(Ordering::Relaxed) { kwin_take() } else { None }
+}
 pub fn alloc_kstack() -> Option<u64> { alloc_kstack_in(crate::paging::current_cr3() & !0xFFF) }
 
 /// A kernel stack for a task that will run under the space `pml4`: the guard goes into THAT

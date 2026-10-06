@@ -111,6 +111,54 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if low.is_some() && bad == 0 { println!("dmapid: ALL OK"); } else { println!("dmapid: FAIL ({} bad)", bad); }
             crate::suite::park()
         }
+        "dmapstrict" => {
+            // STAGE 4b OF THE DIRECT MAP (docs/ARM64-PLAN.md §10.16): under `talaria.dmap=strict` a
+            // process space carries no identity leaf over the map's RAM (its fork child neither),
+            // the kernel's own space still does, the kernel reaches a frame through the map under a
+            // process space, and the frame's former identity address is the process's own: a page
+            // mapped there is another frame, and the kernel's writes to the first do not show in it.
+            let mut ok = true;
+            let mut check = |what: &str, c: bool| { println!("dmapstrict: {} — {}", what, if c { "OK" } else { "FAIL" }); ok &= c; };
+            check("strict is on", crate::paging::strict());
+            let orig = crate::paging::current_cr3();
+            let kern = crate::paging::strict_count_in(crate::paging::kernel_cr3());
+            let asp = crate::paging::new_process_space();
+            let n = crate::paging::strict_count_in(asp);
+            println!("dmapstrict: identity 4K pages over the map's RAM: the kernel's space {}, a process space {}", kern, n);
+            check("a process space has none, the kernel's space keeps them", n == 0 && kern > 0);
+            let child = crate::paging::fork_cow_space(asp);
+            check("a fork child has none", crate::paging::strict_count_in(child) == 0);
+            let (hb, _) = crate::mem::high_area();
+            let low = crate::mem::alloc_frame();
+            let high = if hb != 0 { crate::mem::alloc_high(1, 4096) } else { None };
+            for (what, f) in [("a low frame", low), ("a high frame", high)] {
+                let (Some(f), Some(g)) = (f, crate::mem::alloc_frame()) else { println!("dmapstrict: {}: none (skipped)", what); continue; };
+                // the process's own page at f's identity address: frame g
+                crate::paging::map_leaf_shared(asp, f, g, true, false, false);
+                // SAFETY: f and g are frames this test owns; under `asp` the address f is the leaf
+                // just mapped (g), and kptr goes through the map, which every space carries.
+                let (seen, got) = unsafe {
+                    core::ptr::write_volatile(crate::mem::kptr::<u64>(g), 0x0000_6A6A_0000_0000 | g);
+                    crate::paging::switch(asp);
+                    core::ptr::write_volatile(crate::mem::kptr::<u64>(f), 0x0000_F0F0_0000_0000 | f); // the kernel's write to f
+                    let seen = core::ptr::read_volatile(crate::mem::vptr::<u64>(f)); // the process's page at f's identity address
+                    let got = core::ptr::read_volatile(crate::mem::kptr::<u64>(f));
+                    crate::paging::switch(orig);
+                    (seen, got)
+                };
+                println!("dmapstrict: {} {:#x}: the kernel wrote {:#x} through the map, the process's page there reads {:#x}", what, f, got, seen);
+                check(what, got == 0x0000_F0F0_0000_0000 | f && seen == 0x0000_6A6A_0000_0000 | g);
+                crate::mem::free_contig(g, 1);
+                crate::mem::free_contig(f, 1);
+            }
+            if let Some(h) = high {
+                check("a MAP_FIXED over the high area's gigabyte is allowed", !crate::paging::ident_leaf_overlap(h, 1));
+            }
+            crate::paging::free_address_space(child);
+            crate::paging::free_address_space(asp);
+            println!("dmapstrict: {}", if ok { "ALL OK" } else { "FAILED" });
+            crate::suite::park()
+        }
         "identhole" => {
             // A MINE OF THE CLASS "an identity address under someone else's AS". The kernel addresses physical
             // frames by their identity address (zeroing a fresh frame, a COW copy,
@@ -128,9 +176,15 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             let frame = match crate::mem::alloc_contig(N) { Some(f) => f, None => { println!("identhole: FAILED (no frames)"); crate::suite::park() } };
             let asp = crate::paging::new_process_space();
             unsafe { crate::paging::switch(asp); }
-            // like the workload's MAP_SHARED: present + U/S in its own copy of GB0
-            crate::paging::protect(frame, N * 4096, true, false);
-            unsafe { core::ptr::write_volatile(crate::mem::kptr::<u64>(frame), 0x1234_5678) }; // DMAP: identhole is about the identity itself (stage 4 rewrites it)
+            // like the workload's MAP_SHARED: present + U/S in its own copy of GB0 (under strict there
+            // is no identity leaf to open: the frames are mapped at their address explicitly)
+            if crate::paging::strict() {
+                for p in 0..N { crate::paging::map_leaf_shared(asp, frame + p * 4096, frame + p * 4096, true, true, false); }
+                crate::paging::flush_tlb_now();
+            } else {
+                crate::paging::protect(frame, N * 4096, true, false);
+            }
+            unsafe { core::ptr::write_volatile(crate::mem::kptr::<u64>(frame), 0x1234_5678) };
             crate::paging::unmap_proc(frame, N);            // the workload's munmap
             // THE KERNEL touches the same frames by their identity address while staying under the workload's AS
             let mut rw_ok = true;
@@ -143,7 +197,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             }
             let (holes, shadow, ro) = crate::paging::ident_check();
             // ring 3 must NOT have access to the removed page: U/S is cleared
-            let user_gone = crate::paging::leaf_entry(frame).map(|e| e & 4 == 0).unwrap_or(false);
+            // (under strict: no leaf at all — the identity there is gone from the process's space)
+            let user_gone = crate::paging::leaf_entry(frame).map(|e| e & 4 == 0).unwrap_or(crate::paging::strict());
             unsafe { crate::paging::switch(orig); }
             crate::paging::free_address_space(asp);
             crate::mem::free_contig(frame, N);
@@ -311,11 +366,15 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             let e3 = crate::paging::kernel_pdpt_entry(l3);
             // The process's PDPT entry (`phys_of_in` sees private 4K pages only).
             let e3p = crate::paging::pdpt_entry_in(asp, l3);
-            check(&mut ok, "a process AS inherits the identity leaf", e3p == e3 && e3 & 1 != 0);
+            // (under strict: a process space has none of the area's identity, `dmapstrict`)
+            let st = crate::paging::strict();
+            check(&mut ok, if st { "a process AS has no identity leaf over the area (strict)" } else { "a process AS inherits the identity leaf" },
+                if st { e3p != e3 && e3 & 1 != 0 } else { e3p == e3 && e3 & 1 != 0 });
             crate::paging::free_address_space(asp);
             check(&mut ok, "the AS teardown leaves the kernel's leaf", crate::paging::kernel_pdpt_entry(l3) == e3 && e3 & 1 != 0);
-            check(&mut ok, "a MAP_FIXED over the area's gigabyte is refused, the heap and mmap regions are not",
-                crate::paging::ident_leaf_overlap(b, 1) && !crate::paging::ident_leaf_overlap(crate::user::PROC_HEAP_BASE, 1)
+            check(&mut ok, if st { "a MAP_FIXED over the area's gigabyte is allowed (strict), the heap and mmap regions too" }
+                    else { "a MAP_FIXED over the area's gigabyte is refused, the heap and mmap regions are not" },
+                crate::paging::ident_leaf_overlap(b, 1) != st && !crate::paging::ident_leaf_overlap(crate::user::PROC_HEAP_BASE, 1)
                     && !crate::paging::ident_leaf_overlap(0x6000_0000_0000, 1));
             crate::mem::free_contig(b, 16);
             println!("highmem: the area {:#x}..{:#x} ({} MB)", hb, he, (he - hb) / 1048576);

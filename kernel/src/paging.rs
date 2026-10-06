@@ -255,6 +255,127 @@ pub fn kwin_init(enabled: bool) -> bool {
 }
 pub static KWIN_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+// ── STRICT: RAM'S IDENTITY OUT OF THE PROCESS SPACES (docs/ARM64-PLAN.md §10.16, stage 4b) ─────
+// `talaria.dmap=strict`: a process space (`new_process_space`) keeps the identity leaves only
+// where the kernel still needs them — its own image and what lies below it in its gigabyte, and
+// every 2 MiB the direct map does NOT cover (the devices, the firmware's reserved tables, a hole:
+// `kva` gives those their identity, so it has to stay reachable). Every identity leaf over RAM
+// the map covers is gone: ring 3 gets those addresses for its own mappings, and a kernel access
+// to RAM that missed its `kva` faults in a process space instead of working by the luck of the
+// identity (the crash dump names it). The kernel's own space keeps the identity (the identity
+// modes run ring 3 there). It needs the map and the stacks' window: an identity kernel stack
+// would be RAM by its identity.
+static STRICT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The kernel's image's end rounded up to 2 MiB: below it (in the kernel's gigabyte) the identity stays.
+static STRICT_KEEP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Turn strict on (`talaria.dmap=strict`, or by default in a build with `TALARIA_STRICT` set —
+/// the whole regression over strict); true when it is on.
+pub fn strict_init(want: bool) -> bool {
+    use core::sync::atomic::Ordering;
+    if !want && option_env!("TALARIA_STRICT").is_none() { return false; }
+    if !crate::mem::DMAP_ON.load(Ordering::Relaxed) || !KWIN_ON.load(Ordering::Relaxed) {
+        crate::println!("talaria: talaria.dmap=strict REFUSED — it needs the direct map and the stacks' window (talaria.kwin=0?)");
+        return false;
+    }
+    STRICT_KEEP.store((crate::mem::kernel_hi() + 0x1F_FFFF) & !0x1F_FFFF, Ordering::Relaxed);
+    STRICT.store(true, Ordering::SeqCst);
+    crate::println!("talaria: the direct map is STRICT: process spaces carry no identity leaf over the map's RAM (the image below {:#x} stays)",
+        STRICT_KEEP.load(Ordering::Relaxed));
+    true
+}
+#[inline(always)]
+pub fn strict() -> bool { STRICT.load(core::sync::atomic::Ordering::Relaxed) }
+/// Does strict take the identity at `va` out of a process space.
+#[inline]
+pub fn strict_drops(va: u64) -> bool {
+    strict() && va >= STRICT_KEEP.load(core::sync::atomic::Ordering::Relaxed) && crate::mem::dmap_covers(va)
+}
+/// For a kernel fault's dump: was `addr` RAM by its identity, touched in a process space under strict.
+pub fn strict_miss(addr: u64) -> bool {
+    strict_drops(addr) && current_cr3() & ADDR_MASK != kernel_cr3() & ADDR_MASK
+}
+/// The leaf `unmap_proc` leaves at an identity address: none at all where strict dropped it.
+#[inline]
+fn proc_ident_leaf(va: u64) -> u64 { if strict_drops(va) { 0 } else { ident_leaf(va) } }
+#[inline]
+fn proc_ident_leaf_2m(va: u64) -> u64 { if strict_drops(va) { 0 } else { ident_leaf_2m(va) } }
+/// Take RAM's identity out of a fresh process space (`pdpt`: its private copy of the kernel's
+/// PDPT, slot 0 of the root; `kgb`: its private gigabyte, whose PD is `pd0`). A 1G leaf the map
+/// covers in part is split in THIS space (its PDPT is a copy, the kernel's leaf stays).
+///
+/// # Safety
+/// P1 + P2 — the space is not in any CR3 yet; `pdpt` and `pd0` are its own tables.
+unsafe fn strict_strip(pdpt: *mut Pte, pd0: *mut Pte, kgb: usize) {
+    for l3 in 0..512usize {
+        let g = (l3 as u64) << 30;
+        let e3 = pte_r(pdpt.add(l3));
+        if e3 & PTE_P == 0 { continue; }
+        if l3 == kgb {
+            for l2 in 0..512usize {
+                let a = g + ((l2 as u64) << 21);
+                let e2 = pte_r(pd0.add(l2));
+                if e2 & PTE_P == 0 || e2 & PTE_PRIV != 0 { continue; }
+                if e2 & PTE_PS != 0 { if strict_drops(a) { pte_w(pd0.add(l2), 0); } continue; }
+                // a copied 4K table (the image's NX split): its pages, one by one
+                let pt = kptr::<Pte>(e2 & ADDR_MASK);
+                for l1 in 0..512usize {
+                    let e1 = pte_r(pt.add(l1));
+                    if e1 & PTE_P != 0 && e1 & PTE_PRIV == 0 && e1 & ADDR_MASK == a + ((l1 as u64) << 12) && strict_drops(a) {
+                        pte_w(pt.add(l1), 0);
+                    }
+                }
+            }
+            continue;
+        }
+        if e3 & PTE_PS == 0 { continue; } // a shared directory of the kernel (a device's gigabyte split for WC)
+        if e3 & 0x000F_FFFF_C000_0000 != g { continue; } // not an identity leaf
+        let covered = (0..512u64).filter(|m| strict_drops(g + (m << 21))).count();
+        if covered == 0 { continue; }
+        if covered == 512 { pte_w(pdpt.add(l3), 0); continue; }
+        split_1g(pdpt.add(l3));
+        let pd = kptr::<Pte>(pte_r(pdpt.add(l3)) & ADDR_MASK);
+        for m in 0..512usize {
+            if strict_drops(g + ((m as u64) << 21)) { pte_w(pd.add(m), 0); }
+        }
+    }
+}
+/// The gate's walk (`dmapstrict`): the identity leaves over the map's RAM in space `pml4`
+/// (outside the image), as 4K pages — 0 under strict.
+pub fn strict_count_in(pml4: u64) -> u64 {
+    let mut n = 0u64;
+    // SAFETY: P1 + P2 — a read-only walk of a space the caller owns.
+    unsafe {
+        let e4 = pte_r(kptr::<Pte>(pml4 & ADDR_MASK));
+        if e4 & PTE_P == 0 { return 0; }
+        let pdpt = kptr::<Pte>(e4 & ADDR_MASK);
+        let keep = (crate::mem::kernel_hi() + 0x1F_FFFF) & !0x1F_FFFF;
+        let ram = |a: u64| a >= keep && crate::mem::dmap_covers(a);
+        for l3 in 0..512usize {
+            let g = (l3 as u64) << 30;
+            let e3 = pte_r(pdpt.add(l3));
+            if e3 & PTE_P == 0 { continue; }
+            if e3 & PTE_PS != 0 {
+                if e3 & 0x000F_FFFF_C000_0000 == g { n += (0..512u64).filter(|m| ram(g + (m << 21))).count() as u64 * 512; }
+                continue;
+            }
+            let pd = kptr::<Pte>(e3 & ADDR_MASK);
+            for l2 in 0..512usize {
+                let a = g + ((l2 as u64) << 21);
+                let e2 = pte_r(pd.add(l2));
+                if e2 & PTE_P == 0 || e2 & PTE_PRIV != 0 { continue; }
+                if e2 & PTE_PS != 0 { if e2 & 0x000F_FFFF_FFE0_0000 == a && ram(a) { n += 512; } continue; }
+                let pt = kptr::<Pte>(e2 & ADDR_MASK);
+                for l1 in 0..512usize {
+                    let va = a + ((l1 as u64) << 12);
+                    let e1 = pte_r(pt.add(l1));
+                    if e1 & PTE_P != 0 && e1 & PTE_PRIV == 0 && e1 & ADDR_MASK == va && ram(va) { n += 1; }
+                }
+            }
+        }
+    }
+    n
+}
+
 /// The window's leaf slot for `va`, its tables created on the way (a CAS per level: two cores
 /// may build stacks at once). None when a table frame cannot be had.
 ///
@@ -2086,15 +2207,20 @@ pub fn unmap_ident(vaddr: u64, pages: u64) {
 pub fn ident_check() -> (u64, u64, u64) {
     let (mut holes, mut shadow, mut ro) = (0u64, 0u64, 0u64);
     let (rb, re) = crate::mem::reserved();
+    // under strict a process space has no identity over the map's RAM by design: not a hole
+    let in_proc = current_cr3() & ADDR_MASK != kernel_cr3() & ADDR_MASK;
+    let dropped = |a: u64| in_proc && strict_drops(a);
+    let gb_holes = |g: u64| (0..512u64).filter(|m| !dropped(g + (m << 21))).count() as u64 * 512;
     // SAFETY: P1 + P2 — a read-only walk over the identity window.
     unsafe {
         let pml4 = cr3_root();
-        let mut a = 0u64;
+        // arm64's GB0 of devices has no identity at all by design (`init`: the devices' alias)
+        let mut a = if cfg!(target_arch = "aarch64") { 1u64 << 30 } else { 0 };
         while a < IDENT_HI {
             let e4 = pte_r(pml4.add(((a >> 39) & 0x1FF) as usize));
-            if e4 & PTE_P == 0 { holes += 512 * 512; a += 1 << 30; continue; }
+            if e4 & PTE_P == 0 { holes += gb_holes(a); a += 1 << 30; continue; }
             let e3 = pte_r(kptr::<Pte>(e4 & ADDR_MASK).add(((a >> 30) & 0x1FF) as usize));
-            if e3 & PTE_P == 0 { holes += 512 * 512; a += 1 << 30; continue; }
+            if e3 & PTE_P == 0 { holes += gb_holes(a); a += 1 << 30; continue; }
             if e3 & PTE_PS != 0 { // a 1G leaf
                 if e3 & ADDR_MASK != a { shadow += 512 * 512; } else if e3 & PTE_RW == 0 { ro += 512 * 512; }
                 a += 1 << 30; continue;
@@ -2102,7 +2228,7 @@ pub fn ident_check() -> (u64, u64, u64) {
             let pd = kptr::<Pte>(e3 & ADDR_MASK);
             let e2 = pte_r(pd.add(((a >> 21) & 0x1FF) as usize));
             if e2 & PTE_PS != 0 || e2 & PTE_P == 0 {
-                if e2 & PTE_P == 0 { holes += 512; }
+                if e2 & PTE_P == 0 { if !dropped(a) { holes += 512; } }
                 else if e2 & ADDR_MASK != a { shadow += 512; }
                 else if e2 & PTE_RW == 0 { ro += 512; }
                 a += 0x20_0000; continue;
@@ -2112,7 +2238,7 @@ pub fn ident_check() -> (u64, u64, u64) {
                 let va = a + (l1 as u64) * 4096;
                 let e1 = pte_r(pt.add(l1));
                 if e1 & PTE_GUARD != 0 { continue; }             // a guard page — that is how it is intended
-                if e1 & PTE_P == 0 { holes += 1; continue; }
+                if e1 & PTE_P == 0 { if !dropped(va) { holes += 1; } continue; }
                 if e1 & ADDR_MASK != va { if !(re > rb && va >= rb && va < re) { shadow += 1; } continue; }
                 if e1 & PTE_RW == 0 { ro += 1; }
             }
@@ -2247,7 +2373,13 @@ pub fn ident_leaf_overlap(vaddr: u64, pages: u64) -> bool {
             let e4 = pte_r(pml4.add(((g >> 39) & 0x1FF) as usize));
             if e4 & PTE_P == 0 { g = ((g >> 39) + 1) << 39; continue; }
             let e3 = pte_r(kptr::<Pte>(e4 & ADDR_MASK).add(((g >> 30) & 0x1FF) as usize));
-            if g >= 4u64 << 30 && e3 & PTE_P != 0 && e3 & PTE_PS != 0 { return true; }
+            if g >= 4u64 << 30 && e3 & PTE_P != 0 && e3 & PTE_PS != 0 {
+                // under strict a process space has none of the map's RAM here (`strict_strip`)
+                if !strict() { return true; }
+                let (lo, hi) = (vaddr.max(g) & !0x1F_FFFF, end.min(g + (1 << 30)));
+                let mut c = lo;
+                while c < hi { if !strict_drops(c) { return true; } c += 0x20_0000; }
+            }
             g += 1 << 30;
         }
     }
@@ -2412,6 +2544,7 @@ pub fn new_process_space() -> u64 {
             }
         }
         pte_w(kptr::<Pte>(pdpt).add(kgb), pd0 | PTE_P | PTE_RW | PTE_US); // the private PD of the kernel's GB
+        if strict() { strict_strip(kptr::<Pte>(pdpt), kptr::<Pte>(pd0), kgb); }
         pte_w(kptr::<Pte>(pml4), pdpt | PTE_P | PTE_RW | PTE_US);
         AS_LIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         pml4
@@ -2784,7 +2917,7 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
                         // and it got memory on top of which everything
                         // else lies. From the outside that is "random" corruption after minutes.
                         // Instead of a hole there is the original identity leaf without U/S (see ident_leaf).
-                        pte_w(pde, ident_leaf_2m(a));
+                        pte_w(pde, proc_ident_leaf_2m(a));
                         if e & PTE_LAZY == 0 && (e & PTE_P != 0 || e & PTE_PNONE != 0) {
                             if e & PTE_P != 0 { present_gone = true; }
                             let phys = e & ADDR_MASK;
@@ -2800,14 +2933,14 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
             while a < stop {
                 let pte = pt.add(pt_idx(a));
                 let e = pte_r(pte);
-                if e & PTE_LAZY != 0 { pte_w(pte, ident_leaf(a)); } // a reservation without a frame — just remove it
+                if e & PTE_LAZY != 0 { pte_w(pte, proc_ident_leaf(a)); } // a reservation without a frame — just remove it
                 else if e & (PTE_P | PTE_PNONE) != 0 { // present OR PROT_NONE (there is a frame behind it)
                     if e & PTE_P != 0 { present_gone = true; }
                     let phys = e & ADDR_MASK;
                     // In the identity window it is the return of a supervisor leaf (the kernel will still need the frame at
-                    // this address), above the window it is the former non-present stub,
+                    // this address; none under strict), above the window it is the former non-present stub,
                     // by which protect()/unguard() will give a mapping again.
-                    pte_w(pte, ident_leaf(a));
+                    pte_w(pte, proc_ident_leaf(a));
                     if e & PTE_PRIV != 0 && crate::mem::rc_release(phys) { dfr.put(phys, 1, &flush); }
                 }
                 a += 0x1000;

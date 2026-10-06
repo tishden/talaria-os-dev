@@ -884,6 +884,18 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     at the block layer's doors (`fs::Bounce`). **A mark that says "this breaks at stage N" is a
     gate for stage N: grep the marks before the stage, not after it fails.**
 
+52. **"Run the whole regression over the knob, not the knob's gate."** Stage 4b (no RAM
+    identity in a process space) passed its own gate on both machines at once; the x86 set run
+    over a build with strict as the DEFAULT (`TALARIA_STRICT=1`, `TAL_KERNEL=`) then lost
+    every four-core gate — forkap, the multithreaded core dump, the restarts, memrace, fsbig —
+    silently: no dump, QEMU just gone. An AP's boot stack and its pickup loop's stack were
+    `alloc_contig` frames used by their identity; the AP switched into a process space ON them,
+    the push faulted, the #PF could not push either: a triple fault, which `-no-reboot` turns into
+    an exit. Stage 3 had moved the TASKS' stacks into the window and missed the two stacks no task
+    owns. They come from the window now (the trampoline loads `rsp` in long mode, under the
+    kernel's CR3). arm64's are in the image's `.bss` and were never at risk. **A gate of the
+    mechanism proves the mechanism; only the full set over it finds who else leaned on the old one.**
+
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
 * **The gate's image is part of the gate.** The dev box's `talaria-qemu-aarch64` was
