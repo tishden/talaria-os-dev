@@ -2085,6 +2085,20 @@ copies such a buffer through contiguous frames at the three doors (`read_raw`/`w
 machines (mdpipe, threads by `clone`, ext2 on EBS with fsync): `c7g.xlarge` p99 33.5 / 2.7 on two
 / four cores, `c6i.xlarge` 7.3 / 5.4 — the stage-2 numbers.
 
+**Stage 4a is done (2026-10-06).** An anonymous `MAP_SHARED` in a process takes an address of
+its own — the process's mmap region, or the `MAP_FIXED` one — and its frames are mapped as
+non-private user leaves (`paging::map_leaf_shared`), zeroed through the direct map;
+`fork_cow_space` hands any such leaf below `USER_TOP` to the child as it is (it used to share
+only the identity ones in the user gigabyte). The frames' lifetime is the identity one's:
+`unmap_proc` leaves a non-private frame alone and `mreg` frees it at a restart. On the way a
+second defect closed: a `MAP_SHARED|MAP_FIXED` took the private branch and turned COW at the
+first fork. `sigtest` checks both (the address `0x6…`, the fixed one shared after a fork); with
+`talaria.sharedid=1` (the identity again) the same binary fails the fixed check — the gate
+catches. x86 514/0, arm64 351/0, x86 `validate.sh` 14/0 (PostgreSQL, MariaDB, MongoDB, the JVM,
+ClickHouse), arm64's databases (PostgreSQL's shared buffers, MariaDB, MongoDB) 10/0. Still
+identity: SysV `shmat` and POSIX `/dev/shm` objects (`shm_region`) — named sharing between
+unrelated processes, the next piece of 4a.
+
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
 check on every queued address); arm64 attribute aliasing (map RAM only, never split a leaf);

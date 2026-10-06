@@ -360,6 +360,7 @@ pub const KNOBS: &[Knob] = &[
     // same trick as `ext2=dxlimit=N`, which squeezes an index node so that the split path can
     // be reached on a small directory); `shmlock=0` takes the lock away, and then the same
     // programme MUST fail — the A/B that proves the gate can fail at all.
+    once("talaria.sharedid", Kind::Flag, "an anonymous MAP_SHARED in a process at its frames' identity address again (before stage 4a of the direct map; the A/B and the fallback)"),
     once("talaria.shmdelay", Kind::Num, "us of delay inside the shm creation section (the gate shmrace)"),
     once("talaria.shmlock", Kind::Num, "the lock of the shm tables: 0 — off (an A/B for the gate shmrace)"),
     once("talaria.shmrole", Kind::Word(&["ping", "pong"]), "the role in the ivshmem test"),

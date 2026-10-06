@@ -307,6 +307,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     run() { cp "$REPO/$TD/$3.img" "$REPO/$TD/run.img"; bootx "$1" "$2" "$TD/run.img" "${4:-}"; }
     echo "== the ext2 disk on arm64: the disk-borne modes (sigtest, mbench, schedapi, mapshared, fputest, memrace) =="
     run 150 "talaria.test=sigtest" ext2
+    assert 'sigtest: MAP_SHARED at 0x6[0-9a-f]{11}, MAP_SHARED\|MAP_FIXED at 0x6f0000000000' 'sigtest: an anonymous MAP_SHARED has an address of its own and a MAP_SHARED|MAP_FIXED is honoured, both shared after a fork (ARM64-PLAN §10.16 stage 4a)'
     assert 'sigtest: ALL OK'                                                  'sigtest: fd tables, signals (handler, mask, SIGCHLD, sigwait, signalfd), fork/COW, MAP_SHARED, SysV shm, eventfd/timerfd/epoll ET, procfs, fstatat — the arm64 stat, epoll_event and sigcontext layouts under real code'
     assertnot "$BAD|\[fault\]"                                              'sigtest: no trap, no fault, no unknown syscall'
     run 150 "talaria.mode=proc" ext2

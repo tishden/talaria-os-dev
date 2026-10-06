@@ -551,6 +551,7 @@ assert "execmt: ALL OK" "execmt: a multithreaded execve — the new image is ali
 q=$(bootd "talaria.test=symlink" /img/disk_ext2.img); sleep 2
 assert "symlink-test: ALL OK" "symlink: the ext2 links (a read through a link, a link in the middle of a path, readlink, stat/lstat, a creation by the kernel, ELOOP)"; stopq $q
 q=$(bootd "talaria.test=sigtest" /img/disk_ext2.img); sleep 2
+assert "sigtest: MAP_SHARED at 0x6[0-9a-f]{11}, MAP_SHARED\|MAP_FIXED at 0x6f0000000000" "proc: an anonymous MAP_SHARED has an address of its own (the mmap region, not the frames' identity) and a MAP_SHARED|MAP_FIXED is honoured — both stay shared after a fork (ARM64-PLAN §10.16 stage 4a)"
 assert "sigtest: ALL OK" "proc: the fd tables/dup2/pipe/cwd/readdir + the signals(handler,mask,kill,SIGCHLD,SIGTERM,a sigwait thread,signalfd) + fork(COW,mprotect-RO,MAP_SHARED,SysV shm,the memory at exit) + eventfd/timerfd/procfs/openat(dirfd)/a file mmap"; stopq $q
 q=$(bootd "talaria.test=ext2v" /img/disk_ext2.img); sleep 1
 assert "ext2v: .*PERSISTED OK" "ext2v: the data survived a reboot (the write-back cache was flushed at the fsync/exit_group)"; stopq $q

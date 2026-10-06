@@ -2647,7 +2647,11 @@ pub fn fork_cow_space(src: u64) -> u64 {
                             // RAM's first gigabyte on arm64 (`user_gb`); "< 1 GB" here left an
                             // arm64 child without its parent's MAP_SHARED page (a rights fault on
                             // the kernel's own 2M leaf at the child's first write).
-                            if e1 & PTE_US != 0 && (vaddr >> 30) as usize == user_gb() && e1 & ADDR_MASK == vaddr {
+                            // And since stage 4a of the direct map a MAP_SHARED is a non-private
+                            // user leaf at an address of its own: any such leaf below USER_TOP is
+                            // the same shared frame for the child (the vDSO's two pages are too).
+                            if e1 & PTE_US != 0 && vaddr < USER_TOP
+                                && ((vaddr >> 30) as usize == user_gb() && e1 & ADDR_MASK == vaddr || (vaddr >> 30) as usize != user_gb()) {
                                 pte_w(pte_ptr_in(dst, vaddr), e1);
                             }
                             continue;

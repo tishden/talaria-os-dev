@@ -1073,6 +1073,11 @@ fn shm_region(obj: usize, need: u64) -> u64 {
 }
 /// Zero an identity area by 2 MB, answering the neighbours' requests for a TLB flush
 /// between the portions (see the identity branch of `sys_mmap`).
+/// `talaria.sharedid=1`: an anonymous MAP_SHARED in a process takes its frames' identity address
+/// again (before stage 4a of the direct map; the A/B and the fallback).
+pub static SHARED_IDENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Pages given by anonymous MAP_SHAREDs at an address of their own (the gate `sharedown`).
+pub static SHARED_OWN: AtomicU64 = AtomicU64::new(0);
 fn zero_serviced(base: u64, len: u64) {
     let mut off = 0u64;
     while off < len {
@@ -2218,6 +2223,33 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 }
             }
             if file_backed && !(is_fs(f.a5 as i64) && crate::ext2::active()) { return (-19i64) as u64; }
+            if in_proc && shared && !file_backed && !SHARED_IDENT.load(Ordering::Relaxed) {
+                // AN ANONYMOUS MAP_SHARED AT AN ADDRESS OF ITS OWN (docs/ARM64-PLAN.md §10.16,
+                // stage 4a). It used to be the frames' identity address, shared with the children
+                // through the kernel's gigabyte — which kept RAM's identity in every process space
+                // and gave ring 3 addresses inside the kernel's window. Now: an address from the
+                // process's region (or the MAP_FIXED one), the frames mapped as SHARED leaves (not
+                // private: `fork_cow_space` hands them to the child as they are, never COW),
+                // zeroed through the direct map. The frames' lifetime is the identity one's:
+                // `unmap_proc` leaves a non-private frame alone and `mreg` frees it at a restart.
+                // A MAP_SHARED|MAP_FIXED went to the private branch below and stopped being shared
+                // at the first fork; it is shared now too. `talaria.sharedid=1` restores the identity.
+                if pages == 0 { return (-22i64) as u64; }
+                let vaddr = if fixed { f.a1 & !0xFFF } else { crate::proc::mmap_alloc(f.a2) };
+                if fixed && (vaddr < 0x1_0000_0000 || crate::paging::ident_leaf_overlap(vaddr, pages)) { return (-22i64) as u64; }
+                if fixed && f.a4 & 0x10_0000 != 0 && crate::paging::any_mapped(vaddr, pages) { return (-17i64) as u64; }
+                let Some(b) = crate::mem::alloc_contig(pages) else { return (-12i64) as u64; };
+                zero_serviced(b, pages * 4096);
+                if fixed { crate::paging::unmap_proc(vaddr, pages); }
+                let cr3 = crate::paging::current_cr3() & !0xFFF;
+                for p in 0..pages {
+                    crate::paging::map_leaf_shared(cr3, vaddr + p * 4096, b + p * 4096, f.a3 & 2 != 0, true, f.a3 & 4 != 0);
+                }
+                crate::paging::flush_tlb_now();
+                crate::mem::mreg_add(b, pages); // as the identity one: supervise frees it at a restart
+                SHARED_OWN.fetch_add(pages, Ordering::Relaxed);
+                return vaddr;
+            }
             if in_proc && (fixed || file_backed || !shared) {
                 // Process mode: ALL the private mappings go by a virtual address (not identity):
                 // MAP_FIXED (ld.so puts a .so's segments over a reservation), a file MAP_PRIVATE (a copy of the file
