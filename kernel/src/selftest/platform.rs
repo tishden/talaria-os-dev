@@ -359,7 +359,10 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                     crate::paging::split_to_4k(f);
                     crate::paging::protect(f, 4096, true, false);
                     while crate::paging::take_dirty(f) {}               // clean, as the writeback leaves it
-                    unsafe { core::ptr::write_volatile(crate::mem::kptr::<u64>(f), 0x5a5a); } // DMAP: the dirty bit checked is the identity leaf's (stage 4 rewrites this)
+                    // the page under test is the LEAF at virtual address `f` (its identity), so the
+                    // write goes there: through `kptr` it lands on the direct map's leaf, whose D
+                    // bit nobody reads (the probe failed so on both machines when the map came)
+                    unsafe { core::ptr::write_volatile(crate::mem::vptr::<u64>(f), 0x5a5a); }
                     crate::paging::protect(f, 4096, false, false);      // mprotect(PROT_READ) after the write
                     let kept = crate::paging::take_dirty(f);
                     let cleared = !crate::paging::take_dirty(f);        // and the take still clears it

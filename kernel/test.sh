@@ -374,6 +374,8 @@ for spec in \
   "talaria.test=wxorx|wxorx: ALL CHECKS PASSED|wxorx: W^X + NX + a guard page + a live #PF" \
   "talaria.test=allocfail|allocfail: ALL OK|allocfail: a refused contiguous request leaves the bump whole (it used to take the rest with it: a Graviton's refused fscache=512 panicked the next kernel stack)" \
   "talaria.test=dmapid|dmapid: ALL OK|dmapid: the address kinds round-trip (a low and a high frame, a .bss and a stack word: physical -> kernel pointer -> physical, written and read back) — the contract the direct map keeps (ARM64-PLAN §10.16)" \
+  "talaria.test=dmapid|dmapid: the direct map ON at 0xffff800000000000|dmapid: the direct map is on by default (slot 256): every kptr goes through it, a word written there reads back through the identity" \
+  "talaria.test=dmapid talaria.dmap=0|dmapid: the direct map OFF at .* outside it: 0 |dmapid: talaria.dmap=0 leaves the identity for everything (the A/B and the fallback), and no kva is a miss" \
   "talaria.test=sharedpd|sharedpd: the gigabyte 0x80000000 was split for a device window: OK|sharedpd: the shared gigabyte of the kernel PDPT is split into a directory+table (like the LLQ window of ENA on EC2)" \
   "talaria.test=sharedpd|sharedpd: the kernel's directory after the AS teardown: OK|sharedpd: A MINE — tearing a process's AS down freed the kernel's SHARED directory (the frame into the free list -> a #PF in the NVMe doorbell under any CR3; PostgreSQL on EC2 died after 0.3 s)" \
   "talaria.test=fault|FLIGHT RECORDER: [0-9]+ events|flightrec: the crash dump + the ring of the events (the post-mortem)" \

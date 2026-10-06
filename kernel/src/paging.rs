@@ -138,6 +138,86 @@ pub fn init() {
     }
 }
 
+// ── THE DIRECT MAP (docs/ARM64-PLAN.md §10.16, stage 2) ─────────────────────────
+// RAM once more, at `mem::DMAP_BASE + pa`, in top-level slot 256 of the reference table, so that
+// every address space built after it (`copy_kernel_pml4`: slots 1..511) carries it. Only the
+// firmware map's RAM (`mem::ram_region`), rounded INWARD to 2 MiB: a device or a hole must never
+// get a cacheable alias (on arm64 that is an architectural aliasing fault). A gigabyte that is
+// RAM from end to end is one 1G leaf, any other covered piece a 2M leaf; supervisor, never
+// executable, already dirty (arm64's DBM would otherwise make the first write fault). Nothing
+// here is ever split or removed, so no break-before-make on memory other cores use.
+// `mem::kva` translates through the map only what `mem::dmap_cover` marked after the leaves
+// are visible; `talaria.dmap=0` leaves the identity for everything (the A/B and the fallback).
+
+/// Build the direct map; true when `kva` now goes through it.
+pub fn dmap_init(enabled: bool) -> bool {
+    use core::sync::atomic::Ordering;
+    let k = KERNEL_PML4.load(Ordering::Relaxed);
+    if !enabled || k == 0 {
+        crate::println!("talaria: the direct map is OFF ({}) — the kernel reaches RAM by its identity",
+            if !enabled { "talaria.dmap=0" } else { "no own tables" });
+        return false;
+    }
+    let slot = ((crate::mem::DMAP_BASE >> 39) & 0x1FF) as usize;
+    let (mut g1, mut m2, mut bytes) = (0u64, 0u64, 0u64);
+    // SAFETY: P1 + P2 + P3 — the slot is empty and no address space exists yet (checked below),
+    // so nothing walks these tables while they are filled; every table frame is fresh and
+    // zeroed before its parent entry points at it.
+    unsafe {
+        let pml4 = kptr::<Pte>(k);
+        if AS_LIVE.load(Ordering::Relaxed) > 0 {
+            crate::println!("paging: AN ALARM: the direct map is built after {} address spaces — they do not have it", AS_LIVE.load(Ordering::Relaxed));
+        }
+        let fresh = || -> Option<u64> {
+            let f = crate::mem::alloc_frame()?;
+            core::ptr::write_bytes(kptr::<u8>(f), 0, 4096);
+            Some(f)
+        };
+        if pte_r(pml4.add(slot)) & PTE_P == 0 {
+            let Some(t) = fresh() else { crate::println!("talaria: the direct map: no frame for its table — OFF"); return false; };
+            pte_w(pml4.add(slot), t | PTE_P | PTE_RW);
+        }
+        let pdpt = kptr::<Pte>(pte_r(pml4.add(slot)) & ADDR_MASK);
+        const LEAF: u64 = PTE_P | PTE_RW | PTE_PS | PTE_NX | PTE_D;
+        for i in 0..crate::mem::ram_regions() {
+            let (b, l) = crate::mem::ram_region(i);
+            let lo = (b + 0x1F_FFFF) & !0x1F_FFFF;
+            let hi = ((b + l) & !0x1F_FFFF).min(crate::mem::DMAP_SPAN);
+            let mut a = lo;
+            while a < hi {
+                let gi = (a >> 30) as usize;
+                let e3 = pdpt.add(gi);
+                if a & 0x3FFF_FFFF == 0 && a + (1 << 30) <= hi && pte_r(e3) & PTE_P == 0 {
+                    pte_w(e3, a | LEAF);
+                    g1 += 1; a += 1 << 30; bytes += 1 << 30;
+                    continue;
+                }
+                if pte_r(e3) & PTE_P == 0 {
+                    let Some(t) = fresh() else { break; };
+                    pte_w(e3, t | PTE_P | PTE_RW);
+                }
+                let ev = pte_r(e3);
+                if ev & PTE_PS == 0 {
+                    let e2 = kptr::<Pte>(ev & ADDR_MASK).add(((a >> 21) & 0x1FF) as usize);
+                    if pte_r(e2) & PTE_P == 0 { pte_w(e2, a | LEAF); m2 += 1; bytes += 1 << 21; }
+                }
+                a += 1 << 21;
+            }
+        }
+        flush_tlb();
+        for i in 0..crate::mem::ram_regions() {
+            let (b, l) = crate::mem::ram_region(i);
+            let lo = (b + 0x1F_FFFF) & !0x1F_FFFF;
+            let hi = ((b + l) & !0x1F_FFFF).min(crate::mem::DMAP_SPAN);
+            if hi > lo { crate::mem::dmap_cover(lo, hi - lo); }
+        }
+    }
+    crate::mem::DMAP_ON.store(true, Ordering::SeqCst);
+    crate::println!("talaria: the direct map is ON at {:#x}: {} MB of RAM ({} 1G + {} 2M leaves, slot {})",
+        crate::mem::DMAP_BASE, bytes >> 20, g1, m2, slot);
+    true
+}
+
 // ── the per-page / per-segment protection (hardening) ─────────────────────────
 // A walker over the active tables (CR3): it splits 1G→2M→4K on demand and sets
 // the rights on a page. The identity mapping (vaddr==paddr below 4 GB) => the splitting

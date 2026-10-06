@@ -644,6 +644,9 @@ boot 30 "talaria.test=allocfail"
 assert 'allocfail: ALL OK'                                                 'allocfail: a refused contiguous request leaves the bump whole (a Graviton'"'"'s refused fscache=512 took it and the next kernel stack panicked)'
 boot 30 "talaria.test=dmapid"
 assert 'dmapid: ALL OK'                                                    'dmapid: the address kinds round-trip (a low and a high frame, a .bss and a stack word) — the contract the direct map keeps (ARM64-PLAN §10.16)'
+assert 'dmapid: the direct map ON at 0x800000000000'                       'dmapid: the direct map is on by default (TTBR0 slot 256, above USER_TOP): kptr goes through it, the identity reads the same word'
+boot 30 "talaria.test=dmapid talaria.dmap=0"
+assert 'dmapid: the direct map OFF at .* outside it: 0 '                     'dmapid: talaria.dmap=0 leaves the identity for everything, and no kva is a miss'
 boot 60 "talaria.test=wakeprobe"
 assert 'wakeprobe: a store under wfe: the median wake after 30 us, 100 us, 300 us, 1 ms of sleep: [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: a store wakes a wfe sleeper, timed after four lengths of sleep'
 assert 'wakeprobe: an SGI under wfe: the median wake after .* [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: an SGI wakes a wfe sleeper, timed'
