@@ -1169,7 +1169,7 @@ fn ring_watch_now() -> (Option<()>, Option<u32>) {
     let Some(f) = ifopt(0) else { return (None, None) };
     match f.dev.idle_watch() {
         Some((a, v)) => {
-            RING_ADDR_NOW.store(a as u64, core::sync::atomic::Ordering::Relaxed);
+            RING_ADDR_NOW.store(crate::mem::vaddr(a), core::sync::atomic::Ordering::Relaxed);
             (None, Some(v))
         }
         None => (None, None),
@@ -2639,7 +2639,7 @@ pub static NET_DELIV_WAKE: AtomicU64 = AtomicU64::new(0);
 pub static NET_PARK_LATE: AtomicU64 = AtomicU64::new(0);
 pub static NET_PARK_IDLE_TMO: AtomicU64 = AtomicU64::new(0);
 
-#[inline] fn nw_addr(t: usize) -> u64 { core::ptr::addr_of!(NW_WORD[t]) as u64 }
+#[inline] fn nw_addr(t: usize) -> u64 { crate::mem::vaddr(core::ptr::addr_of!(NW_WORD[t])) }
 
 /// A snapshot of THIS thread's wakeup word. It is taken BEFORE the check of the socket's readiness:
 /// a delivery that happened between the snapshot and the parking has already changed the word, and

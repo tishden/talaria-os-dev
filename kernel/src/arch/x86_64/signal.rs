@@ -37,7 +37,7 @@ const UC_FPREGS: u64 = 224;
 const REG_OLDMASK: usize = 21;
 
 /// The fxsave area of the current syscall (the stub puts it under the frame: (rbx-512)&~15).
-pub fn fpu_area(f: &Frame) -> u64 { ((f as *const Frame as u64) - 512) & !0xF }
+pub fn fpu_area(f: &Frame) -> u64 { (crate::mem::vaddr(f as *const Frame) - 512) & !0xF }
 
 /// The fork child's registers in the order [rax,rbx,rcx,rdx,rsi,rdi,rbp,r8..r15]: a copy of the
 /// parent's at the entry into the syscall (rax=0 — the fork's return in the child; rcx/r11 =
@@ -132,7 +132,7 @@ pub fn exception_siginfo(f: &ExcFrame, sig: u64, fault_addr: u64) -> (i32, u64) 
 /// # Safety
 /// `uc` is the ucontext's base inside a user frame that `paging::user_writable` has admitted.
 pub unsafe fn write_syscall_context(uc: u64, f: &Frame, ret: u64, usp: u64, restart: bool, old_mask: u64) {
-    let g = (uc + UC_GREGS) as *mut u64;
+    let g = crate::uaccess::uptr::<u64>(uc + UC_GREGS);
     *g.add(0) = f.a5; *g.add(1) = f.a6; *g.add(2) = f.a4; *g.add(3) = f.flags;
     *g.add(4) = f.r12; *g.add(5) = f.r13; *g.add(6) = f.r14; *g.add(7) = f.r15; *g.add(10) = f.rbp;
     *g.add(8) = f.a1; *g.add(9) = f.a2; *g.add(11) = f.rbx; *g.add(12) = f.a3; *g.add(13) = ret; *g.add(14) = f.pc;
@@ -146,7 +146,7 @@ pub unsafe fn write_syscall_context(uc: u64, f: &Frame, ret: u64, usp: u64, rest
 /// # Safety
 /// As `write_syscall_context`.
 pub unsafe fn write_exception_context(uc: u64, f: &ExcFrame, fault_addr: u64, old_mask: u64) {
-    let g = (uc + UC_GREGS) as *mut u64;
+    let g = crate::uaccess::uptr::<u64>(uc + UC_GREGS);
     *g.add(0) = f.r8; *g.add(1) = f.r9; *g.add(2) = f.r10; *g.add(3) = f.r11;
     *g.add(4) = f.r12; *g.add(5) = f.r13; *g.add(6) = f.r14; *g.add(7) = f.r15;
     *g.add(8) = f.rdi; *g.add(9) = f.rsi; *g.add(10) = f.rbp; *g.add(11) = f.rbx;
@@ -166,9 +166,9 @@ pub unsafe fn write_exception_context(uc: u64, f: &ExcFrame, fault_addr: u64, ol
 /// fxsave area of this entry.
 pub unsafe fn write_fpu(base: u64, uc: u64, entry_area: u64) {
     let fp = base + SIGFPU_OFF;
-    super::switch::fpu_save(fp as *mut u8);
-    core::ptr::copy_nonoverlapping(entry_area as *const u8, fp as *mut u8, 512);
-    core::ptr::write_unaligned((uc + UC_FPREGS) as *mut u64, fp);
+    super::switch::fpu_save(crate::uaccess::uptr::<u8>(fp));
+    core::ptr::copy_nonoverlapping(crate::mem::vptr::<u8>(entry_area), crate::uaccess::uptr::<u8>(fp), 512);
+    core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(uc + UC_FPREGS), fp);
 }
 
 /// Redirect a SYSCALL's return into the handler: rdi=sig, rsi=&siginfo, rdx=&uc, rip=handler,
@@ -176,7 +176,7 @@ pub unsafe fn write_fpu(base: u64, uc: u64, entry_area: u64) {
 /// # Safety
 /// `sp` is inside a frame `paging::user_writable` admitted (the restorer word goes there).
 pub unsafe fn enter_handler_syscall(f: &mut Frame, sig: u64, si: u64, uc: u64, handler: u64, sp: u64, restorer: u64) {
-    core::ptr::write_unaligned(sp as *mut u64, restorer);
+    core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(sp), restorer);
     f.a1 = sig; f.a2 = si; f.a3 = uc; f.pc = handler;
     super::percpu::set_sig_newrsp(sp);
 }
@@ -185,7 +185,7 @@ pub unsafe fn enter_handler_syscall(f: &mut Frame, sig: u64, si: u64, uc: u64, h
 /// # Safety
 /// As `enter_handler_syscall`.
 pub unsafe fn enter_handler_exception(f: &mut ExcFrame, sig: u64, si: u64, uc: u64, handler: u64, sp: u64, restorer: u64) {
-    core::ptr::write_unaligned(sp as *mut u64, restorer);
+    core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(sp), restorer);
     f.rdi = sig; f.rsi = si; f.rdx = uc;
     f.rip = handler; f.rsp = sp;
 }
@@ -213,9 +213,9 @@ pub unsafe fn enter_handler_exception(f: &mut ExcFrame, sig: u64, si: u64, uc: u
 /// rsp, so it goes ABOVE the current top, where the stub will no longer return. It never
 /// returns; the `u64` is the shared dispatcher's type (arm64 does return the new x0).
 pub unsafe fn sigreturn(_f: &mut Frame, uc: u64, kstack_top: u64) -> u64 {
-    let fp = core::ptr::read_unaligned((uc + UC_FPREGS) as *const u64);
-    if fp != 0 { super::switch::fpu_restore(fp as *const u8); }
-    let g = (uc + UC_GREGS) as *const u64;
+    let fp = core::ptr::read_unaligned(crate::uaccess::uptr::<u64>(uc + UC_FPREGS));
+    if fp != 0 { super::switch::fpu_restore(crate::uaccess::uptr::<u8>(fp)); }
+    let g = crate::uaccess::uptr::<u64>(uc + UC_GREGS).cast_const();
     // The full set in the order in which `sig_iret` takes it off, and after it —
     // the hardware iret frame: rip, cs, rflags, rsp, ss.
     let mut r = [0u64; 20];
@@ -239,7 +239,7 @@ pub unsafe fn sigreturn(_f: &mut Frame, uc: u64, kstack_top: u64) -> u64 {
     r[17] = (*g.add(17) & 0x3F_7FD5) | 0x202; // rflags: IF=1, we do not let the garbage bits through
     r[18] = *g.add(15);           // rsp
     r[19] = 0x23;                 // ss (user data DPL3)
-    let dst = ((kstack_top - 256) & !0xF) as *mut u64;
+    let dst = crate::mem::vptr::<u64>((kstack_top - 256) & !0xF);
     core::ptr::copy_nonoverlapping(r.as_ptr(), dst, 20);
     super::syscall_entry::sig_iret(dst as *const u64)
 }

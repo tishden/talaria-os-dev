@@ -104,14 +104,15 @@ unsafe fn load_elf_from_disk(path: *const u8) -> (u64, u64, u64, u64) {
         // restart overwrites the image; W^X + CR0.WP: a write from the kernel into RO = #PF) —
         // return RW before copying, the final rights are set by protect below.
         crate::paging::protect(vaddr, memsz as u64, true, false);
+        // DMAP: dual — the identity image (run_disk, cell=identity): vaddr is ring 3's address in the current space AND the reserved frame; written as the user address (protect/icache act on it)
         let mut done = 0usize;
         while done < filesz {
             let n = (filesz - done).min(1 << 20);
-            let got = readat(off as u64 + done as u64, (vaddr as *mut u8).add(done), n);
+            let got = readat(off as u64 + done as u64, crate::uaccess::uptr::<u8>(vaddr).add(done), n);
             if got == 0 { break; }
             done += got;
         }
-        if memsz > filesz { core::ptr::write_bytes((vaddr as *mut u8).add(filesz), 0, memsz - filesz); }
+        if memsz > filesz { core::ptr::write_bytes(crate::uaccess::uptr::<u8>(vaddr).add(filesz), 0, memsz - filesz); }
         // W^X per segment: p_flags (PF_X=1, PF_W=2) -> the rights of the segment's pages.
         let (w, x) = p.rights();
         if x { crate::arch::icache::sync(vaddr, memsz as u64); }   // the code is in the data cache; fetch must see it
@@ -161,15 +162,16 @@ unsafe fn build_stack_args_env(top: u64, entry: u64, phdr: u64, phent: u64, phnu
 /// 48, envp 16), so the writes stay within the region the caller mapped.
 unsafe fn build_stack_full(top: u64, entry: u64, phdr: u64, phent: u64, phnum: u64, args: &[&[u8]], envs: &[&[u8]], woff: u64, at_base: u64, at_entry: u64,
     execfn: &[u8], vdso: u64) -> u64 {
+    // DMAP: dual — wr(p) is a stack frame's physical address (woff = phys - vaddr); with woff=0 (the identity modes) it is also ring 3's address
     let wr = |v: u64| v.wrapping_add(woff); // vaddr -> the write address
     let mut p = top;
     p -= 16;
-    for i in 0..16 { let r = crate::tsc::rdrand64().unwrap_or(crate::tsc::rdtsc()); *(wr(p) as *mut u8).add(i) = (r >> ((i % 8) * 8)) as u8; }
+    for i in 0..16 { let r = crate::tsc::rdrand64().unwrap_or(crate::tsc::rdtsc()); *crate::mem::kptr::<u8>(wr(p)).add(i) = (r >> ((i % 8) * 8)) as u8; }
     let random = p;
     // the strings for auxv: AT_PLATFORM, AT_EXECFN
-    p -= 8; core::ptr::copy_nonoverlapping(crate::arch::PLATFORM.as_ptr(), wr(p) as *mut u8, 8); let platform = p;
+    p -= 8; core::ptr::copy_nonoverlapping(crate::arch::PLATFORM.as_ptr(), crate::mem::kptr::<u8>(wr(p)), 8); let platform = p;
     let execfn_n = execfn.iter().position(|&c| c == 0).unwrap_or(execfn.len());
-    p -= (execfn_n + 1) as u64; core::ptr::copy_nonoverlapping(execfn.as_ptr(), wr(p) as *mut u8, execfn_n); *(wr(p) as *mut u8).add(execfn_n) = 0;
+    p -= (execfn_n + 1) as u64; core::ptr::copy_nonoverlapping(execfn.as_ptr(), crate::mem::kptr::<u8>(wr(p)), execfn_n); *crate::mem::kptr::<u8>(wr(p)).add(execfn_n) = 0;
         let execfn_p = p;
     let _ = entry;
     let mut argp = [0u64; 48];
@@ -177,8 +179,8 @@ unsafe fn build_stack_full(top: u64, entry: u64, phdr: u64, phent: u64, phnum: u
     for k in 0..n {
         let a = args[k];
         p -= (a.len() + 1) as u64;
-        core::ptr::copy_nonoverlapping(a.as_ptr(), wr(p) as *mut u8, a.len());
-        *(wr(p) as *mut u8).add(a.len()) = 0;
+        core::ptr::copy_nonoverlapping(a.as_ptr(), crate::mem::kptr::<u8>(wr(p)), a.len());
+        *crate::mem::kptr::<u8>(wr(p)).add(a.len()) = 0;
         argp[k] = p;
     }
     let mut envp = [0u64; 16];
@@ -186,8 +188,8 @@ unsafe fn build_stack_full(top: u64, entry: u64, phdr: u64, phent: u64, phnum: u
     for k in 0..ne {
         let a = envs[k];
         p -= (a.len() + 1) as u64;
-        core::ptr::copy_nonoverlapping(a.as_ptr(), wr(p) as *mut u8, a.len());
-        *(wr(p) as *mut u8).add(a.len()) = 0;
+        core::ptr::copy_nonoverlapping(a.as_ptr(), crate::mem::kptr::<u8>(wr(p)), a.len());
+        *crate::mem::kptr::<u8>(wr(p)).add(a.len()) = 0;
         envp[k] = p;
     }
     // argc, argv[0..n], NULL, envp[0..ne], NULL, auxv(PHDR,PHENT,PHNUM,PAGESZ,ENTRY,RANDOM,NULL)
@@ -238,7 +240,7 @@ unsafe fn build_stack_full(top: u64, entry: u64, phdr: u64, phent: u64, phnum: u
     items[m] = 0; m += 1; items[m] = 0; m += 1;      // AT_NULL
     let bytes = (m * 8) as u64;
     let sp = (p - bytes) & !0xF;
-    for i in 0..m { core::ptr::write((wr(sp) as *mut u64).add(i), items[i]); }
+    for i in 0..m { core::ptr::write(crate::mem::kptr::<u64>(wr(sp)).add(i), items[i]); }
     sp
 }
 
@@ -325,13 +327,13 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
                 if !free { break; }
                 let fr = match crate::mem::alloc_contig(CHUNK) { Some(f) => f, None => break };
                 if crate::paging::virt_to_phys(fr) != fr && fr < 0x1_0000_0000 { crate::mem::free_contig(fr, CHUNK); break; }
-                core::ptr::write_bytes(fr as *mut u8, 0, (CHUNK * 4096) as usize);
+                core::ptr::write_bytes(crate::mem::kptr::<u8>(fr), 0, (CHUNK * 4096) as usize);
                 // the part of the piece covered by the file (the segment's tail is .bss, it stays zeroes)
                 let chunk_lo = va.max(vaddr);
                 let chunk_hi = (va + CHUNK * 4096).min(vaddr + filesz as u64);
                 if chunk_hi > chunk_lo {
                     let foff = off + (chunk_lo - vaddr);
-                    let dst = (fr + (chunk_lo - va)) as *mut u8;
+                    let dst = crate::mem::kptr::<u8>(fr + (chunk_lo - va));
                     let n = (chunk_hi - chunk_lo) as usize;
                     // a direct read is possible when both the file offset and the length are multiples of a block
                     let direct = foff % 4096 == 0 && n.is_multiple_of(4096)
@@ -354,7 +356,7 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
             let (writable, exec) = (writable, exec_);
             let frame = match existing { Some(ph) => ph, None => {
                 let fr = match crate::mem::alloc_frame() { Some(f) => f, None => { crate::println!("talaria: proc: no memory for a segment"); return None; } };
-                core::ptr::write_bytes(fr as *mut u8, 0, 4096);
+                core::ptr::write_bytes(crate::mem::kptr::<u8>(fr), 0, 4096);
                 crate::paging::map_leaf(pml4, va, fr, writable, true, exec);
                 fr } };
             if existing.is_some() { crate::paging::or_perms_in(pml4, va, writable, exec); }
@@ -362,7 +364,7 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
             let seg_lo = vaddr.max(va); let seg_hi = (vaddr + filesz as u64).min(va + 4096);
             if seg_hi > seg_lo {
                 let foff = off + (seg_lo - vaddr);
-                let dst = (frame + (seg_lo - va)) as *mut u8;
+                let dst = crate::mem::kptr::<u8>(frame + (seg_lo - va));
                 let mut done = 0usize; let want = (seg_hi - seg_lo) as usize;
                 while done < want { let got = readat(foff + done as u64, dst.add(done), want - done); if got == 0 { break; } done += got; }
             }
@@ -430,7 +432,7 @@ pub unsafe fn run_process_disk(path: &[u8], args: &[&[u8]], envs: &[&[u8]]) -> !
     let (ustack_top, woff) = map_proc_stack(pml4, BIG_STACK_FRAMES);
     // the process's private heap (64 MB) — from the workload's node
     let hb = crate::mem::alloc_contig_node(BIG_HEAP_FRAMES, node).expect("proc: heap");
-    core::ptr::write_bytes(hb as *mut u8, 0, (BIG_HEAP_FRAMES * 4096) as usize);
+    core::ptr::write_bytes(crate::mem::kptr::<u8>(hb), 0, (BIG_HEAP_FRAMES * 4096) as usize);
     for p in 0..BIG_HEAP_FRAMES { crate::paging::map_leaf(pml4, PROC_HEAP_BASE + p * 4096, hb + p * 4096, true, true, false); }
     let ustack = build_stack_full(ustack_top, entry, phdr, phent, phnum, args, envs, woff, at_base, img.entry, path, vdso);
     let tid = crate::sched::spawn_process(entry, ustack, kstack0, pml4);
@@ -556,7 +558,7 @@ pub unsafe fn run_disk_threaded(path: *const u8, args: &[&[u8]], envs: &[&[u8]])
     // and "the heap is on node 1" are different statements, and the log needs the second one.
     crate::println!("cell: the heap {:#x} is allocated (node {}) — zeroing and mapping it",
         hb, crate::acpi::node_of_phys(hb));
-    core::ptr::write_bytes(hb as *mut u8, 0, (BIG_HEAP_FRAMES * 4096) as usize);
+    core::ptr::write_bytes(crate::mem::kptr::<u8>(hb), 0, (BIG_HEAP_FRAMES * 4096) as usize);
     for p in 0..BIG_HEAP_FRAMES { crate::paging::map_leaf(pml4, PROC_HEAP_BASE + p * 4096, hb + p * 4096, true, true, false); }
     crate::println!("cell: the heap is mapped — building the argument stack");
     let ustack = build_stack_full(ustack_top, entry, phdr, phent, phnum, args, envs, woff, at_base, img.entry, pslice, crate::vdso::map_into(pml4));
@@ -711,9 +713,10 @@ unsafe fn load_elf(elf: &[u8]) -> u64 {
         }
         let (off, vaddr) = (p.off as usize, p.vaddr);
         let (filesz, memsz) = (p.filesz as usize, p.memsz as usize);
-        core::ptr::copy_nonoverlapping(elf.as_ptr().add(off), vaddr as *mut u8, filesz);
+        // DMAP: dual — the embedded image's link address is ring 3's address in the identity space AND the reserved frame; written as the user address
+        core::ptr::copy_nonoverlapping(elf.as_ptr().add(off), crate::uaccess::uptr::<u8>(vaddr), filesz);
         if memsz > filesz {
-            core::ptr::write_bytes((vaddr as *mut u8).add(filesz), 0, memsz - filesz);
+            core::ptr::write_bytes(crate::uaccess::uptr::<u8>(vaddr).add(filesz), 0, memsz - filesz);
         }
         // W^X per segment: p_flags (PF_X=1, PF_W=2) -> the rights of the segment's pages.
         let (w, x) = p.rights();
@@ -732,12 +735,13 @@ unsafe fn build_stack(top: u64, entry: u64) -> u64 {
     let mut p = top;
     // AT_RANDOM: 16 bytes
     p -= 16;
-    for i in 0..16 { *(p as *mut u8).add(i) = (0x5A ^ i as u8).wrapping_mul(7); }
+    // DMAP: dual — the stack is frames (alloc_frame) that ring 3 uses at the same identity address
+    for i in 0..16 { *crate::mem::kptr::<u8>(p).add(i) = (0x5A ^ i as u8).wrapping_mul(7); }
     let random = p;
     // the argv[0] string
     let arg = b"talaria-prog\0";
     p -= arg.len() as u64;
-    core::ptr::copy_nonoverlapping(arg.as_ptr(), p as *mut u8, arg.len());
+    core::ptr::copy_nonoverlapping(arg.as_ptr(), crate::mem::kptr::<u8>(p), arg.len());
     let arg0 = p;
     // the array: argc, argv[0], NULL, envp NULL, auxv(PAGESZ,ENTRY,HWCAP,RANDOM,SYSINFO,NULL)
     let items: [u64; 16] = [
@@ -754,7 +758,7 @@ unsafe fn build_stack(top: u64, entry: u64) -> u64 {
     let bytes = (items.len() * 8) as u64;
     let sp = (p - bytes) & !0xF; // 16-align RSP(argc)
     for (i, &v) in items.iter().enumerate() {
-        core::ptr::write((sp as *mut u64).add(i), v);
+        core::ptr::write(crate::mem::kptr::<u64>(sp).add(i), v);
     }
     sp
 }
@@ -845,7 +849,8 @@ pub fn wxorx_test(elf: &[u8]) -> ! {
 
         // 3) a live #PF: executing an NX page (an instruction fetch with NX -> #PF)
         let nxp = crate::mem::alloc_frame().unwrap();
-        core::ptr::write_bytes(nxp as *mut u8, 0x90, 4096);       // a NOP fill
+        // DMAP: dual — nxp/wxp are fresh frames that ring 3 then executes at their identity address
+        core::ptr::write_bytes(crate::mem::kptr::<u8>(nxp), 0x90, 4096);       // a NOP fill
         crate::paging::protect(nxp, 4096, false, false);          // present, RO, NX, US
         let nx_vec = ring3_expect_fault(nxp, stop);
         crate::println!("wxorx: executing an NX page -> #{} (we expect 14)", nx_vec);
@@ -857,7 +862,7 @@ pub fn wxorx_test(elf: &[u8]) -> ! {
             (wxp>>32) as u8, (wxp>>40) as u8, (wxp>>48) as u8, (wxp>>56) as u8, // mov rax, imm64(wxp)
             0xC7, 0x00, 0x00, 0x00, 0x00, 0x00,                                 // mov dword [rax], 0
         ];
-        core::ptr::copy_nonoverlapping(code.as_ptr(), wxp as *mut u8, 16);
+        core::ptr::copy_nonoverlapping(code.as_ptr(), crate::mem::kptr::<u8>(wxp), 16);
         crate::paging::protect(wxp, 4096, false, true);           // present, R-X (RO), US
         let wx_vec = ring3_expect_fault(wxp, stop);
         crate::println!("wxorx: a write into RO .text -> #{} (we expect 14)", wx_vec);
@@ -900,8 +905,8 @@ unsafe fn load_elf_into_space(pml4: u64, elf: &[u8]) -> u64 {
         let end = (vaddr + memsz as u64 + 0xFFF) & !0xFFF;
         let npages = (end - start) / 4096;
         let frames = crate::mem::alloc_contig(npages).expect("exec: frames");
-        core::ptr::write_bytes(frames as *mut u8, 0, (npages * 4096) as usize); // zero (bss)
-        core::ptr::copy_nonoverlapping(elf.as_ptr().add(off), (frames + (vaddr - start)) as *mut u8, filesz);
+        core::ptr::write_bytes(crate::mem::kptr::<u8>(frames), 0, (npages * 4096) as usize); // zero (bss)
+        core::ptr::copy_nonoverlapping(elf.as_ptr().add(off), crate::mem::kptr::<u8>(frames + (vaddr - start)), filesz);
         if x { crate::arch::icache::sync(frames, npages * 4096); }
         for k in 0..npages {
             crate::paging::map_leaf(pml4, start + k * 4096, frames + k * 4096, w, true, x);
@@ -922,7 +927,7 @@ const PROC_HEAP_FRAMES: u64 = 4096;           // 16 MB of heap per process
 /// never sees another workload's leftovers.
 unsafe fn map_proc_heap(pml4: u64) -> (u64, u64) {
     let base = crate::mem::alloc_contig(PROC_HEAP_FRAMES).expect("proc: heap");
-    core::ptr::write_bytes(base as *mut u8, 0, (PROC_HEAP_FRAMES * 4096) as usize);
+    core::ptr::write_bytes(crate::mem::kptr::<u8>(base), 0, (PROC_HEAP_FRAMES * 4096) as usize);
     for p in 0..PROC_HEAP_FRAMES {
         crate::paging::map_leaf(pml4, PROC_HEAP_BASE + p * 4096, base + p * 4096, true, true, false);
     }
@@ -1092,7 +1097,7 @@ pub unsafe fn execve_dyn(path: &[u8], argv: &[&[u8]], envp: &[&[u8]]) -> ! {
     let (ustack_top, woff) = map_proc_stack(pml4, BIG_STACK_FRAMES);
     let hb = match crate::mem::alloc_contig_node(BIG_HEAP_FRAMES, node) { Some(h) => h, None => { crate::println!("talaria: execve: no memory for the heap");
         crate::sched::exit_current_code(127); } };
-    core::ptr::write_bytes(hb as *mut u8, 0, (BIG_HEAP_FRAMES * 4096) as usize);
+    core::ptr::write_bytes(crate::mem::kptr::<u8>(hb), 0, (BIG_HEAP_FRAMES * 4096) as usize);
     for p in 0..BIG_HEAP_FRAMES { crate::paging::map_leaf(pml4, PROC_HEAP_BASE + p * 4096, hb + p * 4096, true, true, false); }
     crate::proc::exec_reset(crate::sched::proc_of(tid));
     crate::sched::set_heap(tid, PROC_HEAP_BASE, PROC_HEAP_BASE + BIG_HEAP_FRAMES * 4096);

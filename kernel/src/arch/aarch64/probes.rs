@@ -92,14 +92,15 @@ fn brk(imm16: u32) -> u32 { 0xD420_0000 | (imm16 & 0xFFFF) << 5 }
 
 /// Write `code` into the frame `at` and make it fetchable (§4.12).
 fn place(at: u64, code: &[u32], sync: bool) {
-    unsafe { for (i, w) in code.iter().enumerate() { core::ptr::write_volatile((at as *mut u32).add(i), *w); } }
+    // DMAP: EL0 runs the frame at its identity address; written and synced at that same VA
+    unsafe { for (i, w) in code.iter().enumerate() { core::ptr::write_volatile(crate::mem::vptr::<u32>(at).add(i), *w); } }
     if sync { icache::sync(at, 4 * code.len() as u64); }
 }
 
 /// Into EL0 at `pc` with the stack `sp`, DAIF masked; the `brk` handler resumes the kernel
 /// at `done`. Never returns.
 fn enter_el0(pc: u64, sp: u64, done: extern "C" fn() -> !) -> ! {
-    trap::EL0_RETURN.store(done as *const () as usize as u64, Ordering::Relaxed);
+    trap::EL0_RETURN.store(crate::mem::vaddr(done as *const ()), Ordering::Relaxed);
     unsafe {
         core::arch::asm!("msr sp_el0, {sp}", "msr elr_el1, {pc}", "msr spsr_el1, {ps}", "eret",
             sp = in(reg) sp, pc = in(reg) pc, ps = in(reg) 0x3C0u64, options(noreturn));
@@ -224,10 +225,10 @@ static RING_PRODUCED: AtomicU64 = AtomicU64::new(0);
 const RING_WORDS: usize = 32;
 fn mix(i: u64, w: u64) -> u64 { (i.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ w.wrapping_mul(0xD1B5_4A32_D192_ED03)).rotate_left((w & 63) as u32) }
 
-fn ring_base() -> usize { core::ptr::addr_of_mut!(REGION) as usize }
-fn p_prod(base: usize) -> *mut u32 { (base + crate::fastring::RX_OFF) as *mut u32 }
-fn p_cons(base: usize) -> *mut u32 { (base + crate::fastring::RX_OFF + crate::fastring::CONS_OFF) as *mut u32 }
-fn p_slot(base: usize, i: u32) -> *mut u64 { (base + crate::fastring::RX_OFF + crate::fastring::slot_off(i) + crate::fastring::HDR) as *mut u64 }
+fn ring_base() -> usize { crate::mem::vaddr(core::ptr::addr_of_mut!(REGION)) as usize }
+fn p_prod(base: usize) -> *mut u32 { crate::mem::vptr::<u32>((base + crate::fastring::RX_OFF) as u64) }
+fn p_cons(base: usize) -> *mut u32 { crate::mem::vptr::<u32>((base + crate::fastring::RX_OFF + crate::fastring::CONS_OFF) as u64) }
+fn p_slot(base: usize, i: u32) -> *mut u64 { crate::mem::vptr::<u64>((base + crate::fastring::RX_OFF + crate::fastring::slot_off(i) + crate::fastring::HDR) as u64) }
 
 fn ring_producer() {
     let base = ring_base();
@@ -241,7 +242,7 @@ fn ring_producer() {
         }
         let s = p_slot(base, prod);
         for w in 0..RING_WORDS { unsafe { core::ptr::write_volatile(s.add(w), mix(i, w as u64)); } }
-        unsafe { core::ptr::write_volatile((s as usize - crate::fastring::HDR) as *mut u32, (RING_WORDS * 8) as u32); }
+        unsafe { core::ptr::write_volatile(crate::mem::vptr::<u32>(crate::mem::vaddr(s) - crate::fastring::HDR as u64), (RING_WORDS * 8) as u32); }
         fence(Ordering::Release);                       // the bytes before the index — as fastpath.rs
         prod = prod.wrapping_add(1);
         unsafe { core::ptr::write_volatile(p_prod(base), prod); }
@@ -270,7 +271,7 @@ fn ring(n: u64) -> ! {
         }
         fence(Ordering::Acquire);                       // the index before the bytes — as fastpath.rs
         let s = p_slot(base, cons);
-        let len = unsafe { core::ptr::read_volatile((s as usize - crate::fastring::HDR) as *const u32) };
+        let len = unsafe { core::ptr::read_volatile(crate::mem::vptr::<u32>(crate::mem::vaddr(s) - crate::fastring::HDR as u64)) };
         if len as usize != RING_WORDS * 8 { bad_len += 1; }
         let mut wrong = false;
         for w in 0..RING_WORDS { if unsafe { core::ptr::read_volatile(s.add(w)) } != mix(i, w as u64) { wrong = true; } }
@@ -363,7 +364,7 @@ fn bbm() -> ! {
         let Some(r) = crate::mem::alloc_contig_aligned(512, 0x20_0000) else { break; };
         regions += 1;
         let a = r + 0x1000 * 7;  // a page inside the block, not its first
-        unsafe { core::ptr::write_volatile(a as *mut u64, BBM_MAGIC); }
+        unsafe { core::ptr::write_volatile(crate::mem::vptr::<u64>(a), BBM_MAGIC); } // DMAP: the identity leaf at `a` is the one under test
         BBM_ADDR.store(a, Ordering::Release);
         for _ in 0..FLIPS {
             crate::paging::protect(a, 4096, true, false);   // the first call splits the 2M leaf

@@ -55,10 +55,10 @@ fn tree_at(dtb: u64) -> Option<&'static [u8]> {
     if dtb == 0 { return None; }
     // SAFETY: the loader's contract puts the tree at `x0` in memory the identity map
     // covers; the header is read first, and only as many bytes as it names are used.
-    let head = unsafe { core::slice::from_raw_parts(dtb as *const u8, 8) };
+    let head = unsafe { core::slice::from_raw_parts(crate::mem::kptr::<u8>(dtb), 8) };
     let total = dtb::total_size(head)?;
     if !(40..=(4 << 20)).contains(&total) { return None; }
-    Some(unsafe { core::slice::from_raw_parts(dtb as *const u8, total) })
+    Some(unsafe { core::slice::from_raw_parts(crate::mem::kptr::<u8>(dtb), total) })
 }
 
 /// What the UEFI stub (`kernel/uefi-stub`, the arm64 half) leaves in `x0` instead of a
@@ -88,14 +88,14 @@ fn boot_block_at(x0: u64) -> Option<&'static BootBlock> {
     if x0 == 0 || x0 & 7 != 0 { return None; }
     // SAFETY: the loader's contract puts either a tree or the block at `x0`, in memory the
     // identity addresses cover; the magic is read first (an aligned 8-byte load).
-    let b = unsafe { &*(x0 as *const BootBlock) };
+    let b = unsafe { &*crate::mem::kptr::<BootBlock>(x0) };
     if b.magic == BOOT_MAGIC { Some(b) } else { None }
 }
 /// The stub's memory map as a slice (at most `BB_MAX` entries are used).
 fn boot_map(b: &BootBlock) -> &'static [MemEntry] {
     if b.memmap == 0 { return &[]; }
     // SAFETY: the stub's array, `memmap_entries` long, in memory it allocated for us.
-    unsafe { core::slice::from_raw_parts(b.memmap as *const MemEntry, (b.memmap_entries as usize).min(BB_MAX)) }
+    unsafe { core::slice::from_raw_parts(crate::mem::kptr::<MemEntry>(b.memmap), (b.memmap_entries as usize).min(BB_MAX)) }
 }
 /// A firmware's map is in dozens of pieces (the device tree's is one or two ranges).
 const BB_MAX: usize = 256;
@@ -115,13 +115,13 @@ fn start_info_from(tree: Option<&[u8]>, s: &dtb::Summary, bb: Option<&BootBlock>
             let src = boot_map(b);
             let mm = &mut *core::ptr::addr_of_mut!(BBMAP);
             mm[..src.len()].copy_from_slice(src);
-            si.memmap_paddr = core::ptr::addr_of!(BBMAP) as u64;
+            si.memmap_paddr = crate::mem::kpa_of(core::ptr::addr_of!(BBMAP));
             si.memmap_entries = src.len() as u32;
             si.rsdp_paddr = b.rsdp;
             if b.cmdline != 0 {
                 let mut n = 0;
                 while n < CMDLINE_MAX - 1 {
-                    let c = core::ptr::read_volatile((b.cmdline + n as u64) as *const u8);
+                    let c = core::ptr::read_volatile(crate::mem::kptr::<u8>(b.cmdline + n as u64));
                     if c == 0 { break; }
                     cl[n] = c; n += 1;
                 }
@@ -131,7 +131,7 @@ fn start_info_from(tree: Option<&[u8]>, s: &dtb::Summary, bb: Option<&BootBlock>
         } else {
             let mm = &mut *core::ptr::addr_of_mut!(MEMMAP);
             for i in 0..s.nmem { mm[i] = MemEntry { addr: s.mem[i].base, size: s.mem[i].size, typ: 1, _r: 0 }; }
-            si.memmap_paddr = core::ptr::addr_of!(MEMMAP) as u64;
+            si.memmap_paddr = crate::mem::kpa_of(core::ptr::addr_of!(MEMMAP));
             si.memmap_entries = s.nmem as u32;
         }
         if let (false, Some(tree), Some(ba)) = (have_cmdline, tree, s.bootargs) {
@@ -140,8 +140,8 @@ fn start_info_from(tree: Option<&[u8]>, s: &dtb::Summary, bb: Option<&BootBlock>
             cl[n] = 0;
             have_cmdline = true;
         }
-        if have_cmdline { si.cmdline_paddr = core::ptr::addr_of!(CMDLINE) as u64; }
-        core::ptr::addr_of!(SI) as u64
+        if have_cmdline { si.cmdline_paddr = crate::mem::kpa_of(core::ptr::addr_of!(CMDLINE)); }
+        crate::mem::kpa_of(core::ptr::addr_of!(SI))
     }
 }
 
@@ -300,13 +300,14 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
     dirty_probe();
     if let Some(f) = crate::mem::alloc_frame() {
         crate::paging::split_to_4k(f);                      // a 4K page of the kernel's 2M GB1 (as the dirty probe)
-        unsafe { core::ptr::write_volatile(f as *mut u64, 0x5EED_0000_0000_0001); }
+        // DMAP: the probe tests the identity leaf at `f` (query/protect take it as a VA), so it writes there
+        unsafe { core::ptr::write_volatile(crate::mem::vptr::<u64>(f), 0x5EED_0000_0000_0001); }
         let (p0, w0, _, _) = crate::paging::query(f);
         crate::paging::protect_none(f, 4096);
         let (p1, _, _, _) = crate::paging::query(f);
         crate::paging::protect(f, 4096, true, false);
         let (p2, w2, _, _) = crate::paging::query(f);
-        let back = unsafe { core::ptr::read_volatile(f as *const u64) };
+        let back = unsafe { core::ptr::read_volatile(crate::mem::vptr::<u64>(f)) };
         crate::println!("talaria: paging probe on {:#x}: present/rw {}/{} -> PROT_NONE present {} -> restored present/rw {}/{}, the word {} ({})",
             f, p0, w0, p1, p2, w2, if back == 0x5EED_0000_0000_0001 { "survived" } else { "was LOST" },
             if p0 && w0 && !p1 && p2 && w2 && back == 0x5EED_0000_0000_0001 { "as expected" } else { "NOT as expected" });
@@ -414,12 +415,13 @@ pub fn start_secondary(i: usize, mpidr: u64) -> i64 {
     // can — Linux cleans its `secondary_data` the same way.
     super::icache::clean_inval_poc(crate::paging::kernel_cr3_word(), 8);
     super::icache::clean_inval_poc(ap_stack_top(i) - 16384, 16384);
-    psci::cpu_on(mpidr, ap_start as *const () as usize as u64, ap_stack_top(i))
+    psci::cpu_on(mpidr, crate::mem::kpa_of(ap_start as *const ()), ap_stack_top(i))
 }
 /// The top of the boot stack of the secondary in slot `i` — also the stack its pickup loop
 /// returns to when a task exits on it (`sched::set_ap_stack`).
 pub fn ap_stack_top(i: usize) -> u64 {
-    core::ptr::addr_of!(AP_STACKS) as u64 + (i.min(MAX_AP - 1) as u64 + 1) * AP_STACK as u64
+    // DMAP: kept as a virtual address; the secondary also takes it as its sp with the MMU off (the image is identity)
+    crate::mem::vaddr(core::ptr::addr_of!(AP_STACKS)) + (i.min(MAX_AP - 1) as u64 + 1) * AP_STACK as u64
 }
 
 /// A secondary core, from `ap_start` (boot.rs): the same map, vectors and GIC state
@@ -489,10 +491,10 @@ fn dirty_probe() {
     crate::paging::split_to_4k(f);                          // the kernel's GB1 is 2M leaves — split this one to a 4K page
     crate::paging::protect(f, 4096, true, false);           // RW+DBM, armed
     let armed = !crate::paging::take_dirty(f) || !crate::paging::take_dirty(f); // drain whatever the split inherited
-    unsafe { core::ptr::write_volatile(f as *mut u64, 1); }
+    unsafe { core::ptr::write_volatile(crate::mem::vptr::<u64>(f), 1); } // DMAP: the identity leaf at `f` under test, as above
     let d1 = crate::paging::take_dirty(f);
     let d2 = crate::paging::take_dirty(f);
-    unsafe { core::ptr::write_volatile(f as *mut u64, 2); }
+    unsafe { core::ptr::write_volatile(crate::mem::vptr::<u64>(f), 2); }
     let d3 = crate::paging::take_dirty(f);
     let hw = mmu::hw_dirty_on();
     let ok = if hw { armed && d1 && !d2 && d3 } else { d1 && d2 && d3 };

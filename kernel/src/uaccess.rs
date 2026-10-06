@@ -51,6 +51,11 @@ use core::sync::atomic::AtomicBool;
 
 const EFAULT: u64 = (-14i64) as u64;
 
+/// A ring-3 address in the current address space as a pointer — the one kind of address the
+/// direct map never translates (`mem::kva` and its kin name the others).
+#[inline(always)]
+pub fn uptr<T>(va: u64) -> *mut T { core::ptr::with_exposed_provenance_mut(va as usize) }
+
 /// Is the check enabled (`talaria.uacheck`, default on).
 pub static ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -366,12 +371,12 @@ impl Mem for Live {
         // every caller asks `ok` for these 8 bytes first; unaligned because a process
         // may pass a misaligned pointer. U2: the value may be stale, never trusted as
         // an address.
-        unsafe { core::ptr::read_unaligned(addr as *const u64) }
+        unsafe { core::ptr::read_unaligned(uptr::<u64>(addr)) }
     }
     #[inline]
     fn read_u32(&self, addr: u64) -> u32 {
         // SAFETY: U1 for 4 bytes, U2 for the value — as `read_u64`.
-        unsafe { core::ptr::read_unaligned(addr as *const u32) }
+        unsafe { core::ptr::read_unaligned(uptr::<u32>(addr)) }
     }
     #[inline]
     fn read_u8(&self, addr: u64) -> u8 {
@@ -379,7 +384,7 @@ impl Mem for Live {
         // byte, so this byte is mapped. Volatile: the loop looks for a NUL in memory a
         // process's other thread may be writing, and the compiler must not fuse the
         // loads.
-        unsafe { core::ptr::read_volatile(addr as *const u8) }
+        unsafe { core::ptr::read_volatile(uptr::<u8>(addr)) }
     }
 }
 

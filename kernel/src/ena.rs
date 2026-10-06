@@ -123,7 +123,8 @@ const ENA_VENDOR: u16 = 0x1d0f;
 const ENA_DEVICES: [u16; 4] = [0xec20, 0xec21, 0x0ec2, 0x1ec2];
 
 // The frame buffers are shared with the virtio path (l1::rxb/txb): the address is passed from the outside.
-// They are in the kernel's .bss — identity-mapped, phys == virt, the DMA is correct.
+// They are in the kernel's .bss (or the high area): the address is the KERNEL'S pointer, and
+// the device is given `mem::kpa` of it (the descriptors, the LLQ's data part).
 
 /// Print the full exchange of admin commands (the driver's diagnostics on a live Nitro).
 pub static DBG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -262,8 +263,8 @@ pub struct Ena {
     stat_tsc: u64,          // the mark of the last printing of the statistics
 }
 
-#[inline] fn w32(a: u64, v: u32) { unsafe { core::ptr::write_volatile(a as *mut u32, v) } }
-#[inline] fn r32_raw(a: u64) -> u32 { unsafe { core::ptr::read_volatile(a as *const u32) } }
+#[inline] fn w32(a: u64, v: u32) { unsafe { core::ptr::write_volatile(crate::mem::devptr::<u32>(a), v) } }
+#[inline] fn r32_raw(a: u64) -> u32 { unsafe { core::ptr::read_volatile(crate::mem::devptr::<u32>(a)) } }
 
 /// The meta_ctrl fields of a TX descriptor: the indices of the L3/L4 protocols. It tells the device
 /// what kind of packet it is transmitting (the Linux driver always fills them in);
@@ -272,7 +273,7 @@ pub struct Ena {
 ///   l4_proto_idx (12:8): 12 = TCP, 13 = UDP
 fn meta_of(addr: u64, len: usize) -> u32 {
     if len < 34 { return 0; }
-    let b = |i: usize| -> u8 { unsafe { core::ptr::read_volatile((addr + i as u64) as *const u8) } };
+    let b = |i: usize| -> u8 { unsafe { core::ptr::read_volatile(crate::mem::vptr::<u8>(addr + i as u64)) } };
     if b(12) != 0x08 || b(13) != 0x00 { return 0; }        // it is not IPv4
     let ihl = (b(14) & 0xF) as usize * 4;
     if ihl < 20 || 14 + ihl > len { return 8; }            // IPv4 without parsing L4
@@ -298,14 +299,14 @@ impl Ena {
         }
         self.mmio_seq = self.mmio_seq.wrapping_add(1);
         let seq = self.mmio_seq;
-        unsafe { core::ptr::write_volatile(self.mmio_resp as *mut u32, (seq as u32).wrapping_add(0xDEAD) << 16); }
+        unsafe { core::ptr::write_volatile(crate::mem::kptr::<u32>(self.mmio_resp), (seq as u32).wrapping_add(0xDEAD) << 16); }
         crate::arch::barrier::dma_wmb();
         w32(self.regs + REG_MMIO_REG_READ, ((off as u32) << 16) | seq as u32);
         for _ in 0..20_000 {
-            let hdr = unsafe { core::ptr::read_volatile(self.mmio_resp as *const u32) };
+            let hdr = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(self.mmio_resp)) };
             if (hdr & 0xFFFF) as u16 == seq {
                 if ((hdr >> 16) as u16) as u64 == off {
-                    return unsafe { core::ptr::read_volatile((self.mmio_resp + 4) as *const u32) };
+                    return unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(self.mmio_resp + 4)) };
                 }
                 break;
             }
@@ -331,7 +332,7 @@ impl Ena {
         // the aq_common_desc in LE u32: command_id[15:0] | opcode[23:16] | flags[31:24] (bit 0 of the flags is the phase)
         cmd[0] = (cmd[0] & 0xFFFF_0000) | (cid as u32) | ((self.aq_phase_flag as u32) << 24);
         let slot = self.aq + (self.aq_tail as u64) * AQ_ENTRY as u64;
-        unsafe { core::ptr::copy_nonoverlapping(cmd.as_ptr() as *const u8, slot as *mut u8, AQ_ENTRY); }
+        unsafe { core::ptr::copy_nonoverlapping(cmd.as_ptr() as *const u8, crate::mem::kptr::<u8>(slot), AQ_ENTRY); }
         crate::arch::barrier::dma_wmb();
         self.aq_tail += 1;
         if self.aq_tail == AQ_DEPTH { self.aq_tail = 0; self.aq_phase_flag = !self.aq_phase_flag; }
@@ -341,11 +342,11 @@ impl Ena {
         let t0 = crate::tsc::rdtsc();
         loop {
             let ce = self.acq + (self.acq_head as u64) * ACQ_ENTRY as u64;
-            let w0 = unsafe { core::ptr::read_volatile(ce as *const u32) };
+            let w0 = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(ce)) };
             let cphase = (w0 >> 24) & 1 != 0;
             if cphase == self.acq_phase {
                 let mut out = [0u32; 16];
-                unsafe { core::ptr::copy_nonoverlapping(ce as *const u8, out.as_mut_ptr() as *mut u8, ACQ_ENTRY); }
+                unsafe { core::ptr::copy_nonoverlapping(crate::mem::kptr::<u8>(ce), out.as_mut_ptr() as *mut u8, ACQ_ENTRY); }
                 self.acq_head = (self.acq_head + 1) % AQ_DEPTH;
                 if self.acq_head == 0 { self.acq_phase = !self.acq_phase; }
                 let status = ((w0 >> 16) & 0xFF) as u8;
@@ -435,15 +436,16 @@ impl Ena {
     pub fn receive_begin(&mut self, slot: usize, addr: u64) -> u16 {
         let idx = (self.rx_tail & (RX_DEPTH - 1)) as u64;
         let d = self.rx_sq + idx * RX_DESC_SZ as u64;
+        let pa = crate::mem::kpa(addr); // the buffer is the kernel's pointer; the device takes its physical address
         unsafe {
             // length(u16) | rsv(u8) | ctrl(u8: phase|first|last|comp_req) | req_id(u16) | rsv(u16)
             // Bit 5 in the header's ctrl marks "MBO", but ena_com does NOT set it —
             // and with it the device stopped giving frames after the first seven.
-            core::ptr::write_volatile(d as *mut u32,
+            core::ptr::write_volatile(crate::mem::kptr::<u32>(d),
                 (BUF as u32 & 0xFFFF) | (((self.rx_phase as u32) | (1 << 2) | (1 << 3) | (1 << 4)) << 24));
-            core::ptr::write_volatile((d + 4) as *mut u32, slot as u32 & 0xFFFF);
-            core::ptr::write_volatile((d + 8) as *mut u32, addr as u32);
-            core::ptr::write_volatile((d + 12) as *mut u32, ((addr >> 32) as u32) & 0xFFFF);
+            core::ptr::write_volatile(crate::mem::kptr::<u32>(d + 4), slot as u32 & 0xFFFF);
+            core::ptr::write_volatile(crate::mem::kptr::<u32>(d + 8), pa as u32);
+            core::ptr::write_volatile(crate::mem::kptr::<u32>(d + 12), ((pa >> 32) as u32) & 0xFFFF);
         }
         // The rings' counters are MONOTONIC (like io_sq->tail in ena_com): the counter itself goes into
         // the doorbell, the descriptor's index is the low bits, the phase flips
@@ -492,10 +494,10 @@ impl Ena {
     pub fn poll_receive(&mut self) -> Option<(usize, usize)> {
         let idx = (self.rx_cq_head & (RX_DEPTH - 1)) as u64;
         let ce = self.rx_cq + idx * RX_CDESC_SZ as u64;
-        let status = unsafe { core::ptr::read_volatile(ce as *const u32) };
+        let status = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(ce)) };
         if ((status >> 24) & 1 != 0) != self.rx_cq_phase { return None; }
-        let len = unsafe { core::ptr::read_volatile((ce + 4) as *const u16) } as usize;
-        let req_id = unsafe { core::ptr::read_volatile((ce + 6) as *const u16) } as usize;
+        let len = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u16>(ce + 4)) } as usize;
+        let req_id = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u16>(ce + 6)) } as usize;
         self.rx_cq_head = self.rx_cq_head.wrapping_add(1);
         if self.rx_cq_head & (RX_DEPTH - 1) == 0 { self.rx_cq_phase = !self.rx_cq_phase; }
         self.rx_watch.store(self.rx_cq_head as u32 | ((self.rx_cq_phase as u32) << 16),
@@ -529,7 +531,7 @@ impl Ena {
         let rem = len - hdr;
         let mut e = [0u8; 256];
         let req_id = slot as u32;
-        let buf_addr = if rem > 0 { addr + hdr as u64 } else { 0 };
+        let buf_addr = if rem > 0 { crate::mem::kpa(addr) + hdr as u64 } else { 0 }; // the device's address of the frame's rest
         // Slot 0 is the meta descriptor if the device does not cache the meta (accel_mode).
         // Then FIRST moves onto it, while the data descriptor goes as slot 1 —
         // exactly as in ena_com_prepare_tx (`if (!have_meta) desc->len_ctrl |= FIRST`).
@@ -550,12 +552,12 @@ impl Ena {
         e[d + 8..d + 12].copy_from_slice(&w2.to_le_bytes());
         e[d + 12..d + 16].copy_from_slice(&w3.to_le_bytes());
         // the header goes AFTER the slots for the descriptors (descs_num_before_header=2 -> 32 B)
-        unsafe { core::ptr::copy_nonoverlapping(addr as *const u8, e.as_mut_ptr().add(32), hdr); }
+        unsafe { core::ptr::copy_nonoverlapping(crate::mem::vptr::<u8>(addr), e.as_mut_ptr().add(32), hdr); }
         let dst = self.llq_base + ((self.tx_tail as u64) & (Q_DEPTH as u64 - 1)) * self.llq_entry as u64;
         unsafe {
             let src = e.as_ptr() as *const u64;
             for i in 0..(self.llq_entry / 8) {
-                core::ptr::write_volatile((dst + (i * 8) as u64) as *mut u64, core::ptr::read_unaligned(src.add(i)));
+                core::ptr::write_volatile(crate::mem::devptr::<u64>(dst + (i * 8) as u64), core::ptr::read_unaligned(src.add(i)));
             }
         }
         fence(Ordering::SeqCst);
@@ -586,15 +588,16 @@ impl Ena {
         self.tx_post_tsc[slot] = crate::tsc::rdtsc();
         let d = self.tx_sq + ((self.tx_tail & (Q_DEPTH - 1)) as u64) * TX_DESC_SZ as u64;
         let req_id = slot as u32;
+        let pa = crate::mem::kpa(addr); // the buffer is the kernel's pointer; the device takes its physical address
         unsafe {
             // len_ctrl: length | req_id_hi<<16 | phase<<24 | first<<26 | last<<27 | comp_req<<28
-            core::ptr::write_volatile(d as *mut u32,
+            core::ptr::write_volatile(crate::mem::kptr::<u32>(d),
                 (len as u32 & 0xFFFF) | (((req_id >> 10) & 0x3F) << 16)
                 | ((self.tx_phase as u32) << 24) | (1 << 26) | (1 << 27) | (1 << 28));
             // meta_ctrl: req_id_lo<<22 + the type of the protocols (see meta_of)
-            core::ptr::write_volatile((d + 4) as *mut u32, (req_id & 0x3FF) << 22 | meta_of(addr, len));
-            core::ptr::write_volatile((d + 8) as *mut u32, addr as u32);
-            core::ptr::write_volatile((d + 12) as *mut u32, (addr >> 32) as u32 & 0xFFFF);
+            core::ptr::write_volatile(crate::mem::kptr::<u32>(d + 4), (req_id & 0x3FF) << 22 | meta_of(addr, len));
+            core::ptr::write_volatile(crate::mem::kptr::<u32>(d + 8), pa as u32);
+            core::ptr::write_volatile(crate::mem::kptr::<u32>(d + 12), (pa >> 32) as u32 & 0xFFFF);
         }
         self.tx_tail = self.tx_tail.wrapping_add(1);
         if self.tx_tail & (Q_DEPTH - 1) == 0 { self.tx_phase = !self.tx_phase; }
@@ -608,7 +611,7 @@ impl Ena {
     pub fn reap_tx(&mut self) {
         loop {
             let ce = self.tx_cq + ((self.tx_cq_head & (Q_DEPTH - 1)) as u64) * TX_CDESC_SZ as u64;
-            let w0 = unsafe { core::ptr::read_volatile(ce as *const u32) }; // req_id | status | flags
+            let w0 = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(ce)) }; // req_id | status | flags
             let phase = (w0 >> 24) & 1 != 0;
             if phase != self.tx_cq_phase { return; }
             let req_id = (w0 & 0xFFFF) as usize;
@@ -653,7 +656,7 @@ impl Ena {
     /// own DMA write (or by any interrupt, our MSI-X is unmasked).
     pub fn rx_cq_watch(&self) -> (*const u32, u32) {
         let idx = (self.rx_cq_head & (RX_DEPTH - 1)) as u64;
-        let a = (self.rx_cq + idx * RX_CDESC_SZ as u64) as *const u32;
+        let a = crate::mem::kptr::<u32>(self.rx_cq + idx * RX_CDESC_SZ as u64).cast_const();
         (a, unsafe { core::ptr::read_volatile(a) })
     }
     /// A free TX slot (or None — they are all in flight). O(1) by a cursor: a linear
@@ -683,7 +686,7 @@ impl Ena {
         // the word of the CQ record we are waiting for: one can see whether the device writes anything there
         // (and with what phase) — otherwise the receive path "stalls" without a visible reason
         let idx = (self.rx_cq_head & (RX_DEPTH - 1)) as u64;
-        let peek = unsafe { core::ptr::read_volatile((self.rx_cq + idx * RX_CDESC_SZ as u64) as *const u32) };
+        let peek = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(self.rx_cq + idx * RX_CDESC_SZ as u64)) };
         // Through a buffer: two lines straight from here are the datapath with IF=0, and on EC2
         // they gave with redis a "max of 4.8-4.9 ms" at every point with a p99.99 of
         // 70 us (see obs::deferred_print).
@@ -702,7 +705,7 @@ impl Ena {
     pub fn drain_aenq(&mut self) {
         loop {
             let e = self.aenq + (self.aenq_head as u64) * AENQ_ENTRY as u64;
-            let flags = unsafe { core::ptr::read_volatile((e + 4) as *const u32) };
+            let flags = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(e + 4)) };
             if ((flags >> 0) & 1 != 0) != self.aenq_phase { break; }
             self.aenq_head += 1;
             if self.aenq_head == AENQ_DEPTH { self.aenq_head = 0; self.aenq_phase = !self.aenq_phase; }
@@ -721,7 +724,7 @@ impl Ena {
         let page = match crate::mem::alloc_contig(1) { Some(a) => a, None => return false };
         // 1) the redirection table: 128 records {u16 cq_idx; u16 rsv} = 512 B
         unsafe {
-            let t = page as *mut u16;
+            let t = crate::mem::kptr::<u16>(page);
             for i in 0..RSS_IND_ENTRIES { core::ptr::write_volatile(t.add(i * 2), rx_idx); core::ptr::write_volatile(t.add(i * 2 + 1), 0); }
         }
         if tbl {
@@ -739,7 +742,7 @@ impl Ena {
         // 2) the Toeplitz hash function: {key_parts=10, rsv, key[10]} = 48 B
         if hash {
         unsafe {
-            let k = page as *mut u32;
+            let k = crate::mem::kptr::<u32>(page);
             core::ptr::write_volatile(k, 10);
             core::ptr::write_volatile(k.add(1), 0);
             // a fixed key: the reproducibility matters more than the "randomness"
@@ -778,7 +781,7 @@ impl Ena {
         if self.phc_out == 0 {
             match crate::mem::alloc_contig(1) { Some(a) => self.phc_out = a, None => return false }
         }
-        unsafe { core::ptr::write_bytes(self.phc_out as *mut u8, 0, 4096) };
+        unsafe { core::ptr::write_bytes(crate::mem::kptr::<u8>(self.phc_out), 0, 4096) };
         let mut c = [0u32; 16];
         c[0] = (OP_SET_FEATURE as u32) << 16;
         c[4] = (FEAT_PHC_CONFIG as u32) << 8;
@@ -801,16 +804,16 @@ impl Ena {
         self.phc_req = self.phc_req.wrapping_add(1);
         let req = self.phc_req;
         unsafe {
-            let p = self.phc_out as *mut u16;
+            let p = crate::mem::kptr::<u16>(self.phc_out);
             core::ptr::write_volatile(p.add(4), 0);          // erase the previous req_id? (the field @0)
-            core::ptr::write_volatile((self.phc_out + 8) as *mut u64, u64::MAX);
+            core::ptr::write_volatile(crate::mem::kptr::<u64>(self.phc_out + 8), u64::MAX);
             w32(self.regs + self.phc_db as u64, req as u32); // the call
             let hz = crate::tsc::hz();
             let t0 = crate::tsc::rdtsc();
             loop {
-                let got = core::ptr::read_volatile(self.phc_out as *const u16);
+                let got = core::ptr::read_volatile(crate::mem::kptr::<u16>(self.phc_out));
                 if got == req {
-                    let ts = core::ptr::read_volatile((self.phc_out + 8) as *const u64);
+                    let ts = core::ptr::read_volatile(crate::mem::kptr::<u64>(self.phc_out + 8));
                     if ts != u64::MAX { return Some(ts); }
                 }
                 if crate::tsc::rdtsc() - t0 > hz / 1000 { return None; } // 1 ms
@@ -852,7 +855,7 @@ pub fn probe_at(d: &crate::pci::PciDev) -> Option<Ena> {
         if let Some(a) = crate::mem::alloc_high(4, 16 * 1024) { return Some(a); }
         let base = crate::mem::alloc_contig(8)?;
         let a = (base + 0x3FFF) & !0x3FFFu64;
-        unsafe { core::ptr::write_bytes(a as *mut u8, 0, 16 * 1024) };
+        unsafe { core::ptr::write_bytes(crate::mem::kptr::<u8>(a), 0, 16 * 1024) };
         Some(a)
     };
     let tx_sq = ring()?;
@@ -860,7 +863,7 @@ pub fn probe_at(d: &crate::pci::PciDev) -> Option<Ena> {
     let rx_sq = ring()?;
     let rx_cq = ring()?;
     for p in [aq, acq, aenq, mmio_resp] {
-        unsafe { core::ptr::write_bytes(p as *mut u8, 0, 4096) };
+        unsafe { core::ptr::write_bytes(crate::mem::kptr::<u8>(p), 0, 4096) };
     }
 
     let mut e = Ena {
@@ -947,19 +950,19 @@ pub fn probe_at(d: &crate::pci::PciDev) -> Option<Ena> {
     //   184 ena_spec_version | 186 bdf | 188 num_cpus | 192 driver_supported_features
     let hi = crate::mem::alloc_contig(1)?;
     unsafe {
-        core::ptr::write_bytes(hi as *mut u8, 0, 4096);
-        core::ptr::write_volatile(hi as *mut u32, 1u32);                  // os_type = LINUX (a Linux-ABI runtime)
-        core::ptr::copy_nonoverlapping(b"Talaria OS\0".as_ptr(), (hi + 4) as *mut u8, 11);
-        core::ptr::copy_nonoverlapping(b"talaria-1.1\0".as_ptr(), (hi + 136) as *mut u8, 12);
+        core::ptr::write_bytes(crate::mem::kptr::<u8>(hi), 0, 4096);
+        core::ptr::write_volatile(crate::mem::kptr::<u32>(hi), 1u32);                  // os_type = LINUX (a Linux-ABI runtime)
+        core::ptr::copy_nonoverlapping(b"Talaria OS\0".as_ptr(), crate::mem::kptr::<u8>(hi + 4), 11);
+        core::ptr::copy_nonoverlapping(b"talaria-1.1\0".as_ptr(), crate::mem::kptr::<u8>(hi + 136), 12);
         // driver_version: major | minor<<8 | sub_minor<<16 | module_type<<24.
         // We set a version of the level of a modern ena driver: Nitro's firmware may
         // refuse the creation of queues to a driver with a "too old" version.
-        core::ptr::write_volatile((hi + 172) as *mut u32, 2 | (13 << 8));  // 2.13.0
-        core::ptr::write_volatile((hi + 184) as *mut u16, 2u16 << 8);     // ena_spec_version 2.0 (MAJOR<<8|MINOR)
-        core::ptr::write_volatile((hi + 186) as *mut u16,
+        core::ptr::write_volatile(crate::mem::kptr::<u32>(hi + 172), 2 | (13 << 8));  // 2.13.0
+        core::ptr::write_volatile(crate::mem::kptr::<u16>(hi + 184), 2u16 << 8);     // ena_spec_version 2.0 (MAJOR<<8|MINOR)
+        core::ptr::write_volatile(crate::mem::kptr::<u16>(hi + 186),
             ((d.bus as u16) << 8) | ((d.dev as u16) << 3) | d.func as u16);
-        core::ptr::write_volatile((hi + 188) as *mut u16, 1u16);          // num_cpus
-        core::ptr::write_volatile((hi + 192) as *mut u32, 0u32);          // we declare no extra features
+        core::ptr::write_volatile(crate::mem::kptr::<u16>(hi + 188), 1u16);          // num_cpus
+        core::ptr::write_volatile(crate::mem::kptr::<u32>(hi + 192), 0u32);          // we declare no extra features
     }
     let mut c = [0u32; 16];
     c[0] = (OP_SET_FEATURE as u32) << 16;
@@ -1205,7 +1208,7 @@ impl crate::netdev::NetDev for Ena {
         let head = (w & 0xFFFF) as u16;
         let phase = w >> 16 != 0;
         let idx = (head & (RX_DEPTH - 1)) as u64;
-        let st = unsafe { core::ptr::read_volatile((self.rx_cq + idx * RX_CDESC_SZ as u64) as *const u32) };
+        let st = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(self.rx_cq + idx * RX_CDESC_SZ as u64)) };
         Some(((st >> 24) & 1 != 0) == phase)
     }
     fn doorbells(&self) -> Option<u64> { Some(self.db_writes) }

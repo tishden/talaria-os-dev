@@ -54,9 +54,9 @@ pub struct Nvme {
 }
 
 impl Nvme {
-    #[inline] fn r32(&self, off: u64) -> u32 { unsafe { core::ptr::read_volatile((self.regs + off) as *const u32) } }
-    #[inline] fn w32(&self, off: u64, v: u32) { unsafe { core::ptr::write_volatile((self.regs + off) as *mut u32, v) } }
-    #[inline] fn w64(&self, off: u64, v: u64) { unsafe { core::ptr::write_volatile((self.regs + off) as *mut u64, v) } }
+    #[inline] fn r32(&self, off: u64) -> u32 { unsafe { core::ptr::read_volatile(crate::mem::devptr::<u32>(self.regs + off)) } }
+    #[inline] fn w32(&self, off: u64, v: u32) { unsafe { core::ptr::write_volatile(crate::mem::devptr::<u32>(self.regs + off), v) } }
+    #[inline] fn w64(&self, off: u64, v: u64) { unsafe { core::ptr::write_volatile(crate::mem::devptr::<u64>(self.regs + off), v) } }
     #[inline] fn doorbell_sq(&self, qid: u64) -> u64 { 0x1000 + (2 * qid) * (4 << self.dstrd) }
     #[inline] fn doorbell_cq(&self, qid: u64) -> u64 { 0x1000 + (2 * qid + 1) * (4 << self.dstrd) }
 
@@ -83,7 +83,7 @@ impl Nvme {
         };
         cmd[0] = (cmd[0] & 0xFFFF) | ((cid as u32) << 16);
         unsafe {
-            core::ptr::copy_nonoverlapping(cmd.as_ptr() as *const u8, (sq + (tail as u64) * SQE as u64) as *mut u8, SQE);
+            core::ptr::copy_nonoverlapping(cmd.as_ptr() as *const u8, crate::mem::kptr::<u8>(sq + (tail as u64) * SQE as u64), SQE);
         }
         crate::arch::barrier::dma_wmb();   // the command is in the queue's memory before the doorbell says so
         let new_tail = (tail + 1) % QD as u16;
@@ -92,7 +92,7 @@ impl Nvme {
         let hz = crate::tsc::calibrate_cached();
         let t0 = crate::tsc::rdtsc();
         let status = loop {
-            let ce = (cq + (head as u64) * CQE as u64) as *const u32;
+            let ce = crate::mem::kptr::<u32>(cq + (head as u64) * CQE as u64).cast_const();
             let dw3 = unsafe { core::ptr::read_volatile(ce.add(3)) };
             if ((dw3 >> 16) & 1 != 0) == phase { crate::arch::barrier::dma_rmb(); break (dw3 >> 17) as u16; }
             if crate::tsc::rdtsc() - t0 > 2 * hz { return 0xFFFF; } // a timeout
@@ -124,7 +124,7 @@ impl Nvme {
                 let npages = rest.div_ceil(4096);
                 for i in 0..npages.min(PRP_PER_PAGE) {
                     let a = p2 + (i as u64) * 4096;
-                    unsafe { core::ptr::write_volatile((list + (i as u64) * 8) as *mut u64, a); }
+                    unsafe { core::ptr::write_volatile(crate::mem::kptr::<u64>(list + (i as u64) * 8), a); }
                 }
                 cmd[8] = list as u32; cmd[9] = (list >> 32) as u32;
             }
@@ -153,7 +153,7 @@ impl Nvme {
         cmd[0] = (cmd[0] & 0xFFFF) | ((cid as u32) << 16);
         unsafe {
             core::ptr::copy_nonoverlapping(cmd.as_ptr() as *const u8,
-                (self.iosq + (self.io_tail as u64) * SQE as u64) as *mut u8, SQE);
+                crate::mem::kptr::<u8>(self.iosq + (self.io_tail as u64) * SQE as u64), SQE);
         }
         self.io_tail = (self.io_tail + 1) % QD as u16;
         self.cmds += 1;
@@ -192,7 +192,7 @@ impl Nvme {
     pub fn reap(&mut self) -> u16 {
         let mut n = 0;
         loop {
-            let ce = (self.iocq + (self.io_head as u64) * CQE as u64) as *const u32;
+            let ce = crate::mem::kptr::<u32>(self.iocq + (self.io_head as u64) * CQE as u64).cast_const();
             let dw3 = unsafe { core::ptr::read_volatile(ce.add(3)) };
             if ((dw3 >> 16) & 1 != 0) != self.io_phase { break; }
             let cid = (dw3 & 0xFFFF) as u16;
@@ -262,7 +262,8 @@ impl Nvme {
         let mut done = 0usize;
         while done < buf.len() {
             let nb = (((buf.len() - done) / 512).max(1) as u16).min(maxb);
-            let Some(cid) = self.push_rw(false, (lba + done / 512) as u64, nb, buf.as_ptr() as u64 + done as u64) else { return false };
+            // DMAP: `buf` is a sector on the caller's kernel stack (fs.rs) — kpa_of breaks once stacks leave RAM's map (stage 3)
+            let Some(cid) = self.push_rw(false, (lba + done / 512) as u64, nb, crate::mem::kpa_of(buf.as_ptr()) + done as u64) else { return false };
             self.kick();
             let hz = crate::tsc::calibrate_cached();
             let t0 = crate::tsc::rdtsc();
@@ -295,9 +296,9 @@ pub fn probe_nth(n: usize) -> Option<Nvme> {
     // §8.1: a page of the PRP list per EVERY CID (the commands go in a pipeline, and
     // the list is needed by the device until the end of the transfer — otherwise the next one would overwrite it)
     let prp = crate::mem::alloc_contig(QD as u64)?;
-    for p in [asq, acq, iosq, iocq, idbuf] { unsafe { core::ptr::write_bytes(p as *mut u8, 0, 4096) }; }
-    unsafe { core::ptr::write_bytes(prp as *mut u8, 0, QD * 4096) };
-    let cap = unsafe { core::ptr::read_volatile(bar0 as *const u64) };
+    for p in [asq, acq, iosq, iocq, idbuf] { unsafe { core::ptr::write_bytes(crate::mem::kptr::<u8>(p), 0, 4096) }; }
+    unsafe { core::ptr::write_bytes(crate::mem::kptr::<u8>(prp), 0, QD * 4096) };
+    let cap = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u64>(bar0)) };
     let mut n = Nvme {
         regs: bar0, dstrd: (cap >> 32) & 0xF,
         asq, acq, iosq, iocq, prp,
@@ -326,7 +327,7 @@ pub fn probe_nth(n: usize) -> Option<Nvme> {
     let mut c = [0u32; 16];
     c[0] = 0x06; c[6] = idbuf as u32; c[7] = (idbuf >> 32) as u32; c[10] = 1;
     if n.submit(&mut c) == 0 {
-        let mdts = unsafe { core::ptr::read_volatile((idbuf + 77) as *const u8) };
+        let mdts = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u8>(idbuf + 77)) };
         if mdts > 0 && mdts < 20 {
             n.max_xfer = MAX_XFER.min(4096usize << mdts);
         }
@@ -335,15 +336,15 @@ pub fn probe_nth(n: usize) -> Option<Nvme> {
         // the Flush command does NOTHING — while on EBS it costs milliseconds. Linux
         // asks exactly this (`blk_queue_write_cache`) and on such a device
         // issues no barriers at all; we issued them always.
-        n.vwc = unsafe { core::ptr::read_volatile((idbuf + 525) as *const u8) } & 1 != 0;
+        n.vwc = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u8>(idbuf + 525)) } & 1 != 0;
     }
     // Identify Namespace 1 (CNS=0): the nsze + a check that the LBA is 512
     let mut c = [0u32; 16];
     c[0] = 0x06; c[1] = 1; c[6] = idbuf as u32; c[7] = (idbuf >> 32) as u32; c[10] = 0;
     if n.submit(&mut c) != 0 { crate::println!("nvme: identify ns fail"); return None; }
-    n.nsze = unsafe { core::ptr::read_volatile(idbuf as *const u64) };
-    let flbas = unsafe { core::ptr::read_volatile((idbuf + 26) as *const u8) } & 0xF;
-    let lbads = unsafe { core::ptr::read_volatile((idbuf + 128 + 16 * flbas as u64 + 2) as *const u8) };
+    n.nsze = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u64>(idbuf)) };
+    let flbas = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u8>(idbuf + 26)) } & 0xF;
+    let lbads = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u8>(idbuf + 128 + 16 * flbas as u64 + 2)) };
     crate::mem::free_contig(idbuf, 1);
     if lbads != 9 { crate::println!("nvme: an LBA of {} bytes is not supported (512 is needed)", 1u32 << lbads); return None; }
     crate::println!("nvme: {:02x}:{:02x}.{} BAR0={:#x} nsze={} blocks ({} MB), an IO pair qid=1 of depth {}, a transfer of up to {} KB, polling; the volatile \

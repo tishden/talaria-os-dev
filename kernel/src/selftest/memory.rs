@@ -62,6 +62,46 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if refused && after == left && small.is_some() { println!("allocfail: ALL OK"); } else { println!("allocfail: FAIL"); }
             crate::suite::park()
         }
+        "dmapid" => {
+            // THE ADDRESS KINDS ROUND-TRIP (docs/ARM64-PLAN.md §10.16, stage 1): for a frame of
+            // the low allocator, of the high area, a `.bss` word and a stack word, the physical
+            // address -> the kernel's pointer -> the physical address is the same number, and a
+            // word written through `kptr` is read back through `kptr` of `kpa_of` of that pointer.
+            // Stage 1 makes every helper the identity, so this pins the contract the direct map
+            // (stage 2) must keep while it changes what `kva` returns.
+            static mut BSS_WORD: u64 = 0;
+            let stack_word: u64 = 0;
+            let low = crate::mem::alloc_frame();
+            let (hb, _) = crate::mem::high_area();
+            let high = if hb != 0 { crate::mem::alloc_high(1, 4096) } else { None };
+            let bss = crate::mem::kpa_of(core::ptr::addr_of!(BSS_WORD));
+            let stk = crate::mem::kpa_of(&stack_word as *const u64);
+            let mut bad = 0u32;
+            let mut check = |what: &str, pa: u64| {
+                let p = crate::mem::kptr::<u64>(pa);
+                let back = crate::mem::kpa_of(p);
+                // SAFETY: `pa` is RAM this test owns (a fresh frame, its own `.bss`/stack word).
+                let rt = unsafe {
+                    let old = core::ptr::read_volatile(p);
+                    core::ptr::write_volatile(p, 0xD1A9_0000_0000_0000 | pa);
+                    let v = core::ptr::read_volatile(crate::mem::kptr::<u64>(back));
+                    core::ptr::write_volatile(p, old);
+                    v
+                };
+                let ok = back == pa && crate::mem::kpa(crate::mem::kva(pa)) == pa && rt == (0xD1A9_0000_0000_0000 | pa);
+                println!("dmapid: {} pa={:#x} kva={:#x} back={:#x} {}", what, pa, crate::mem::kva(pa), back, if ok { "OK" } else { "FAIL" });
+                if !ok { bad += 1; }
+            };
+            match low { Some(f) => check("low frame", f), None => { println!("dmapid: no low frame"); } }
+            match high { Some(f) => check("high frame", f), None => println!("dmapid: high frame: no high area (skipped)") }
+            check(".bss word", bss);
+            check("stack word", stk);
+            let v = crate::mem::vaddr(core::ptr::addr_of!(BSS_WORD));
+            if crate::mem::vaddr(crate::mem::vptr::<u64>(v)) != v { bad += 1; println!("dmapid: vptr/vaddr FAIL"); }
+            if let Some(f) = low { crate::mem::free_contig(f, 1); }
+            if low.is_some() && bad == 0 { println!("dmapid: ALL OK"); } else { println!("dmapid: FAIL ({} bad)", bad); }
+            crate::suite::park()
+        }
         "identhole" => {
             // A MINE OF THE CLASS "an identity address under someone else's AS". The kernel addresses physical
             // frames by their identity address (zeroing a fresh frame, a COW copy,
@@ -81,15 +121,15 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             unsafe { crate::paging::switch(asp); }
             // like the workload's MAP_SHARED: present + U/S in its own copy of GB0
             crate::paging::protect(frame, N * 4096, true, false);
-            unsafe { core::ptr::write_volatile(frame as *mut u64, 0x1234_5678) };
+            unsafe { core::ptr::write_volatile(crate::mem::kptr::<u64>(frame), 0x1234_5678) }; // DMAP: identhole is about the identity itself (stage 4 rewrites it)
             crate::paging::unmap_proc(frame, N);            // the workload's munmap
             // THE KERNEL touches the same frames by their identity address while staying under the workload's AS
             let mut rw_ok = true;
             unsafe {
                 for p in 0..N {
                     let a = frame + p * 4096;
-                    core::ptr::write_volatile(a as *mut u64, 0xA5A5_0000 + p);
-                    if core::ptr::read_volatile(a as *const u64) != 0xA5A5_0000 + p { rw_ok = false; }
+                    core::ptr::write_volatile(crate::mem::kptr::<u64>(a), 0xA5A5_0000 + p);
+                    if core::ptr::read_volatile(crate::mem::kptr::<u64>(a)) != 0xA5A5_0000 + p { rw_ok = false; }
                 }
             }
             let (holes, shadow, ro) = crate::paging::ident_check();
@@ -132,7 +172,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 P & !0x3FFF_FFFF, if is_pd { "OK" } else { "FAILED" }, before, e3);
             let asp = crate::paging::new_process_space();
             // the process has the same entry as the kernel — the directory is shared
-            let e3p = unsafe { core::ptr::read_volatile(((*(asp as *const u64) & 0x000F_FFFF_FFFF_F000) as *const u64).add(l3)) };
+            let e3p = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u64>(*crate::mem::kptr::<u64>(asp) & 0x000F_FFFF_FFFF_F000).add(l3)) };
             println!("sharedpd: the process's entry matches the kernel's: {}", if e3p == e3 { "OK" } else { "FAILED" });
             crate::paging::free_address_space(asp);
             let after = crate::paging::kernel_pdpt_entry(l3);
@@ -200,8 +240,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if a != 0 {
                 // SAFETY: P1 — sixteen frames straight from the allocator, nobody else holds them.
                 unsafe {
-                    for i in 0..16 * 512u64 { core::ptr::write_volatile((a + i * 8) as *mut u64, a ^ i); }
-                    for i in 0..16 * 512u64 { same &= core::ptr::read_volatile((a + i * 8) as *const u64) == a ^ i; }
+                    for i in 0..16 * 512u64 { core::ptr::write_volatile(crate::mem::kptr::<u64>(a + i * 8), a ^ i); }
+                    for i in 0..16 * 512u64 { same &= core::ptr::read_volatile(crate::mem::kptr::<u64>(a + i * 8)) == a ^ i; }
                 }
             }
             check(&mut ok, "a pattern written at the identity address reads back", same);
@@ -252,10 +292,10 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             crate::paging::map_in(asa, V, pa, true, false);
             crate::paging::map_in(asb, V, pb, true, false);
             let (a, b) = unsafe {
-                crate::paging::switch(asa); core::ptr::write_volatile(V as *mut u64, 0xAAAA);
-                crate::paging::switch(asb); core::ptr::write_volatile(V as *mut u64, 0xBBBB);
-                crate::paging::switch(asa); let a = core::ptr::read_volatile(V as *const u64);
-                crate::paging::switch(asb); let b = core::ptr::read_volatile(V as *const u64);
+                crate::paging::switch(asa); core::ptr::write_volatile(crate::mem::vptr::<u64>(V), 0xAAAA);
+                crate::paging::switch(asb); core::ptr::write_volatile(crate::mem::vptr::<u64>(V), 0xBBBB);
+                crate::paging::switch(asa); let a = core::ptr::read_volatile(crate::mem::vptr::<u64>(V));
+                crate::paging::switch(asb); let b = core::ptr::read_volatile(crate::mem::vptr::<u64>(V));
                 crate::paging::switch(orig); // return to the original space
                 (a, b)
             };

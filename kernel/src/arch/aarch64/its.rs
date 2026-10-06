@@ -87,10 +87,10 @@ pub static STALLS: AtomicU64 = AtomicU64::new(0);
 const MAX_ITS_DEV: usize = 32;
 static DEVS: [AtomicU64; MAX_ITS_DEV] = [const { AtomicU64::new(0) }; MAX_ITS_DEV];
 
-#[inline] unsafe fn r64(a: u64) -> u64 { core::ptr::read_volatile(a as *const u64) }
-#[inline] unsafe fn w64(a: u64, v: u64) { core::ptr::write_volatile(a as *mut u64, v) }
-#[inline] unsafe fn r32(a: u64) -> u32 { core::ptr::read_volatile(a as *const u32) }
-#[inline] unsafe fn w32(a: u64, v: u32) { core::ptr::write_volatile(a as *mut u32, v) }
+#[inline] unsafe fn r64(a: u64) -> u64 { core::ptr::read_volatile(crate::mem::devptr::<u64>(a)) }
+#[inline] unsafe fn w64(a: u64, v: u64) { core::ptr::write_volatile(crate::mem::devptr::<u64>(a), v) }
+#[inline] unsafe fn r32(a: u64) -> u32 { core::ptr::read_volatile(crate::mem::devptr::<u32>(a)) }
+#[inline] unsafe fn w32(a: u64, v: u32) { core::ptr::write_volatile(crate::mem::devptr::<u32>(a), v) }
 
 pub fn present() -> bool { READY.load(Ordering::Acquire) }
 /// Where a device must write its event number.
@@ -105,7 +105,7 @@ fn table(bytes: u64, align: u64) -> Option<u64> {
     let pages = bytes.div_ceil(4096);
     let p = crate::mem::alloc_contig_aligned(pages, align)?;
     // SAFETY: the frames were just allocated and are identity-mapped RAM.
-    unsafe { core::ptr::write_bytes(p as *mut u8, 0, (pages * 4096) as usize); }
+    unsafe { core::ptr::write_bytes(crate::mem::kptr::<u8>(p), 0, (pages * 4096) as usize); }
     Some(p)
 }
 
@@ -114,7 +114,7 @@ unsafe fn push(c: [u64; 4]) {
     let base = BASE.load(Ordering::Relaxed);
     let q = CMDQ.load(Ordering::Relaxed);
     let w = r64(base + GITS_CWRITER) & 0xF_FFE0;
-    for (i, v) in c.iter().enumerate() { core::ptr::write_volatile((q + w + 8 * i as u64) as *mut u64, *v); }
+    for (i, v) in c.iter().enumerate() { core::ptr::write_volatile(crate::mem::kptr::<u64>(q + w + 8 * i as u64), *v); }
     // The ITS reads the queue as memory: the words must be there before the pointer moves.
     // It is not one of the cores — a `dmb ish` (`fence`) does not order for it; `dsb st`
     // completes the stores for every observer before the MMIO write (Linux: `its_flush_cmd`).
@@ -196,7 +196,7 @@ pub unsafe fn init(base: u64) -> bool {
     w32(base + GITS_CTLR, 0);
     // The LPI configuration table: every LPI at the kernel's priority, disabled.
     let Some(prop) = table(PROP_BYTES, 0x1_0000) else { crate::println!("its: no memory for the LPI tables"); return false; };
-    core::ptr::write_bytes(prop as *mut u8, CFG_OFF, PROP_BYTES as usize);
+    core::ptr::write_bytes(crate::mem::kptr::<u8>(prop), CFG_OFF, PROP_BYTES as usize);
     PROP.store(prop, Ordering::Relaxed);
     // The ITS's tables: flat, 64 KiB pages (what every ITS has), sized for the ids we use.
     for n in 0..8u64 {
@@ -277,7 +277,7 @@ pub fn msi(devid: u32, event: u32, nvec: u32, cpu: usize, vector: Option<u16>) -
                     // the ITS has the MAPTI, and `on_lpi` must find where to go.
                     if let Some(v) = vector { LPI_VEC[n].store(v, Ordering::Release); }
                     push([0x0A | (devid as u64) << 32, event as u64 | (LPI_BASE as u64 + n as u64) << 32, cpu as u64, 0]); // MAPTI
-                    core::ptr::write_volatile((PROP.load(Ordering::Relaxed) + n as u64) as *mut u8, CFG_ON);
+                    core::ptr::write_volatile(crate::mem::kptr::<u8>(PROP.load(Ordering::Relaxed) + n as u64), CFG_ON);
                     push([0x0C | (devid as u64) << 32, event as u64, 0, 0]);                         // INV
                     n
                 }
@@ -334,7 +334,7 @@ pub fn selftest() -> ! {
     };
     check(d.msix_cap != 0, "the controller has an MSI-X capability");
     let vec0 = crate::idt::MSI_VECTOR_BASE;
-    super::idt::set_vector(vec0, test_handler as *const () as u64);
+    super::idt::set_vector(vec0, crate::mem::vaddr(test_handler as *const ()));
     let nvec = crate::pci::msix_enable_masked(&d);
     let addr = crate::pci::msix_msg_addr(&d, 0);
     crate::println!("its: {:02x}:{:02x}.{} — {} vector(s) mapped; entry 0 reads the address {:#x} (GITS_TRANSLATER is {:#x})",

@@ -63,7 +63,8 @@ impl Blk {
                 let dev: *mut crate::nvme::Nvme = n;
                 // SAFETY: D1 + D2 — the ring and the slot table under `ring_lock`; a slot is reused
                 // only after its completion has been seen.
-                if unsafe { nvme_rw_queued(dev, false, lba, buf.as_mut_ptr() as u64, buf.len()) } { Ok(()) } else { Err(()) }
+                // DMAP: `buf` may be on a kernel stack (a sector, the suite's state) — kpa_of breaks once stacks leave RAM's map (stage 3)
+                if unsafe { nvme_rw_queued(dev, false, lba, crate::mem::kpa_of(buf.as_mut_ptr()), buf.len()) } { Ok(()) } else { Err(()) }
             }
         }
     }
@@ -75,7 +76,8 @@ impl Blk {
                 let dev: *mut crate::nvme::Nvme = n;
                 // SAFETY: D1 + D2 — the ring and the slot table under `ring_lock`; a slot is reused
                 // only after its completion has been seen.
-                if unsafe { nvme_rw_queued(dev, true, lba, buf.as_ptr() as u64, buf.len()) } { Ok(()) } else { Err(()) }
+                // DMAP: `buf` may be on a kernel stack (a sector, the suite's state) — kpa_of breaks once stacks leave RAM's map (stage 3)
+                if unsafe { nvme_rw_queued(dev, true, lba, crate::mem::kpa_of(buf.as_ptr()), buf.len()) } { Ok(()) } else { Err(()) }
             }
         }
     }
@@ -167,9 +169,9 @@ fn scan_blk() -> Option<(usize, usize)> {
         let Some((addr, size)) = crate::arch::virtio_mmio_slot(i) else { continue };
         // SAFETY: D3 — the buffer handed to the device is a frame the kernel owns (a block-cache slot
         // or a staging page), untouched for the length of the command.
-        let magic = unsafe { core::ptr::read_volatile(addr as *const u32) };
+        let magic = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u32>(addr as u64)) };
         if magic != 0x7472_6976 { continue; }
-        let header = NonNull::new(addr as *mut VirtIOHeader)?;
+        let header = NonNull::new(crate::mem::devptr::<VirtIOHeader>(addr as u64))?;
         // SAFETY: D3 — the buffer handed to the device is a frame the kernel owns (a block-cache slot
         // or a staging page), untouched for the length of the command.
         if let Ok(t) = unsafe { MmioTransport::new(header, size) } {
@@ -196,7 +198,7 @@ pub fn blk_open() -> bool {
     // virtio-mmio (microvm) -> NVMe over PCIe (EC2/EBS, OVMF q35; talaria.pci=1 is needed
     // or a call of pci::init() before fs::init — otherwise there are no devices in the table)
     if let Some((addr, sz)) = scan_blk() {
-        let header = NonNull::new(addr as *mut VirtIOHeader).unwrap();
+        let header = NonNull::new(crate::mem::devptr::<VirtIOHeader>(addr as u64)).unwrap();
         // SAFETY: D1 + D2 — the ring and the slot table under `ring_lock`; a slot is reused only after
         // its completion has been seen.
         let transport = unsafe { MmioTransport::new(header, sz).unwrap() };
@@ -1373,7 +1375,7 @@ pub fn blk_write_durable(lba: usize, buf: &[u8]) -> bool {
         let Some(Blk::Nvme(n)) = blk() else { return false };
         let dev: *mut crate::nvme::Nvme = n;
         // The partition's base — as in `io_one`: from the outside THE PARTITION is addressed, not the disk.
-        nvme_rw_queued_ex(dev, true, lba + part_base(), buf.as_ptr() as u64, buf.len(), true)
+        nvme_rw_queued_ex(dev, true, lba + part_base(), crate::mem::kpa_of(buf.as_ptr()), buf.len(), true)
     };
     let dt = dev_note(&DEV_WR_N, &DEV_WR_TSC, t0);
     DEV_FUA_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1398,7 +1400,7 @@ fn io_one(lba: usize, buf: *mut u8, len: usize, write: bool) -> bool {
             // on purpose: otherwise a read would again stand behind a foreign barrier.
             Some(Blk::Nvme(n)) => {
                 let dev: *mut crate::nvme::Nvme = n;
-                return nvme_rw_queued(dev, write, lba + part_base(), buf as u64, len);
+                return nvme_rw_queued(dev, write, lba + part_base(), crate::mem::kpa_of(buf), len);
             }
             None => return false,
         }
@@ -1692,7 +1694,7 @@ fn blk_write_many_inner(reqs: &[(usize, u64, u16)]) -> bool {
                                     let sl = ios[si].as_mut().unwrap();
                                     let req: *mut _ = &mut sl.req;
                                     let resp: *mut _ = &mut sl.resp;
-                                    let buf = core::slice::from_raw_parts(a as *const u8, nb as usize * 512);
+                                    let buf = core::slice::from_raw_parts(crate::mem::kptr::<u8>(a), nb as usize * 512);
                                     match b.write_blocks_nb(lba + part_base(), &mut *req, buf, &mut *resp) {
                                         Ok(t) => { ios[si].as_mut().unwrap().token = t; Some(si) }
                                         Err(_) => { ios[si].as_mut().unwrap().busy = false; None }

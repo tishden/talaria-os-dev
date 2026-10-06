@@ -495,7 +495,7 @@ pub fn selftest_events() {
         owner.map(|l| ["instructions", "LLC-miss", "predictor-miss", "LLC-ref", "branches"][l])); }
     const PAGES: u64 = 16384; // 64 MB
     let Some(buf) = crate::mem::alloc_contig(PAGES) else { crate::println!("pmu-ev: no 64 MB to walk"); return; };
-    let p = buf as *const u8;
+    let p = crate::mem::kptr::<u8>(buf).cast_const();
     let lines = PAGES * 4096 / 64;
     // the first touch maps nothing (the direct map), but it fills the TLB walk caches: one pass first
     let walk = || { let (mut k, mut s) = (0u64, 0u64); for _ in 0..lines { k = (k.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)) & (lines - 1);

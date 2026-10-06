@@ -209,7 +209,7 @@ static PARK_FRAME: [AtomicU64; NCPU] = [const { AtomicU64::new(0) }; NCPU];
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_gdb_park(fr: *mut Frame) {
     let me = crate::percpu::cpu_id();
-    if me < NCPU { PARK_FRAME[me].store(fr as u64, Ordering::SeqCst); }
+    if me < NCPU { PARK_FRAME[me].store(crate::mem::vaddr(fr), Ordering::SeqCst); }
     // The core that steps does not park: the IPI could have gone stale since the previous stop.
     while STOP_ALL.load(Ordering::Acquire) && STEP_OWNER.load(Ordering::Acquire) != me { core::hint::spin_loop(); }
     if me < NCPU { PARK_FRAME[me].store(0, Ordering::SeqCst); }
@@ -221,7 +221,7 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
     // at an entry by a #BP restore the orig byte and roll the rip back (an int3 is 1 byte)
     if f.vec == 3 {
         unsafe { for i in 0..BPMAX { if BP_USED[i] && BP_ADDR[i] == f.rip.wrapping_sub(1) {
-            core::ptr::write_volatile(BP_ADDR[i] as *mut u8, BP_ORIG[i]); f.rip -= 1; break; } } }
+            core::ptr::write_volatile(crate::mem::vptr::<u8>(BP_ADDR[i]), BP_ORIG[i]); f.rip -= 1; break; } } }
     }
     if f.vec == 1 { unsafe { core::arch::asm!("mov dr6, {}", in(reg) 0u64, options(nomem, nostack)); } } // clear the DR6 (a watchpoint/a step)
     f.rflags &= !0x100; // clear the TF (after a step)
@@ -252,7 +252,7 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
                     let pf = PARK_FRAME[c].load(Ordering::SeqCst);
                     if pf != 0 && crate::percpu::cur_task_of(c) == t as u64 { parked = pf; break; }
                 }
-                if parked != 0 { send_regs_packet(unsafe { &*(parked as *const Frame) }); continue; }
+                if parked != 0 { send_regs_packet(unsafe { &*crate::mem::vptr::<Frame>(parked) }); continue; }
                 match crate::sched::saved_ctx(t) {
                     Some(c) => {
                         let tf = Frame { r15: c[0], r14: c[1], r13: c[2], r12: c[3], r11: c[4], r10: c[5], r9: c[6], r8: c[7],
@@ -286,14 +286,14 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
             b'Z' if n >= 2 && buf[1] == b'0' => { // Z0,addr,kind — sw breakpoint
                 let addr = parse_hex(&buf[3..n]);
                 unsafe { for i in 0..BPMAX { if !BP_USED[i] {
-                    BP_ADDR[i]=addr; BP_ORIG[i]=core::ptr::read_volatile(addr as *const u8);
-                    core::ptr::write_volatile(addr as *mut u8, 0xCC); BP_USED[i]=true; break; } } }
+                    BP_ADDR[i]=addr; BP_ORIG[i]=core::ptr::read_volatile(crate::mem::vptr::<u8>(addr));
+                    core::ptr::write_volatile(crate::mem::vptr::<u8>(addr), 0xCC); BP_USED[i]=true; break; } } }
                 PORT.send(b"OK");
             }
             b'z' if n >= 2 && buf[1] == b'0' => { // z0,addr,kind
                 let addr = parse_hex(&buf[3..n]);
                 unsafe { for i in 0..BPMAX { if BP_USED[i] && BP_ADDR[i]==addr {
-                    core::ptr::write_volatile(addr as *mut u8, BP_ORIG[i]); BP_USED[i]=false; break; } } }
+                    core::ptr::write_volatile(crate::mem::vptr::<u8>(addr), BP_ORIG[i]); BP_USED[i]=false; break; } } }
                 PORT.send(b"OK");
             }
             b'Z' if n >= 2 && (buf[1] == b'2' || buf[1] == b'3' || buf[1] == b'4') => { // hw-watchpoint
@@ -320,7 +320,7 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
             b'D' => {
                 unsafe {
                     for i in 0..BPMAX { if BP_USED[i] {
-                        core::ptr::write_volatile(BP_ADDR[i] as *mut u8, BP_ORIG[i]); BP_USED[i] = false; } }
+                        core::ptr::write_volatile(crate::mem::vptr::<u8>(BP_ADDR[i]), BP_ORIG[i]); BP_USED[i] = false; } }
                     clear_watchpoint(); clear_hw_exec_all();
                 }
                 if f.vec == 1 { f.rflags |= 1 << 16; }
@@ -337,10 +337,10 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
 pub fn enable() {
     init_com2();
     unsafe extern "C" { fn gdb_isr_1(); fn gdb_isr_3(); }
-    crate::idt::set_vector(1, gdb_isr_1 as *const () as u64);
-    crate::idt::set_vector(3, gdb_isr_3 as *const () as u64);
+    crate::idt::set_vector(1, crate::mem::vaddr(gdb_isr_1 as *const ()));
+    crate::idt::set_vector(3, crate::mem::vaddr(gdb_isr_3 as *const ()));
     unsafe extern "C" { fn gdb_park_stub(); }
-    crate::idt::set_vector(PARK_VECTOR, gdb_park_stub as *const () as u64);
+    crate::idt::set_vector(PARK_VECTOR, crate::mem::vaddr(gdb_park_stub as *const ()));
 }
 
 /// Whether the stub talks over the console's line (arm64's does; this one has COM2).

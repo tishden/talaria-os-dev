@@ -27,7 +27,7 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static POS: AtomicUsize = AtomicUsize::new(0); // the cell number in [0, COLS*ROWS)
 
 #[inline]
-unsafe fn cell(i: usize) -> *mut u16 { (VGA as *mut u16).add(i) }
+unsafe fn cell(i: usize) -> *mut u16 { crate::mem::devptr::<u16>(VGA).add(i) }
 
 /// The cache line holding the cell goes back to memory: the screen buffer on bare metal lives
 /// in a device, and a write deferred in the cache is invisible to the firmware.

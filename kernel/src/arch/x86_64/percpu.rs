@@ -75,7 +75,7 @@ pub fn init_gs(cpu: usize) {
     if cpu >= MAXCPU { return; }
     unsafe {
         CPUS[cpu].cpu = cpu as u64;
-        let base = core::ptr::addr_of!(CPUS[cpu]) as u64;
+        let base = crate::mem::vaddr(core::ptr::addr_of!(CPUS[cpu]));
         core::arch::asm!("wrmsr", in("ecx") MSR_GS_BASE, in("eax") base as u32, in("edx") (base >> 32) as u32, options(nostack, preserves_flags));
     }
 }
@@ -89,7 +89,7 @@ pub fn init(cpu: usize) {
 /// The physical address of core `cpu`'s PV EOI word (the kernel is identity-mapped).
 pub fn pv_eoi_addr(cpu: usize) -> u64 {
     if cpu >= MAXCPU { return 0; }
-    unsafe { core::ptr::addr_of!(CPUS[cpu].pv_eoi) as u64 }
+    unsafe { crate::mem::kpa_of(core::ptr::addr_of!(CPUS[cpu].pv_eoi)) }
 }
 
 /// The current core's number (gs:24). Before init() GS.base=0 — so calling it early is inadmissible.

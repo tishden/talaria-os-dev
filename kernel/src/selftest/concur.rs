@@ -36,7 +36,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if b == 0 { println!("SHMWAKE: FAIL — ivshmem was not found (pcie=on + ivshmem-plain are required)"); crate::suite::park() }
             crate::smp::lapic_enable(); // mask the LVT/LINT: an sti in the mwait loop must not catch garbage vectors
             println!("talaria: SHMWAKE ivshmem {:#x} ({} KB), the mode is {}", b, s / 1024, crate::sync::mode_name(crate::sync::mode()));
-            let w = b as *mut u32; let ack = (b + 64) as *mut u32;
+            let w = crate::mem::devptr::<u32>(b); let ack = crate::mem::devptr::<u32>(b + 64);
             if crate::cmdline::has(cmdline, "talaria.shmrole", "pong") {
                 unsafe {
                     core::ptr::write_volatile(ack, 0);
@@ -257,7 +257,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             // sees ready neighbours next to it and yields by itself — that is the regular path
             // of a waiter, not a prop for the gate.
             HP_WORD.store(1, Ordering::SeqCst);
-            crate::sync::wake_addr_kernel(HP_WORD.as_ptr() as u64, 1);
+            crate::sync::wake_addr_kernel(crate::mem::vaddr(HP_WORD.as_ptr()), 1);
             crate::suite::park()
         }
         "ioyacct" => {

@@ -29,7 +29,7 @@ pub const FPU_BYTES: usize = 528;
 pub unsafe fn fpu_save(area: *mut u8) {
     let src = super::percpu::fp_area();
     if src != 0 {
-        core::ptr::copy_nonoverlapping(src as *const u8, area, FPU_BYTES);
+        core::ptr::copy_nonoverlapping(crate::mem::vptr::<u8>(src), area, FPU_BYTES);
     } else {
         fpu_save_live(area);
     }
@@ -54,7 +54,7 @@ unsafe fn fpu_save_live(area: *mut u8) {
 /// until the entry (it is the task's own slot, and this core has claimed the task).
 #[inline]
 pub unsafe fn fpu_restore(area: *const u8) {
-    super::percpu::set_fp_pending(area as u64);
+    super::percpu::set_fp_pending(crate::mem::vaddr(area));
 }
 /// Is the saved image fit to be restored? Always, here: there is no control word in it
 /// whose reserved bits would fault the load (x86's `mxcsr`). `Err` carries the word.
@@ -124,7 +124,7 @@ pub fn user_flags(f: u64) -> u64 { f & 0xF000_0000 }
 pub fn flags_irq_on(f: u64) -> bool { f & 0x80 == 0 }
 
 #[inline(always)]
-fn frame_at(sp: u64) -> *mut Frame { sp as *mut Frame }
+fn frame_at(sp: u64) -> *mut Frame { crate::mem::vptr::<Frame>(sp) }
 
 /// Build an EL0 context at the top of `kstack_top`; the sp (the frame) to enter it with.
 /// # Safety
@@ -148,7 +148,7 @@ pub unsafe fn build_kernel_ctx(stack_top: u64, entry: extern "C" fn() -> !) -> u
     sp
 }
 #[inline(always)]
-fn rd(sp: u64, off: usize) -> u64 { unsafe { core::ptr::read_volatile((sp as *const u64).add(off)) } }
+fn rd(sp: u64, off: usize) -> u64 { unsafe { core::ptr::read_volatile(crate::mem::vptr::<u64>(sp).add(off)) } }
 pub fn ctx_pc(sp: u64) -> u64 { rd(sp, 32) }
 pub fn ctx_sp(sp: u64) -> u64 { rd(sp, 31) }
 pub fn ctx_fp(sp: u64) -> u64 { rd(sp, 29) }

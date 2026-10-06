@@ -242,8 +242,8 @@ pub fn run(name: &str, cmdline: &str) -> bool {
         "pci" => {
             let (b, s) = crate::pci::ivshmem();
             if b != 0 { // write a marker into the host's shared memory and read it back
-                unsafe { core::ptr::write_volatile(b as *mut u64, 0x5441_4C41_5249_4131); }
-                let v = unsafe { core::ptr::read_volatile((b + 8) as *const u64) };
+                unsafe { core::ptr::write_volatile(crate::mem::devptr::<u64>(b), 0x5441_4C41_5249_4131); }
+                let v = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u64>(b + 8)) };
                 println!("pci-test: ivshmem base={:#x} size={} the marker was written, host@8={:#x}", b, s, v);
             } else { println!("pci-test: ivshmem was not found"); }
             crate::suite::park()
@@ -276,11 +276,12 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                         println!("wc-test: the neighbouring page changed its type: {:#x} -> {:#x}", before, after); ok = false;
                     }
                     // a write with a stream of 8-byte stores and a read back (the WC buffer is flushed by a fence)
+                    // DMAP: a RAM frame that map_mmio_wc re-typed WC AT ITS IDENTITY ADDRESS — read as a device window
                     unsafe {
-                        for i in 0..8u64 { core::ptr::write_volatile((p + i * 8) as *mut u64, 0x1122_3344_0000_0000 | i); }
+                        for i in 0..8u64 { core::ptr::write_volatile(crate::mem::devptr::<u64>(p + i * 8), 0x1122_3344_0000_0000 | i); }
                         core::sync::atomic::fence(Ordering::SeqCst);
                         for i in 0..8u64 {
-                            let v = core::ptr::read_volatile((p + i * 8) as *const u64);
+                            let v = core::ptr::read_volatile(crate::mem::devptr::<u64>(p + i * 8));
                             if v != (0x1122_3344_0000_0000 | i) { println!("wc-test: the word {} = {:#x}", i, v); ok = false; }
                         }
                     }
@@ -358,7 +359,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                     crate::paging::split_to_4k(f);
                     crate::paging::protect(f, 4096, true, false);
                     while crate::paging::take_dirty(f) {}               // clean, as the writeback leaves it
-                    unsafe { core::ptr::write_volatile(f as *mut u64, 0x5a5a); }
+                    unsafe { core::ptr::write_volatile(crate::mem::kptr::<u64>(f), 0x5a5a); } // DMAP: the dirty bit checked is the identity leaf's (stage 4 rewrites this)
                     crate::paging::protect(f, 4096, false, false);      // mprotect(PROT_READ) after the write
                     let kept = crate::paging::take_dirty(f);
                     let cleared = !crate::paging::take_dirty(f);        // and the take still clears it
@@ -392,7 +393,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             // The cache trace: walk 16 MB with a step of 64 bytes x4 -> LLC references/misses.
             let (m0, r0) = crate::pmu::read_cache();
             if let Some(bufp) = crate::mem::alloc_contig(4096) { // 16 MB
-                let p = bufp as *mut u8; let sz = 4096u64 * 4096; let mut sink = 0u64;
+                let p = crate::mem::kptr::<u8>(bufp); let sz = 4096u64 * 4096; let mut sink = 0u64;
                 for _pass in 0..4u64 {
                     let mut o = 0u64;
                     while o < sz { sink = sink.wrapping_add(unsafe { core::ptr::read_volatile(p.add(o as usize)) } as u64); o += 64; }
@@ -510,7 +511,7 @@ pub fn run(name: &str, cmdline: &str) -> bool {
         "fault" => {
             println!("talaria: the #PF + flight-recorder test — an access to 0xdead0000...");
             crate::fr::record(crate::fr::NOTE, 0xdead_0000_0000);
-            unsafe { core::ptr::read_volatile(0xdead_0000_0000 as *const u64); }
+            unsafe { core::ptr::read_volatile(crate::mem::vptr::<u64>(0xdead_0000_0000)); }
             println!("talaria: (this must not be printed)");
         }
         _ => return false,

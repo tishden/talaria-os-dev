@@ -25,8 +25,10 @@ use crate::fastring::{self, HDR, MASK, RX_OFF, TX_OFF};
 pub const FN_SLOTS: u32 = fastring::SLOTS;
 pub const REGION_SZ: usize = fastring::REGION_SZ;
 
-#[inline] fn p_prod(base: usize, ring: usize) -> *mut u32 { (base + ring) as *mut u32 }
-#[inline] fn p_cons(base: usize, ring: usize) -> *mut u32 { (base + ring + fastring::CONS_OFF) as *mut u32 }
+// DMAP: dual — the region is a frame (`alloc_contig`) the cell reads through kptr, and ring 3
+// polls it at the same identity address (`talaria_fastmap`, syscall.rs); stage 4 splits them.
+#[inline] fn p_prod(base: usize, ring: usize) -> *mut u32 { crate::mem::kptr((base + ring) as u64) }
+#[inline] fn p_cons(base: usize, ring: usize) -> *mut u32 { crate::mem::kptr((base + ring + fastring::CONS_OFF) as u64) }
 #[inline] fn p_slot(base: usize, ring: usize, i: u32) -> usize { base + ring + fastring::slot_off(i) }
 
 /// Zero the rings' heads/tails (it is called on the BSP before the start of the cell/application).
@@ -87,8 +89,8 @@ pub fn run_cell(dev: &'static mut dyn NetDev, mac: [u8; 6], base: usize) -> ! {
                 DIAG_RX_N += 1;
                 if fastring::can_produce(prod, cons) {
                     let s = p_slot(base, RX_OFF, prod);
-                    core::ptr::copy_nonoverlapping(q.rx_ptr(slot).add(hdr), (s + HDR) as *mut u8, plen);
-                    write_volatile(s as *mut u32, plen as u32);
+                    core::ptr::copy_nonoverlapping(q.rx_ptr(slot).add(hdr), crate::mem::kptr::<u8>((s + HDR) as u64), plen);
+                    write_volatile(crate::mem::kptr::<u32>(s as u64), plen as u32);
                     RX_TS[(prod & MASK) as usize] = tsc::rdtsc();
                     fence(Ordering::Release);
                     write_volatile(p_prod(base, RX_OFF), prod.wrapping_add(1));
@@ -105,9 +107,9 @@ pub fn run_cell(dev: &'static mut dyn NetDev, mac: [u8; 6], base: usize) -> ! {
                 if let Some(fslot) = q.tx_alloc() {
                     let s = p_slot(base, TX_OFF, tc);
                     fence(Ordering::Acquire);
-                    let len = fastring::clamp_len(read_volatile(s as *const u32) as usize);
+                    let len = fastring::clamp_len(read_volatile(crate::mem::kptr::<u32>(s as u64)) as usize);
                     let hdr = q.tx_hdr(fslot);
-                    core::ptr::copy_nonoverlapping((s + HDR) as *const u8, q.tx_ptr(fslot).add(hdr), len);
+                    core::ptr::copy_nonoverlapping(crate::mem::kptr::<u8>((s + HDR) as u64), q.tx_ptr(fslot).add(hdr), len);
                     let t_tx0 = tsc::rdtsc();
                     // the batch notify (§7.2): the frames are put into the queue WITHOUT a doorbell,
                     // one notify for the whole batch after the loop — the VMEXIT is amortised

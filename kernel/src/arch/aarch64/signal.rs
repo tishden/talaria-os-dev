@@ -37,7 +37,7 @@ const PSTATE_USER_MASK: u64 = 0xF000_0000;
 
 /// The FP/SIMD area of the current entry: the stub's, 528 bytes below the frame
 /// (q0..q31, then fpcr, fpsr — `trap.rs`'s FP_SAVE).
-pub fn fpu_area(f: &Frame) -> u64 { (f as *const Frame as u64) - 528 }
+pub fn fpu_area(f: &Frame) -> u64 { crate::mem::vaddr(f as *const Frame) - 528 }
 
 /// The fork child's registers: the parent's file with x0 = 0 (the fork's return in the child).
 pub fn fork_regs(f: &Frame) -> Gp {
@@ -107,13 +107,13 @@ pub fn exception_siginfo(f: &Frame, sig: u64, fault_addr: u64) -> (i32, u64) {
 /// # Safety
 /// `uc` is the ucontext's base inside a user frame that `paging::user_writable` admitted.
 unsafe fn write_regs(uc: u64, f: &Frame, x0: u64, usp: u64, pc: u64, fault_addr: u64) {
-    let r = (uc + MC_REGS) as *mut u64;
+    let r = crate::uaccess::uptr::<u64>(uc + MC_REGS);
     for i in 0..31 { core::ptr::write_unaligned(r.add(i), f.x(i)); }
     core::ptr::write_unaligned(r, x0);
-    core::ptr::write_unaligned((uc + MC_SP) as *mut u64, usp);
-    core::ptr::write_unaligned((uc + MC_PC) as *mut u64, pc);
-    core::ptr::write_unaligned((uc + MC_PSTATE) as *mut u64, f.flags);
-    core::ptr::write_unaligned((uc + MC_FAULT) as *mut u64, fault_addr);
+    core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(uc + MC_SP), usp);
+    core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(uc + MC_PC), pc);
+    core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(uc + MC_PSTATE), f.flags);
+    core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(uc + MC_FAULT), fault_addr);
 }
 /// The registers from a SYSCALL's frame into the sigcontext: `ret` plays x0. `restart`
 /// (SA_RESTART on an interrupted restartable syscall): the handler returns onto the `svc`
@@ -135,15 +135,15 @@ pub unsafe fn write_exception_context(uc: u64, f: &Frame, fault_addr: u64, _old_
 /// # Safety
 /// `base` is the frame's base; `entry_area` the stub's 528-byte area of this entry.
 pub unsafe fn write_fpu(_base: u64, uc: u64, entry_area: u64) {
-    let h = (uc + MC_RESERVED) as *mut u32;
+    let h = crate::uaccess::uptr::<u32>(uc + MC_RESERVED);
     core::ptr::write_unaligned(h, FPSIMD_MAGIC);
     core::ptr::write_unaligned(h.add(1), FPSIMD_SIZE);
-    let fpcr = core::ptr::read_unaligned((entry_area + 512) as *const u64);
-    let fpsr = core::ptr::read_unaligned((entry_area + 520) as *const u64);
+    let fpcr = core::ptr::read_unaligned(crate::mem::vptr::<u64>(entry_area + 512));
+    let fpsr = core::ptr::read_unaligned(crate::mem::vptr::<u64>(entry_area + 520));
     core::ptr::write_unaligned(h.add(2), fpsr as u32);
     core::ptr::write_unaligned(h.add(3), fpcr as u32);
-    core::ptr::copy_nonoverlapping(entry_area as *const u8, (uc + FP_VREGS) as *mut u8, 512);
-    core::ptr::write_unaligned((uc + FP_VREGS + 512) as *mut u64, 0); // the terminator header
+    core::ptr::copy_nonoverlapping(crate::mem::vptr::<u8>(entry_area), crate::uaccess::uptr::<u8>(uc + FP_VREGS), 512);
+    core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(uc + FP_VREGS + 512), 0); // the terminator header
 }
 /// Redirect a syscall's return into the handler: x0 = sig, x1 = &siginfo, x2 = &uc, the
 /// restorer in x30, the frame's sp slot = the handler's stack (the stub restores SP_EL0).
@@ -164,19 +164,19 @@ pub unsafe fn enter_handler_exception(f: &mut Frame, sig: u64, si: u64, uc: u64,
 /// # Safety
 /// `uc` is the ucontext of a frame this kernel built (`uaccess::gate` admitted the address).
 pub unsafe fn sigreturn(f: &mut Frame, uc: u64, _kstack_top: u64) -> u64 {
-    let r = (uc + MC_REGS) as *const u64;
+    let r = crate::uaccess::uptr::<u64>(uc + MC_REGS);
     for i in 0..31 { f.set_x(i, core::ptr::read_unaligned(r.add(i))); }
-    f.usp = core::ptr::read_unaligned((uc + MC_SP) as *const u64);
-    f.pc = core::ptr::read_unaligned((uc + MC_PC) as *const u64);
-    f.flags = core::ptr::read_unaligned((uc + MC_PSTATE) as *const u64) & PSTATE_USER_MASK;
-    let h = (uc + MC_RESERVED) as *const u32;
+    f.usp = core::ptr::read_unaligned(crate::uaccess::uptr::<u64>(uc + MC_SP));
+    f.pc = core::ptr::read_unaligned(crate::uaccess::uptr::<u64>(uc + MC_PC));
+    f.flags = core::ptr::read_unaligned(crate::uaccess::uptr::<u64>(uc + MC_PSTATE)) & PSTATE_USER_MASK;
+    let h = crate::uaccess::uptr::<u32>(uc + MC_RESERVED);
     if core::ptr::read_unaligned(h) == FPSIMD_MAGIC {
         let area = fpu_area(f);
-        core::ptr::copy_nonoverlapping((uc + FP_VREGS) as *const u8, area as *mut u8, 512);
+        core::ptr::copy_nonoverlapping(crate::uaccess::uptr::<u8>(uc + FP_VREGS), crate::mem::vptr::<u8>(area), 512);
         let fpsr = core::ptr::read_unaligned(h.add(2)) as u64;
         let fpcr = core::ptr::read_unaligned(h.add(3)) as u64;
-        core::ptr::write_unaligned((area + 512) as *mut u64, fpcr);
-        core::ptr::write_unaligned((area + 520) as *mut u64, fpsr);
+        core::ptr::write_unaligned(crate::mem::vptr::<u64>(area + 512), fpcr);
+        core::ptr::write_unaligned(crate::mem::vptr::<u64>(area + 520), fpsr);
     }
     f.a1
 }

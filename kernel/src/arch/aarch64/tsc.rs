@@ -36,7 +36,7 @@ pub fn rtc_read() -> Option<(u64, u64)> {
     if b != 0 {
         // SAFETY: the window is the device tree's, in the device gigabyte every table maps
         // (through the devices' alias once the MMU is on).
-        let s = unsafe { core::ptr::read_volatile(super::mmu::mmio_va(b) as *const u32) } as u64;
+        let s = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u32>(super::mmu::mmio_va(b))) } as u64;
         if s >= 1_577_836_800 { return Some((s * 1_000_000_000, rdtsc())); }
     }
     let e = BOOT_EPOCH.load(core::sync::atomic::Ordering::Relaxed);

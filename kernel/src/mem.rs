@@ -8,15 +8,20 @@ unsafe extern "C" { static __kernel_end: u8; }   // the end of the image (linker
 unsafe extern "C" { static __kernel_start: u8; } // the start of the image (linker.ld; the base is the parameter KBASE)
 /// The start of the kernel's image. Not a constant: the base is set at link time (`--defsym KBASE=`),
 /// and a build for a non-relocatable binary moves the kernel above its segments.
-pub fn kernel_lo() -> u64 { core::ptr::addr_of!(__kernel_start) as u64 }
+pub fn kernel_lo() -> u64 { kpa_of(core::ptr::addr_of!(__kernel_start)) }
 /// The first address BEYOND the kernel's image (rounded up): free memory starts there.
 pub fn kernel_hi() -> u64 { kernel_top() }
 /// The start of free physical memory: max(32 MB, the end of the kernel's image). An image with the regression's
 /// embedded binaries outgrew 32 MB — a bump from 0x2000000 handed out frames OVER .bss (#UD rip=3).
 fn kernel_top() -> u64 {
-    let end = core::ptr::addr_of!(__kernel_end) as u64;
+    let end = kpa_of(core::ptr::addr_of!(__kernel_end));
     KERNEL_TOP.max((end + FRAME - 1) & !(FRAME - 1))
 }
+
+// The address kinds (`kva`/`kptr`/`kpa`/`kpa_of`/`vptr`/`vaddr`/`devptr`) live in `kaddr.rs`, a
+// module with no dependencies so that the host tests compile the same source; they are
+// `mem::`'s by name.
+pub use crate::kaddr::*;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 static END: AtomicU64 = AtomicU64::new(0);
@@ -53,12 +58,14 @@ static RAM_N: AtomicU64 = AtomicU64::new(0);
 /// Parse the memmap, pick the largest RAM region above KERNEL_TOP, print the map.
 pub fn init(start_info: u64) {
     unsafe {
-        let magic = *(start_info as *const u32);
+        // DMAP: the PVH start_info and its memmap are firmware RAM read before any map but the
+        // boot identity exists (§10.16 kind (e)) — kptr must still be the identity here.
+        let magic = *kptr::<u32>(start_info);
         if magic != 0x336E_C578 { println_mem("there is no PVH start_info"); return; }
-        let memmap_paddr = *((start_info + 40) as *const u64);
-        let entries = *((start_info + 48) as *const u32);
+        let memmap_paddr = *kptr::<u64>(start_info + 40);
+        let entries = *kptr::<u32>(start_info + 48);
         if memmap_paddr == 0 || entries == 0 { println_mem("there is no memmap"); return; }
-        let tbl = memmap_paddr as *const MemEntry;
+        let tbl = kptr::<MemEntry>(memmap_paddr);
         let mut best_base = 0u64; let mut best_len = 0u64; let mut total_ram = 0u64;
         crate::println!("talaria: the PVH memory map ({} entries):", entries);
         for i in 0..entries as usize {
@@ -226,7 +233,7 @@ fn rc_grow() {
     let pages = need.div_ceil(FRAME);
     let t = alloc_high(pages, FRAME).or_else(|| {
         let a = alloc_contig(pages)?;
-        unsafe { core::ptr::write_bytes(a as *mut u8, 0, (pages * FRAME) as usize) };
+        unsafe { core::ptr::write_bytes(kptr::<u8>(a), 0, (pages * FRAME) as usize) };
         Some(a)
     });
     match t {
@@ -234,7 +241,7 @@ fn rc_grow() {
             // The old table's contents go with it: nothing is shared yet at this point, but
             // the copy makes the switch correct at any moment rather than at this one only.
             let (old, oldlen) = rc_table();
-            unsafe { core::ptr::copy_nonoverlapping(old as *const u8, a as *mut u8, oldlen) };
+            unsafe { core::ptr::copy_nonoverlapping(old as *const u8, kptr::<u8>(a), oldlen) };
             // The length first: a reader that sees the new base must see its length too.
             RC_LEN.store(pages * FRAME, Ordering::Relaxed);
             RC_PTR.store(a, Ordering::Release);
@@ -574,7 +581,7 @@ pub fn alloc_high(pages: u64, align: u64) -> Option<u64> {
         };
         if let Some(cur) = got {
             fc_alloc(cur, pages);
-            unsafe { core::ptr::write_bytes(cur as *mut u8, 0, (pages * FRAME) as usize) };
+            unsafe { core::ptr::write_bytes(kptr::<u8>(cur), 0, (pages * FRAME) as usize) };
             return Some(cur);
         }
     }
@@ -862,7 +869,7 @@ pub static RC_OUTSIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomi
 fn rc_table() -> (*mut u8, usize) {
     let p = RC_PTR.load(Ordering::Acquire);
     if p == 0 { (core::ptr::addr_of_mut!(REFCNT) as *mut u8, RC_MAX) }
-    else { (p as *mut u8, RC_LEN.load(Ordering::Relaxed) as usize) }
+    else { (kptr::<u8>(p), RC_LEN.load(Ordering::Relaxed) as usize) }
 }
 /// How many frames the refcount table covers (for the check at the bring-up).
 pub fn rc_capacity_frames() -> u64 { rc_table().1 as u64 }

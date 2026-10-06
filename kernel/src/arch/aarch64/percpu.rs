@@ -54,7 +54,7 @@ pub fn init_tpidr(cpu: usize) {
     if cpu >= MAXCPU { return; }
     unsafe {
         CPUS[cpu].cpu = cpu as u64;
-        let base = core::ptr::addr_of!(CPUS[cpu]) as u64;
+        let base = crate::mem::vaddr(core::ptr::addr_of!(CPUS[cpu]));
         core::arch::asm!("msr tpidr_el1, {}", "isb", in(reg) base, options(nomem, nostack));
     }
 }
@@ -71,7 +71,7 @@ pub fn block_ptr() -> *mut PerCpu { block() }
 fn block() -> *mut PerCpu {
     let p: u64;
     unsafe { core::arch::asm!("mrs {}, tpidr_el1", out(reg) p, options(nomem, nostack)); }
-    p as *mut PerCpu
+    crate::mem::vptr::<PerCpu>(p)
 }
 
 /// This core's logical number: from the block when it is set, else the affinity.

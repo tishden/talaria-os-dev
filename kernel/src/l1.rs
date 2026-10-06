@@ -93,7 +93,7 @@ impl NicQ {
             let pt = (ntx * BUF).div_ceil(4096) as u64;
             match (crate::mem::alloc_high(pr, 4096), crate::mem::alloc_high(pt, 4096)) {
                 (Some(a), Some(b)) => {
-                    rxp = a as *mut [u8; BUF]; txp = b as *mut [u8; BUF];
+                    rxp = crate::mem::kptr::<[u8; BUF]>(a); txp = crate::mem::kptr::<[u8; BUF]>(b);
                     crate::println!("l1: the frame buffers above 4 GB: rx={:#x} tx={:#x}", a, b);
                 }
                 _ => crate::println!("l1: there is no memory above 4 GB — the buffers stay in .bss"),
@@ -102,7 +102,9 @@ impl NicQ {
         // Post the receive ring. How many buffers the card is ready to accept it knows
         // itself (`rx_capacity`), while the call is one for the whole ring rather than per buffer.
         let cap = dev.rx_capacity(nrx);
-        for i in 0..cap { dev.rx_post(i, unsafe { rxp.add(i) } as u64); }
+        // The NetDev buffer address is the kernel's VIRTUAL one (virtnet/nicloop make a slice of it);
+        // a driver that hands it to a device translates it itself (ena.rs: `mem::kpa`).
+        for i in 0..cap { dev.rx_post(i, crate::mem::vaddr(unsafe { rxp.add(i) })); }
         dev.flush();
         let mut q = NicQ { dev, rxb: rxp, txb: txp, ntx,
                rx_n: 0, rx_b: 0, rx_t0: 0, rx_best: 0, tx_n: 0, tx_b: 0 };
@@ -185,7 +187,7 @@ impl NicQ {
     }
     /// Return the buffer slot into the receive ring (the call is deferred until flush()).
     pub fn rx_done(&mut self, slot: usize) {
-        let addr = unsafe { self.rxb.add(slot) } as u64;
+        let addr = crate::mem::vaddr(unsafe { self.rxb.add(slot) });
         self.dev.rx_post(slot, addr);
     }
     /// Collect the completed transmissions (free the buffers' slots).
@@ -199,12 +201,12 @@ impl NicQ {
     }
     /// The payload's offset in the transmit buffer (the card's header; 0 — a card without one).
     pub fn tx_hdr(&mut self, slot: usize) -> usize {
-        let addr = unsafe { self.txb.add(slot) } as u64;
+        let addr = crate::mem::vaddr(unsafe { self.txb.add(slot) });
         self.dev.tx_hdr(slot, addr)
     }
     /// Post a frame (slot, n bytes from the buffer's start) into the transmit queue WITHOUT a call.
     pub fn tx_send(&mut self, slot: usize, n: usize) {
-        let addr = unsafe { self.txb.add(slot) } as u64;
+        let addr = crate::mem::vaddr(unsafe { self.txb.add(slot) });
         self.tx_n += 1; self.tx_b += n as u64;
         self.dev.tx_post(slot, addr, n);
     }
@@ -340,7 +342,7 @@ impl SmolDev {
         if let Some((reg, v)) = self.arm {
             // SAFETY: the card's own register window, mapped as device memory for the life of
             // the kernel; the unmask write carries no state of the queues.
-            unsafe { core::ptr::write_volatile(reg as *mut u32, v); }
+            unsafe { core::ptr::write_volatile(crate::mem::devptr::<u32>(reg as u64), v); }
             return;
         }
         if let Some(mut s) = self.sh.try_take() { s.q.arm_intr(); }
@@ -357,8 +359,8 @@ impl SmolDev {
             // SAFETY: the registers of the card's own window, mapped as device memory for the
             // whole life of the kernel; a read of the status and a write of the same bits back.
             unsafe {
-                let v = core::ptr::read_volatile(status as *const u32);
-                if v != 0 { core::ptr::write_volatile(ack as *mut u32, v); }
+                let v = core::ptr::read_volatile(crate::mem::devptr::<u32>(status as u64));
+                if v != 0 { core::ptr::write_volatile(crate::mem::devptr::<u32>(ack as u64), v); }
             }
             return;
         }

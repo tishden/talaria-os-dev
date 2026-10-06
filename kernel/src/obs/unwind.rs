@@ -150,11 +150,12 @@ pub fn selftest() -> bool {
     let mut check = |c: bool, what: &str| { if !c { crate::println!("unwind: FAIL {}", what); ok = false; } };
 
     // The frames go into a fresh piece of memory: it is mapped and belongs to the kernel.
-    let Some(base) = crate::mem::alloc_contig(2) else {
+    // The chain holds VIRTUAL frame pointers (what `walk` follows), so the frame is taken by its kernel address.
+    let Some(base) = crate::mem::alloc_contig(2).map(crate::mem::kva) else {
         crate::println!("unwind: FAIL there is no memory for the synthetic stack");
         return false;
     };
-    let mem = base as *mut u64;
+    let mem = crate::mem::vptr::<u64>(base);
     unsafe { core::ptr::write_bytes(mem as *mut u8, 0, 8192) };
     // A chain of three frames: f0 -> f1 -> f2 -> 0.
     // A frame: [fp] = the next fp, [fp+8] = the return address.
@@ -162,12 +163,12 @@ pub fn selftest() -> bool {
     let f1 = base + 0x200;
     let f2 = base + 0x300;
     unsafe {
-        core::ptr::write_volatile(f0 as *mut u64, f1);
-        core::ptr::write_volatile((f0 + 8) as *mut u64, 0xAAAA_1000);
-        core::ptr::write_volatile(f1 as *mut u64, f2);
-        core::ptr::write_volatile((f1 + 8) as *mut u64, 0xBBBB_2000);
-        core::ptr::write_volatile(f2 as *mut u64, 0);
-        core::ptr::write_volatile((f2 + 8) as *mut u64, 0xCCCC_3000);
+        core::ptr::write_volatile(crate::mem::vptr::<u64>(f0), f1);
+        core::ptr::write_volatile(crate::mem::vptr::<u64>(f0 + 8), 0xAAAA_1000);
+        core::ptr::write_volatile(crate::mem::vptr::<u64>(f1), f2);
+        core::ptr::write_volatile(crate::mem::vptr::<u64>(f1 + 8), 0xBBBB_2000);
+        core::ptr::write_volatile(crate::mem::vptr::<u64>(f2), 0);
+        core::ptr::write_volatile(crate::mem::vptr::<u64>(f2 + 8), 0xCCCC_3000);
     }
     let mut out = [0u64; MAXDEPTH];
     let n = walk(0xDEAD_0000, f0, false, &mut out);
@@ -177,22 +178,22 @@ pub fn selftest() -> bool {
 
     // A LOOP: a frame points at itself. Without the monotonicity check that is an infinite loop
     // INSIDE an interrupt handler, i.e. the machine hangs.
-    unsafe { core::ptr::write_volatile(f0 as *mut u64, f0); }
+    unsafe { core::ptr::write_volatile(crate::mem::vptr::<u64>(f0), f0); }
     let n = walk(1, f0, false, &mut out);
     check(n == 2, "a loop is cut at the very first frame");
 
     // A STEP BACKWARDS: the next frame is below the current one. The stack grows down, so this is garbage.
-    unsafe { core::ptr::write_volatile(f1 as *mut u64, f0); }
+    unsafe { core::ptr::write_volatile(crate::mem::vptr::<u64>(f1), f0); }
     let n = walk(1, f1, false, &mut out);
     check(n == 2, "a step backwards along the stack cuts the chain");
 
     // A FRAME THAT IS TOO LARGE.
-    unsafe { core::ptr::write_volatile(f1 as *mut u64, f1 + MAX_FRAME + 4096); }
+    unsafe { core::ptr::write_volatile(crate::mem::vptr::<u64>(f1), f1 + MAX_FRAME + 4096); }
     let n = walk(1, f1, false, &mut out);
     check(n == 2, "a frame above the ceiling cuts the chain");
 
     // A NULL RETURN ADDRESS: the chain has ended.
-    unsafe { core::ptr::write_volatile(f1 as *mut u64, f2); core::ptr::write_volatile((f1 + 8) as *mut u64, 0); }
+    unsafe { core::ptr::write_volatile(crate::mem::vptr::<u64>(f1), f2); core::ptr::write_volatile(crate::mem::vptr::<u64>(f1 + 8), 0); }
     let n = walk(1, f1, false, &mut out);
     check(n == 1, "a null return address cuts the chain");
 
@@ -204,8 +205,8 @@ pub fn selftest() -> bool {
     unsafe {
         for i in 0..64u64 {
             let p = base + 0x400 + i * 16;
-            core::ptr::write_volatile(p as *mut u64, p + 16);
-            core::ptr::write_volatile((p + 8) as *mut u64, 0x9000_0000 + i);
+            core::ptr::write_volatile(crate::mem::vptr::<u64>(p), p + 16);
+            core::ptr::write_volatile(crate::mem::vptr::<u64>(p + 8), 0x9000_0000 + i);
         }
     }
     let n = walk(1, base + 0x400, false, &mut out);

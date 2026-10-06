@@ -18,9 +18,9 @@ static ECAM_BUS_END: AtomicU32 = AtomicU32::new(0);
 static ECAM_BUS_START: AtomicU32 = AtomicU32::new(0);
 static LAPIC_ADDR: AtomicU64 = AtomicU64::new(0);
 
-unsafe fn rd8(a: u64) -> u8 { core::ptr::read_volatile(a as *const u8) }
-unsafe fn rd32(a: u64) -> u32 { core::ptr::read_unaligned(a as *const u32) }
-unsafe fn rd64(a: u64) -> u64 { core::ptr::read_unaligned(a as *const u64) }
+unsafe fn rd8(a: u64) -> u8 { core::ptr::read_volatile(crate::mem::kptr::<u8>(a)) }
+unsafe fn rd32(a: u64) -> u32 { core::ptr::read_unaligned(crate::mem::kptr::<u32>(a)) }
+unsafe fn rd64(a: u64) -> u64 { core::ptr::read_unaligned(crate::mem::kptr::<u64>(a)) }
 
 unsafe fn sig(a: u64) -> [u8; 4] { [rd8(a), rd8(a + 1), rd8(a + 2), rd8(a + 3)] }
 
@@ -500,7 +500,7 @@ unsafe fn find_rsdp() -> u64 {
         }
         0
     }
-    let ebda = (core::ptr::read_volatile(0x40E as *const u16) as u64) << 4;
+    let ebda = (core::ptr::read_volatile(crate::mem::kptr::<u16>(0x40E)) as u64) << 4;
     if (0x400..0xA_0000).contains(&ebda) {
         let r = probe(ebda, ebda + 1024);
         if r != 0 { return r; }

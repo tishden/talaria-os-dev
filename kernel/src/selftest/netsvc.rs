@@ -93,16 +93,16 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                     let (a, p) = live[k];
                     // the verification of the pattern before the free (the detection of corruption)
                     let pat = a ^ 0xA5A5_A5A5_A5A5_A5A5;
-                    if unsafe { core::ptr::read_volatile(a as *const u64) } != pat { ok = false; }
+                    if unsafe { core::ptr::read_volatile(crate::mem::kptr::<u64>(a)) } != pat { ok = false; }
                     crate::mem::free_contig(a, p);
                     live[k] = live[nlive - 1]; nlive -= 1;
                 } else if let Some(a) = crate::mem::alloc_contig(sz) {
                     let pat = a ^ 0xA5A5_A5A5_A5A5_A5A5;
                     unsafe {
-                        core::ptr::write_volatile(a as *mut u64, pat);                          // the first qword
-                        core::ptr::write_volatile((a + sz * 4096 - 8) as *mut u64, pat ^ i);     // the last one
+                        core::ptr::write_volatile(crate::mem::kptr::<u64>(a), pat);                          // the first qword
+                        core::ptr::write_volatile(crate::mem::kptr::<u64>(a + sz * 4096 - 8), pat ^ i);     // the last one
                     }
-                    if unsafe { core::ptr::read_volatile((a + sz * 4096 - 8) as *const u64) } != pat ^ i { ok = false; }
+                    if unsafe { core::ptr::read_volatile(crate::mem::kptr::<u64>(a + sz * 4096 - 8)) } != pat ^ i { ok = false; }
                     live[nlive] = (a, sz); nlive += 1;
                 }
                 let used = free0.saturating_sub(crate::mem::free_frames() + crate::mem::free_list_pages());

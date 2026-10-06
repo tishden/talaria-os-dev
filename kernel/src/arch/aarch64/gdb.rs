@@ -176,7 +176,7 @@ fn text_writable(addr: u64) -> bool {
     addr & 3 == 0 && present && writable
 }
 fn poke_insn(addr: u64, insn: u32) {
-    unsafe { core::ptr::write_volatile(addr as *mut u32, insn); }
+    unsafe { core::ptr::write_volatile(crate::mem::vptr::<u32>(addr), insn); }
     super::icache::sync(addr, 4);
 }
 fn sw_set(addr: u64) -> bool {
@@ -184,7 +184,7 @@ fn sw_set(addr: u64) -> bool {
     for i in 0..BPMAX { if SW_ADDR[i].load(Ordering::SeqCst) == addr { return true; } }
     for i in 0..BPMAX {
         if SW_ADDR[i].load(Ordering::SeqCst) == 0 {
-            SW_ORIG[i].store(unsafe { core::ptr::read_volatile(addr as *const u32) } as u64, Ordering::SeqCst);
+            SW_ORIG[i].store(unsafe { core::ptr::read_volatile(crate::mem::vptr::<u32>(addr)) } as u64, Ordering::SeqCst);
             SW_ADDR[i].store(addr, Ordering::SeqCst);
             poke_insn(addr, BRK_INSERTED_INSN);
             return true;
@@ -315,7 +315,7 @@ fn stop(f: &mut Frame, ec: u64) {
 /// The parking SGI: stand until gdb releases the machine, then take the fresh registers.
 pub fn park(f: &mut Frame) {
     let me = crate::percpu::cpu_id();
-    if me < NCPU { PARK_FRAME[me].store(f as *mut Frame as u64, Ordering::SeqCst); }
+    if me < NCPU { PARK_FRAME[me].store(crate::mem::vaddr(f as *mut Frame), Ordering::SeqCst); }
     while STOP_ALL.load(Ordering::Acquire) && STEP_OWNER.load(Ordering::Acquire) != me { core::hint::spin_loop(); }
     if me < NCPU { PARK_FRAME[me].store(0, Ordering::SeqCst); }
     apply_if_changed(me);
@@ -364,7 +364,7 @@ fn converse(f: &mut Frame) -> u8 {
                     let pf = PARK_FRAME[c].load(Ordering::SeqCst);
                     if pf != 0 && crate::percpu::cur_task_of(c) == t as u64 { parked = pf; break; }
                 }
-                if parked != 0 { send_regs(unsafe { &*(parked as *const Frame) }); continue; }
+                if parked != 0 { send_regs(unsafe { &*crate::mem::vptr::<Frame>(parked) }); continue; }
                 let mut tf: Frame = unsafe { core::mem::zeroed() };
                 if let Some(c) = crate::sched::saved_ctx(t) {
                     // SAFETY: the saved context IS a trap frame, CTX_WORDS words of it.

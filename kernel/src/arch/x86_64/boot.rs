@@ -225,24 +225,24 @@ pub fn is_multiboot2() -> bool { unsafe { core::ptr::read_volatile(core::ptr::ad
 /// physical address that we give out).
 pub fn mb2_convert(mbi: u64) -> u64 {
     unsafe {
-        let total = core::ptr::read_volatile(mbi as *const u32) as u64;
+        let total = core::ptr::read_volatile(crate::mem::kptr::<u32>(mbi)) as u64;
         let mut p = mbi + 8;
         let end = mbi + total;
         let mut n = 0usize;
         while p + 8 <= end {
-            let ttype = core::ptr::read_volatile(p as *const u32);
-            let tsize = core::ptr::read_volatile((p + 4) as *const u32) as u64;
+            let ttype = core::ptr::read_volatile(crate::mem::kptr::<u32>(p));
+            let tsize = core::ptr::read_volatile(crate::mem::kptr::<u32>(p + 4)) as u64;
             if ttype == 0 || tsize < 8 { break; }
             match ttype {
                 1 => { MB_SI.cmdline_paddr = p + 8; }                       // the cmdline string
                 14 | 15 => { if MB_SI.rsdp_paddr == 0 || ttype == 15 { MB_SI.rsdp_paddr = p + 8; } }
                 6 => {                                                     // the memory map
-                    let esz = core::ptr::read_volatile((p + 8) as *const u32) as u64;
+                    let esz = core::ptr::read_volatile(crate::mem::kptr::<u32>(p + 8)) as u64;
                     let mut e = p + 16;
                     while e + esz <= p + tsize && n < MM_MAX {
-                        let base = core::ptr::read_volatile(e as *const u64);
-                        let len = core::ptr::read_volatile((e + 8) as *const u64);
-                        let mt = core::ptr::read_volatile((e + 16) as *const u32);
+                        let base = core::ptr::read_volatile(crate::mem::kptr::<u64>(e));
+                        let len = core::ptr::read_volatile(crate::mem::kptr::<u64>(e + 8));
+                        let mt = core::ptr::read_volatile(crate::mem::kptr::<u32>(e + 16));
                         // multiboot2: 1 available, 3 ACPI reclaimable, 4 NVS, otherwise occupied
                         let typ = match mt { 1 => 1u32, 3 => 3, 4 => 4, _ => 2 };
                         if len > 0 {
@@ -257,11 +257,11 @@ pub fn mb2_convert(mbi: u64) -> u64 {
             }
             p += (tsize + 7) & !7;
         }
-        MB_SI.memmap_paddr = core::ptr::addr_of!(MB_MM) as u64;
+        MB_SI.memmap_paddr = crate::mem::kpa_of(core::ptr::addr_of!(MB_MM));
         MB_SI.memmap_entries = n as u32;
         let rsdp = (*core::ptr::addr_of!(MB_SI)).rsdp_paddr;
         crate::println!("multiboot2: the MBI {:#x} ({} bytes) -> the start_info: the map has {} records, rsdp={:#x}",
             mbi, total, n, rsdp);
-        core::ptr::addr_of!(MB_SI) as u64
+        crate::mem::kpa_of(core::ptr::addr_of!(MB_SI))
     }
 }

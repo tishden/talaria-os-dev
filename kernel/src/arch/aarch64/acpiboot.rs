@@ -134,7 +134,7 @@ pub fn mcfg_seg0(t: &[u8]) -> Option<u64> {
 /// `ecam` is the MCFG's segment-0 window and identity-accessible.
 unsafe fn pci_uart_bar(ecam: u64, (bus, dev, func): (u8, u8, u8)) -> Option<u64> {
     let cfg = ecam + ((bus as u64) << 20 | (dev as u64 & 0x1F) << 15 | (func as u64 & 7) << 12);
-    let rd = |o: u64| core::ptr::read_volatile((cfg + o) as *const u32);
+    let rd = |o: u64| core::ptr::read_volatile(crate::mem::devptr::<u32>(cfg + o));
     if rd(0) & 0xFFFF == 0xFFFF { return None; }
     let b0 = rd(0x10);
     if b0 & 1 != 0 { return None; }                       // an I/O BAR: no ports on arm64
@@ -143,7 +143,7 @@ unsafe fn pci_uart_bar(ecam: u64, (bus, dev, func): (u8, u8, u8)) -> Option<u64>
     if base == 0 { return None; }
     // Command: memory space on (bit 1); the status half is written as zeros, which its
     // write-one-to-clear bits ignore.
-    core::ptr::write_volatile((cfg + 4) as *mut u32, (rd(4) & 0xFFFF) | 2);
+    core::ptr::write_volatile(crate::mem::devptr::<u32>(cfg + 4), (rd(4) & 0xFFFF) | 2);
     Some(base)
 }
 
@@ -159,7 +159,7 @@ pub fn fadt(t: &[u8], out: &mut Summary) {
 /// # Safety
 /// `rsdp` points at the firmware's RSDP and the tables it names are readable (identity).
 pub unsafe fn summary(rsdp: u64) -> Option<(Summary, Found)> {
-    let at = |a: u64, n: usize| core::slice::from_raw_parts(a as *const u8, n);
+    let at = |a: u64, n: usize| core::slice::from_raw_parts(crate::mem::kptr::<u8>(a), n);
     if rsdp == 0 || at(rsdp, 8) != b"RSD PTR " { return None; }
     let r = at(rsdp, 36);
     let (sdt, wide) = match (r[15] >= 2, le64(r, 24)) {
