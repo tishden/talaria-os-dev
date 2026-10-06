@@ -26,7 +26,8 @@ pub const FN_SLOTS: u32 = fastring::SLOTS;
 pub const REGION_SZ: usize = fastring::REGION_SZ;
 
 // DMAP: dual — the region is a frame (`alloc_contig`) the cell reads through kptr, and ring 3
-// polls it at the same identity address (`talaria_fastmap`, syscall.rs); stage 4 splits them.
+// polls it at the same identity address (`talaria_fastmap`, syscall.rs; under strict that address is
+// mapped in the process explicitly, the kernel's side goes through the map).
 #[inline] fn p_prod(base: usize, ring: usize) -> *mut u32 { crate::mem::kptr((base + ring) as u64) }
 #[inline] fn p_cons(base: usize, ring: usize) -> *mut u32 { crate::mem::kptr((base + ring + fastring::CONS_OFF) as u64) }
 #[inline] fn p_slot(base: usize, ring: usize, i: u32) -> usize { base + ring + fastring::slot_off(i) }

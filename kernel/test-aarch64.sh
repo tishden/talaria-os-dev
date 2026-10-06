@@ -314,6 +314,9 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     run 150 "talaria.mode=proc" ext2
     assert 'sigtest: ALL OK'                                                  'proc-mode: a process by /cell.manifest (the launch path of the databases)'
     assertnot "$BAD|\[fault\]"                                              'proc-mode: no trap, no fault, no unknown syscall'
+    run 150 "talaria.test=sigtest talaria.dmap=strict" ext2
+    assert 'sigtest: ALL OK'                                                  'sigtest: the same under talaria.dmap=strict — no identity RAM in the process spaces (ARM64-PLAN §10.16 stage 4b)'
+    assertnot "$BAD|\[fault\]|RAM BY ITS IDENTITY"                          'sigtest: under strict no trap, no kernel access missed its kva'
     run 150 "talaria.test=mbench" ext2
     assert 'RESULT mbench syscall [0-9]+ ns'                                  'mbench: the syscall primitive is timed (the number is for the stand)'
     assert 'mbench: ALL OK'                                                   'mbench: the primitives of the hot loop with the binary that goes to Linux'
@@ -652,6 +655,10 @@ assert 'dmapid: ALL OK'                                                    'dmap
 assert 'dmapid: the direct map ON at 0x800000000000'                       'dmapid: the direct map is on by default (TTBR0 slot 256, above USER_TOP): kptr goes through it, the identity reads the same word'
 boot 30 "talaria.test=dmapid talaria.dmap=0"
 assert 'dmapid: the direct map OFF at .* outside it: 0 '                     'dmapid: talaria.dmap=0 leaves the identity for everything, and no kva is a miss'
+boot 30 "talaria.test=dmapstrict talaria.dmap=strict"
+assert 'dmapstrict: ALL OK'                                                'dmapstrict: under talaria.dmap=strict a process space and its fork child carry no identity leaf over the map'"'"'s RAM, the kernel writes through the map, the former identity address is the process'"'"'s own (ARM64-PLAN §10.16 stage 4b)'
+boot 30 "talaria.test=identhole talaria.dmap=strict"
+assert 'identhole: ALL CHECKS PASSED'                                      'identhole: under strict a munmap leaves no leaf, the kernel writes the frames through the map, no unintended hole'
 boot 60 "talaria.test=wakeprobe"
 assert 'wakeprobe: a store under wfe: the median wake after 30 us, 100 us, 300 us, 1 ms of sleep: [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: a store wakes a wfe sleeper, timed after four lengths of sleep'
 assert 'wakeprobe: an SGI under wfe: the median wake after .* [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: an SGI wakes a wfe sleeper, timed'

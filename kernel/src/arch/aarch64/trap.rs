@@ -411,6 +411,9 @@ extern "C" fn trap(kind: u64, f: &Frame) -> ! {
         crate::println!("[trap]   x{:<2}={:#018x} x{:<2}={:#018x}", i, f.x(i), i + 1, f.x(i + 1));
     }
     crate::println!("[trap]   x30={:#018x}", f.lr);
+    if crate::paging::strict_miss(f.far) {
+        crate::println!("[trap] <-- RAM BY ITS IDENTITY in a process space (talaria.dmap=strict): a kernel access that missed its kva");
+    }
     if crate::mem::in_kwin(f.far) && crate::paging::kwin_frame(f.far).is_none() {
         let slot = (f.far - crate::mem::KWIN_BASE) / (crate::sched::KSTACK_PAGES * 4096);
         let page = (f.far - crate::mem::KWIN_BASE) / 4096 % crate::sched::KSTACK_PAGES;

@@ -376,6 +376,9 @@ for spec in \
   "talaria.test=dmapid|dmapid: ALL OK|dmapid: the address kinds round-trip (a low and a high frame, a .bss and a stack word: physical -> kernel pointer -> physical, written and read back) — the contract the direct map keeps (ARM64-PLAN §10.16)" \
   "talaria.test=dmapid|dmapid: the direct map ON at 0xffff800000000000|dmapid: the direct map is on by default (slot 256): every kptr goes through it, a word written there reads back through the identity" \
   "talaria.test=dmapid talaria.dmap=0|dmapid: the direct map OFF at .* outside it: 0 |dmapid: talaria.dmap=0 leaves the identity for everything (the A/B and the fallback), and no kva is a miss" \
+  "talaria.test=dmapstrict talaria.dmap=strict|dmapstrict: ALL OK|dmapstrict: under talaria.dmap=strict a process space and its fork child carry no identity leaf over the map's RAM, the kernel's space keeps them, the kernel's write through the map does not show in the process's own page at the frame's former identity address (ARM64-PLAN §10.16 stage 4b)" \
+  "talaria.test=dmapstrict talaria.dmap=strict talaria.kwin=0|talaria.dmap=strict REFUSED|dmapstrict: strict refuses to start without the stacks' window (an identity kernel stack would be RAM by its identity)" \
+  "talaria.test=identhole talaria.dmap=strict|identhole: ALL CHECKS PASSED|identhole: under strict a munmap leaves no leaf at all (not the identity one), the kernel writes the frames through the map, no unintended hole" \
   "talaria.test=sharedpd|sharedpd: the gigabyte 0x80000000 was split for a device window: OK|sharedpd: the shared gigabyte of the kernel PDPT is split into a directory+table (like the LLQ window of ENA on EC2)" \
   "talaria.test=sharedpd|sharedpd: the kernel's directory after the AS teardown: OK|sharedpd: A MINE — tearing a process's AS down freed the kernel's SHARED directory (the frame into the free list -> a #PF in the NVMe doorbell under any CR3; PostgreSQL on EC2 died after 0.3 s)" \
   "talaria.test=fault|FLIGHT RECORDER: [0-9]+ events|flightrec: the crash dump + the ring of the events (the post-mortem)" \
@@ -554,6 +557,9 @@ q=$(bootd "talaria.test=sigtest" /img/disk_ext2.img); sleep 2
 assert "sigtest: MAP_SHARED at 0x6[0-9a-f]{11}, MAP_SHARED\|MAP_FIXED at 0x6f0000000000" "proc: an anonymous MAP_SHARED has an address of its own (the mmap region, not the frames' identity) and a MAP_SHARED|MAP_FIXED is honoured — both stay shared after a fork (ARM64-PLAN §10.16 stage 4a)"
 assert "sigtest: SysV shm at 0x70[0-9a-f]{10}, POSIX shm at 0x70[0-9a-f]{10}" "proc: SysV and POSIX shm in the named window (one non-identity address in every process, so a futex in it still wakes across processes), shared after a fork (ARM64-PLAN §10.16 stage 4a)"
 assert "sigtest: ALL OK" "proc: the fd tables/dup2/pipe/cwd/readdir + the signals(handler,mask,kill,SIGCHLD,SIGTERM,a sigwait thread,signalfd) + fork(COW,mprotect-RO,MAP_SHARED,SysV shm,the memory at exit) + eventfd/timerfd/procfs/openat(dirfd)/a file mmap"; stopq $q
+q=$(bootd "talaria.test=sigtest talaria.dmap=strict" /img/disk_ext2.img); sleep 2
+assert "sigtest: ALL OK" "proc: the same under talaria.dmap=strict — no identity RAM in the process spaces, fork/COW/MAP_SHARED/shm/signals intact (ARM64-PLAN §10.16 stage 4b)"
+refute "RAM BY ITS IDENTITY|CRASH DUMP" "proc: under strict no kernel access missed its kva, no crash"; stopq $q
 q=$(bootd "talaria.test=ext2v" /img/disk_ext2.img); sleep 1
 assert "ext2v: .*PERSISTED OK" "ext2v: the data survived a reboot (the write-back cache was flushed at the fsync/exit_group)"; stopq $q
 

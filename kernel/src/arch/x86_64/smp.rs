@@ -585,16 +585,24 @@ pub fn start_ap(apic_id: u32) -> bool {
         // reference. The guard is obligatory: last time the stack went below the bottom into the cell's common
         // region and that looked like a corruption of the scheduler (a #UD with rip=3)
         // rather than like a stack overflow. Now there will be an honest #PF at the guard's address.
-        let sbase = crate::mem::alloc_contig(9).unwrap();
-        crate::paging::guard(sbase);
-        let stack = sbase + 9 * 4096; // the top of the AP's stack
+        // With the stacks' window both stacks come from it (the trampoline loads rsp in long
+        // mode under the kernel's CR3, which has the window): an identity frame is RAM by its
+        // identity, and under `talaria.dmap=strict` a process space has none.
+        let stack = match crate::sched::kstack_from_window() { Some(top) => top, None => {
+            let sbase = crate::mem::alloc_contig(9).unwrap();
+            crate::paging::guard(sbase);
+            sbase + 9 * 4096 // the top of the AP's stack
+        } };
         AP_STACK_TOP.store(stack, Ordering::SeqCst);
         // The pickup loop's stack of the same core (AP_MODE=2): 4 pages + a guard.
         // We allocate it HERE, on the BSP and before the INIT: an AP enters ap_loop already with a ready
         // stack, while in .bss it occupies nothing (it was 16 KB × MAXCPU).
-        let lbase = crate::mem::alloc_contig(5).unwrap();
-        crate::paging::guard(lbase);
-        crate::sched::set_ap_stack(lg, lbase + 5 * 4096);
+        let ltop = match crate::sched::kstack_from_window() { Some(top) => top, None => {
+            let lbase = crate::mem::alloc_contig(5).unwrap();
+            crate::paging::guard(lbase);
+            lbase + 5 * 4096
+        } };
+        crate::sched::set_ap_stack(lg, ltop);
 
         let src = tramp_start as *const () as *const u8;
         let len = (crate::mem::vaddr(tramp_end as *const ()) - crate::mem::vaddr(tramp_start as *const ())) as usize;

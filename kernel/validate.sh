@@ -10,7 +10,8 @@ set -u
 # `stat:` has grown to fifty lines and pushed them out: a healthy ClickHouse and JVM showed a FAIL. Let them print everything.
 export TAIL=1000000
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-K=kernel/target/x86_64-talaria/release/talaria
+# TAL_KERNEL= a candidate build, as in test.sh (say, one built with TALARIA_STRICT=1).
+K=${TAL_KERNEL:-kernel/target/x86_64-talaria/release/talaria}
 # The stand image — a knob for the same reason as in test.sh: the image pins the QEMU
 # version the numbers were measured against.
 IMAGE=${TAL_IMAGE:-talaria-qemu2}

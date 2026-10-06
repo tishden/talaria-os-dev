@@ -220,6 +220,7 @@ extern "C" fn rust_main(start_info: u64) -> ! {
     paging::init(); // our own page tables (1G) instead of the static boot tables
     paging::dmap_init(cmdline::num(cmdline, "talaria.dmap") != Some(0)); // RAM once more at mem::DMAP_BASE (ARM64-PLAN §10.16)
     paging::kwin_init(cmdline::num(cmdline, "talaria.kwin") != Some(0)); // the kernel stacks at addresses of their own, a guard under each in every space
+    paging::strict_init(cmdline::has(cmdline, "talaria.dmap", "strict")); // stage 4b: RAM's identity out of the process spaces
     fr::record(fr::PAGING, 0);
     rebootat("paging", cmdline);
 
@@ -586,7 +587,7 @@ fn parse_tuning_opts(cmdline: &str) {
     if cmdline::flag(cmdline, "talaria.nobalance") { affinity::NOBALANCE.store(true, core::sync::atomic::Ordering::SeqCst); }
     if cmdline::flag(cmdline, "talaria.trefs") { crate::proc::TRACE_REF.store(true, core::sync::atomic::Ordering::SeqCst); }
     if cmdline::flag(cmdline, "talaria.sysprof") { syscall::SYSPROF.store(true, core::sync::atomic::Ordering::SeqCst); }
-    if cmdline::flag(cmdline, "talaria.sharedid") { syscall::SHARED_IDENT.store(true, core::sync::atomic::Ordering::SeqCst); }
+    if cmdline::flag(cmdline, "talaria.sharedid") && !paging::strict() { syscall::SHARED_IDENT.store(true, core::sync::atomic::Ordering::SeqCst); }
     if cmdline::num(cmdline, "talaria.uacheck") == Some(0) { uaccess::ENABLED.store(false, core::sync::atomic::Ordering::SeqCst); }
     // `talaria.sysrow=1,18` — print these syscalls in the `stat:` block even when
     // they did not make the top ten by time (`write` under mongodb never

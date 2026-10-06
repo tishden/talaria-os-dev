@@ -2621,7 +2621,11 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             } } // pause — until a signal
         1000 => { // talaria_fastmap -> the base of the shared region (ring 3's access is explicit, in this AS)
             let r = crate::fastpath::region();
-            if r != 0 { crate::paging::protect(r, (crate::fastpath::REGION_SZ as u64 + 4095) & !4095, true, false); }
+            let len = (crate::fastpath::REGION_SZ as u64 + 4095) & !4095;
+            // under strict a process space has no identity leaf there: the frames are mapped at
+            // their own address explicitly, shared (fork hands an identity shared leaf on as it is)
+            if r != 0 && crate::paging::strict() && crate::sched::task_cr3(crate::sched::current_id()) != 0 { shwin_attach(r, r, len); }
+            else if r != 0 { crate::paging::protect(r, len, true, false); }
             r
         }
         1001 => 0, // a nop syscall (a micro-benchmark of the price of ring3->ring0->ring3)
