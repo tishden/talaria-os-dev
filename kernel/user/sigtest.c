@@ -88,12 +88,18 @@ int main(int argc, char **argv) {
   int shmid = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600);
   int *sv = shmid >= 0 ? (int *)shmat(shmid, 0, 0) : (int *)-1; if (sv != (int *)-1) *sv = 1;
   CHECK(shmid >= 0 && sv != (int *)-1, "shmget/shmat");
+  /* a POSIX shm object: shm_open + ftruncate + mmap(MAP_SHARED, fd) */
+  int sfd = shm_open("/sigtest.shm", O_CREAT | O_RDWR, 0600);
+  int *ps = MAP_FAILED;
+  if (sfd >= 0 && ftruncate(sfd, 4096) == 0) ps = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
+  if (ps != MAP_FAILED) *ps = 1;
+  printf("sigtest: SysV shm at %p, POSIX shm at %p\n", (void *)sv, (void *)ps);
   /* 6. fork */
   int p2[2]; pipe(p2); got_chld = 0; got_usr1 = 0;
   pid_t me = getpid();
   pid_t pid = fork();
   if (pid == 0) {
-    *shared = 42; *priv = 42; if (sv != (int *)-1) *sv = 43; if (fx != MAP_FAILED) *fx = 44;
+    *shared = 42; *priv = 42; if (sv != (int *)-1) *sv = 43; if (fx != MAP_FAILED) *fx = 44; if (ps != MAP_FAILED) *ps = 45;
     printf("sigtest: child pid=%d ppid=%d (parent %d) %s\n", getpid(), getppid(), me, getppid() == me ? "ok" : "MISMATCH");
     write(p2[1], "ready", 5);
     while (!got_usr1) pause();
@@ -104,6 +110,7 @@ int main(int argc, char **argv) {
   CHECK(read(p2[0], rb, 5) == 5, "child wrote to pipe");
   CHECK(*shared == 42, "MAP_SHARED visible to parent");
   CHECK(fx != MAP_FAILED && *fx == 44, "MAP_SHARED|MAP_FIXED visible to parent");
+  CHECK(ps != MAP_FAILED && *ps == 45, "POSIX shm visible to parent");
   CHECK(*priv == 1, "MAP_PRIVATE isolated (COW)");
   CHECK(sv == (int *)-1 || *sv == 43, "sysv shm visible to parent");
   CHECK(kill(pid, SIGUSR1) == 0, "kill child SIGUSR1");
