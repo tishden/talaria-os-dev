@@ -586,6 +586,7 @@ fn parse_tuning_opts(cmdline: &str) {
     if cmdline::flag(cmdline, "talaria.nobalance") { affinity::NOBALANCE.store(true, core::sync::atomic::Ordering::SeqCst); }
     if cmdline::flag(cmdline, "talaria.trefs") { crate::proc::TRACE_REF.store(true, core::sync::atomic::Ordering::SeqCst); }
     if cmdline::flag(cmdline, "talaria.sysprof") { syscall::SYSPROF.store(true, core::sync::atomic::Ordering::SeqCst); }
+    if cmdline::flag(cmdline, "talaria.sharedid") { syscall::SHARED_IDENT.store(true, core::sync::atomic::Ordering::SeqCst); }
     if cmdline::num(cmdline, "talaria.uacheck") == Some(0) { uaccess::ENABLED.store(false, core::sync::atomic::Ordering::SeqCst); }
     // `talaria.sysrow=1,18` — print these syscalls in the `stat:` block even when
     // they did not make the top ten by time (`write` under mongodb never
