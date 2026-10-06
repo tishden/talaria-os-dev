@@ -853,6 +853,28 @@ p99 of 34 us needs ~6 k of the 600 k ticks beyond it. So the tail is not the wak
 either; what `wakepreempt=0` changes to remove it is open (in `wfi+ipi` the same histogram is
 5.6-5.9 k under 5 us and 108-117 k at 5-20 us: slower wakes, no tail). Under TCG, for comparison: 0.6-1.6 / 4.3-6.2 / 16-51 us.
 
+**The tail is the oversubscription's (2026-10-06).** mdpipe runs five threads (the generator,
+two workers, the sink, main) and the variants above gave them two cores. One batch on
+`c7g.xlarge` (4 vCPUs) with `infra/aws/variants.sh` — one AMI built with no `talaria.smp` and
+the core count in each variant's user-data (a user-data tail is appended and the FIRST
+occurrence of a key wins, so a baked `smp` cannot be overridden), the console confirming the
+online mask each time:
+
+| | p50 | p90 | p99 | p99.9 | wakeups | transplants at a wakeup |
+| --- | --- | --- | --- | --- | --- | --- |
+| Talaria `smp=2`, wfe | 1.61 | 4.1 | **32.9** | 37.4 | 289 k | 12 |
+| Talaria `smp=4`, wfe | 1.30 | 1.7 | **2.6** | 12.3 | 48 k | 117 k |
+| Talaria `smp=2`, `sync=hlt` | 2.59 | 6.7 | 7.0 | 9.1 | 123 k | 3 |
+| Talaria `smp=2`, `wakepreempt=0` | 2.55 | 6.7 | 8.1 | 37.0 | 264 k | — |
+| Linux 6.18, 4 vCPUs, 3 runs | 3.5-3.8 | 4.0-4.1 | 4.6-4.7 | 4.8-7.0 | | |
+
+With a core for every thread that is not asleep the default tier is Talaria's again (p99 2.6
+against Linux's 4.6 on the same type), and the woken thread mostly goes to an idle core (117 k
+transplants) instead of to a core whose futex waiter sleeps in `wfe` as its current task and
+must be kicked off it. The 33 us is what that eviction path costs when there is no idle core;
+which step of it (the kick that a running core ignores, the threshold of `wakepreempt`, the
+yield of the evicted waiter) is still to be traced per tick.
+
 **The cache counter on a `c7g.large`** (`talaria.test=pmu`, `pmu-ev:` — each event on the last
 counter across a random walk of 64 MB, 1 M line loads): L2D_CACHE_REFILL (0x17) 0.99 per
 line, L2D_CACHE (0x16) 2.00, L1D_CACHE_REFILL 0.99, L1D_CACHE 1.00, MEM_ACCESS 1.00,

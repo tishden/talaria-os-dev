@@ -826,7 +826,12 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     What `wakepreempt=0` changes is the next item; `talaria.sync=hlt` and `wakepreempt=0` are the
     measured levers on a Graviton VM meanwhile. **An instrument that names a mechanism is not yet
     the cause: check its count against the size of the effect.** **Measure the primitive before blaming it — and when the probe says "not
-    it", the probe stays as an instrument and the policy that used it does not.**
+    it", the probe stays as an instrument and the policy that used it does not.** The next day
+    the variable nobody had varied was varied: the core count. Five threads on two cores give
+    p99 33 us; the same AMI on four cores gives 2.6 us, under Linux's 4.6 (MEASUREMENTS §10.11,
+    `infra/aws/variants.sh`). The tail lives where a woken thread has no idle core and must
+    evict a futex waiter sleeping in `wfe` as its core's current task. **Before naming the
+    mechanism, vary the resource it competes for.**
 48. **"The low memory is the shared mappings', and the cache ate half of it."** The first Graviton
     scoreboard's PostgreSQL bring-up gave the Talaria side a ceiling of 0: the postmaster had died at
     start with `could not map anonymous shared memory: Out of memory`. A `MAP_SHARED` mapping is
