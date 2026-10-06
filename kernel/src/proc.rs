@@ -259,7 +259,7 @@ static PSEQ: [core::sync::atomic::AtomicU32; NPIPE] =
 /// An event on the pipe i: move the word and wake both sides.
 fn pipe_bump(i: usize) {
     PSEQ[i].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-    crate::sync::wake_addr_kernel(PSEQ[i].as_ptr() as u64, usize::MAX);
+    crate::sync::wake_addr_kernel(crate::mem::vaddr(PSEQ[i].as_ptr()), usize::MAX);
     crate::netsys::mix_kick(); // a pipe in an epoll/poll set (`talaria.netmix=`)
 }
 pub fn pipe_is(h: i64) -> bool { h >= PIPE_BASE && ((h - PIPE_BASE) as usize) < NPIPE * 2 && unsafe { let i = ((h - PIPE_BASE) / 2) as usize; PR[i] || PW[i] } }
@@ -387,17 +387,17 @@ pub fn sigaction(sig: u64, act: u64, old: u64) -> i64 {
     let s = sig as usize;
     unsafe {
         if old != 0 {
-            core::ptr::write_unaligned(old as *mut u64, SA_HANDLER[p][s]);
-            core::ptr::write_unaligned((old + 8) as *mut u64, SA_FLAGS[p][s]);
-            core::ptr::write_unaligned((old + 16) as *mut u64, SA_RESTORER[p][s]);
-            core::ptr::write_unaligned((old + 24) as *mut u64, SA_MASK[p][s]);
+            core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(old), SA_HANDLER[p][s]);
+            core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(old + 8), SA_FLAGS[p][s]);
+            core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(old + 16), SA_RESTORER[p][s]);
+            core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(old + 24), SA_MASK[p][s]);
         }
         if act != 0 {
             if sig == 9 || sig == 19 { return -22; } // SIGKILL/SIGSTOP
-            SA_HANDLER[p][s] = core::ptr::read_unaligned(act as *const u64);
-            SA_FLAGS[p][s] = core::ptr::read_unaligned((act + 8) as *const u64);
-            SA_RESTORER[p][s] = core::ptr::read_unaligned((act + 16) as *const u64);
-            SA_MASK[p][s] = core::ptr::read_unaligned((act + 24) as *const u64);
+            SA_HANDLER[p][s] = core::ptr::read_unaligned(crate::uaccess::uptr::<u64>(act));
+            SA_FLAGS[p][s] = core::ptr::read_unaligned(crate::uaccess::uptr::<u64>(act + 8));
+            SA_RESTORER[p][s] = core::ptr::read_unaligned(crate::uaccess::uptr::<u64>(act + 16));
+            SA_MASK[p][s] = core::ptr::read_unaligned(crate::uaccess::uptr::<u64>(act + 24));
         }
     }
     0
@@ -407,9 +407,9 @@ pub fn sigprocmask(how: u64, set: u64, old: u64) -> i64 {
     let t = crate::sched::current_id();
     unsafe {
         let cur = SIGMASK[t];
-        if old != 0 { core::ptr::write_unaligned(old as *mut u64, cur); }
+        if old != 0 { core::ptr::write_unaligned(crate::uaccess::uptr::<u64>(old), cur); }
         if set != 0 {
-            let m = core::ptr::read_unaligned(set as *const u64) & !((1u64 << 8) | (1u64 << 18)); // SIGKILL/SIGSTOP are not blocked
+            let m = core::ptr::read_unaligned(crate::uaccess::uptr::<u64>(set)) & !((1u64 << 8) | (1u64 << 18)); // SIGKILL/SIGSTOP are not blocked
             SIGMASK[t] = match how { 0 => cur | m, 1 => cur & !m, 2 => m, _ => return -22 };
         }
     }
@@ -572,7 +572,7 @@ static mut PATHBUF: [[[u8; 512]; 2]; crate::sched::NTASKS] =
 pub fn resolve_slot(ptr: u64, slot: usize) -> &'static [u8] { resolve_base(None, ptr, slot) }
 /// The *at variants: a relative path from the directory dirfd (a user fd) instead of the cwd; AT_FDCWD/an absolute one -> as in resolve.
 pub fn resolve_at_slot(dirfd: i64, ptr: u64, slot: usize) -> &'static [u8] {
-    let first = if ptr == 0 { 0 } else { unsafe { core::ptr::read_volatile(ptr as *const u8) } };
+    let first = if ptr == 0 { 0 } else { unsafe { core::ptr::read_volatile(crate::uaccess::uptr::<u8>(ptr)) } };
     if dirfd == AT_FDCWD || first == b'/' { return resolve_base(None, ptr, slot); }
     let h = tr(dirfd as u64);
     let base = if h >= 0 && crate::ext2::active() { crate::ext2::fd_path(h) } else { b"" };
@@ -588,7 +588,7 @@ fn resolve_base(base: Option<&[u8]>, ptr: u64, slot: usize) -> &'static [u8] {
         &mut *(addr_of_mut!(PATHBUF) as *mut [u8; 512]).add(t * 2 + (slot & 1))
     };
     let mut n = 0usize;
-    let first = if ptr == 0 { 0 } else { unsafe { core::ptr::read_volatile(ptr as *const u8) } };
+    let first = if ptr == 0 { 0 } else { unsafe { core::ptr::read_volatile(crate::uaccess::uptr::<u8>(ptr)) } };
     if first != b'/' { // relative: start from the base (the dirfd directory) or the cwd
         match base {
             Some(b) => { let l = b.len().min(400); out[..l].copy_from_slice(&b[..l]); n = l; }
@@ -601,12 +601,12 @@ fn resolve_base(base: Option<&[u8]>, ptr: u64, slot: usize) -> &'static [u8] {
     // the components of the input
     let mut i = 0usize;
     loop {
-        let c = if ptr == 0 { 0 } else { unsafe { core::ptr::read_volatile((ptr as *const u8).add(i)) } };
+        let c = if ptr == 0 { 0 } else { unsafe { core::ptr::read_volatile(crate::uaccess::uptr::<u8>(ptr).add(i)) } };
         if c == 0 || i > 400 { break; }
         if c == b'/' { i += 1; continue; }
         let s = i;
-        while { let d = unsafe { core::ptr::read_volatile((ptr as *const u8).add(i)) }; d != 0 && d != b'/' && i < 400 } { i += 1; }
-        let comp = unsafe { core::slice::from_raw_parts((ptr as *const u8).add(s), i - s) };
+        while { let d = unsafe { core::ptr::read_volatile(crate::uaccess::uptr::<u8>(ptr).add(i)) }; d != 0 && d != b'/' && i < 400 } { i += 1; }
+        let comp = unsafe { core::slice::from_raw_parts(crate::uaccess::uptr::<u8>(ptr).add(s), i - s) };
         if comp == b"." { continue; }
         if comp == b".." {
             // remove the last component
@@ -634,7 +634,7 @@ pub fn getcwd(buf: u64, size: u64) -> i64 {
     let p = cur_proc(); ensure(p);
     let l = unsafe { CWDL[p] };
     if buf == 0 || (size as usize) < l + 1 { return -34; } // ERANGE
-    unsafe { core::ptr::copy_nonoverlapping(CWD[p].as_ptr(), buf as *mut u8, l); core::ptr::write((buf as *mut u8).add(l), 0); }
+    unsafe { core::ptr::copy_nonoverlapping(CWD[p].as_ptr(), crate::uaccess::uptr::<u8>(buf), l); core::ptr::write(crate::uaccess::uptr::<u8>(buf).add(l), 0); }
     (l + 1) as i64
 }
 #[allow(dead_code)] fn _unused() { let _ = Ordering::Relaxed; }

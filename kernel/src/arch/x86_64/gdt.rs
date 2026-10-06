@@ -51,7 +51,7 @@ pub unsafe fn setup_gdt_cpu(cpu: usize, kstack_top: u64) {
     g[5] = 0x0020FA0000000000; // 0x28 user code64 (DPL3) -> CS 0x2B
     TSS[cpu].rsp0 = kstack_top;
     super::percpu::set_kstack_top(kstack_top);
-    let base = core::ptr::addr_of!(TSS[cpu]) as u64;
+    let base = crate::mem::vaddr(core::ptr::addr_of!(TSS[cpu]));
     let limit = (size_of::<Tss>() - 1) as u64;
     let low = limit & 0xFFFF
         | (base & 0xFF_FFFF) << 16
@@ -61,7 +61,7 @@ pub unsafe fn setup_gdt_cpu(cpu: usize, kstack_top: u64) {
         | ((base >> 24) & 0xFF) << 56;
     g[6] = low;                  // the TSS descriptor (16 bytes) in slots 6..8
     g[7] = base >> 32;
-    let gdtr = Gdtr { limit: (8 * 8 - 1) as u16, base: core::ptr::addr_of!(GDT[cpu]) as u64 };
+    let gdtr = Gdtr { limit: (8 * 8 - 1) as u16, base: crate::mem::vaddr(core::ptr::addr_of!(GDT[cpu])) };
     core::arch::asm!("lgdt [{}]", in(reg) &gdtr, options(readonly, nostack, preserves_flags));
     core::arch::asm!("ltr {0:x}", in(reg) 0x30u16, options(nostack, preserves_flags));
 }

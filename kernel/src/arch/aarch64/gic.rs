@@ -54,9 +54,9 @@ const PRIORITY: u8 = 0x80;
 /// What `ack` returns when nothing is pending.
 pub const SPURIOUS: u32 = 1023;
 
-#[inline] unsafe fn r32(a: u64) -> u32 { core::ptr::read_volatile(a as *const u32) }
-#[inline] unsafe fn w32(a: u64, v: u32) { core::ptr::write_volatile(a as *mut u32, v) }
-#[inline] unsafe fn w64(a: u64, v: u64) { core::ptr::write_volatile(a as *mut u64, v) }
+#[inline] unsafe fn r32(a: u64) -> u32 { core::ptr::read_volatile(crate::mem::devptr::<u32>(a)) }
+#[inline] unsafe fn w32(a: u64, v: u32) { core::ptr::write_volatile(crate::mem::devptr::<u32>(a), v) }
+#[inline] unsafe fn w64(a: u64, v: u64) { core::ptr::write_volatile(crate::mem::devptr::<u64>(a), v) }
 
 /// Where the frames are (from the tree or the MADT).
 /// The frames are kept as the kernel's pointers (`mmu::mmio_va`: the devices' alias for GB0).
@@ -96,7 +96,7 @@ fn my_redistributor() -> Option<u64> {
     if f == 0 { return None; }
     loop {
         if f + GICR_FRAME > end { return None; }
-        let typer = unsafe { core::ptr::read_volatile((f + GICR_TYPER) as *const u64) };
+        let typer = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u64>(f + GICR_TYPER)) };
         let aff = typer >> 32;
         let aff_mpidr = (aff & 0xFF_FFFF) | ((aff >> 24) << 32);
         if aff_mpidr == me { return Some(f); }
@@ -114,7 +114,7 @@ pub fn redistributor_of(mpidr: u64) -> Option<(u64, u64)> {
     if f == 0 { return None; }
     loop {
         if f + GICR_FRAME > end { return None; }
-        let typer = unsafe { core::ptr::read_volatile((f + GICR_TYPER) as *const u64) };
+        let typer = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u64>(f + GICR_TYPER)) };
         let aff = typer >> 32;
         if (aff & 0xFF_FFFF) | ((aff >> 24) << 32) == mpidr { return Some((f, typer)); }
         if typer & TYPER_LAST != 0 { return None; }

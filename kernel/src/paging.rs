@@ -45,6 +45,7 @@
 //! ring 3 only explicitly, by `protect`.
 
 use crate::arch::mmu;
+use crate::mem::{kpa_of, kptr};
 
 /// Build our own tables (1G identity, GB3 uncached for MMIO) and load CR3.
 pub fn init() {
@@ -76,10 +77,10 @@ pub fn init() {
     // nobody else holds them), they are filled COMPLETELY before the CR3 write, and the
     // CR3 write is what publishes them.
     unsafe {
-        core::ptr::write_bytes(pml4 as *mut u8, 0, 4096);
-        core::ptr::write_bytes(pdpt as *mut u8, 0, 4096);
-        core::ptr::write_bytes(pd0 as *mut u8, 0, 4096);
-        pte_w(pml4 as *mut Pte, pdpt | PTE_P | PTE_RW | PTE_US);
+        core::ptr::write_bytes(kptr::<u8>(pml4), 0, 4096);
+        core::ptr::write_bytes(kptr::<u8>(pdpt), 0, 4096);
+        core::ptr::write_bytes(kptr::<u8>(pd0), 0, 4096);
+        pte_w(kptr::<Pte>(pml4), pdpt | PTE_P | PTE_RW | PTE_US);
         // What each of the four identity gigabytes is comes from the architecture: on x86 GB0 holds
         // the kernel and the user region, GB1-2 are RAM, GB3 is the MMIO hole; on arm64 `virt`
         // GB0 is the devices and the kernel's gigabyte is GB1.
@@ -91,16 +92,16 @@ pub fn init() {
                         let abs = gb * 512 + j; // the 2M index in the machine's address space
                         let mut e = (abs << 21) | PTE_P | PTE_RW | PTE_PS;
                         if abs != 0 && !(abs >= sup_lo && abs < sup_hi) { e |= PTE_US; } // U/S outside the kernel's image
-                        pte_w((pd0 as *mut Pte).add(j as usize), e);
+                        pte_w(kptr::<Pte>(pd0).add(j as usize), e);
                     }
-                    pte_w((pdpt as *mut Pte).add(gb as usize), pd0 | PTE_P | PTE_RW | PTE_US);
+                    pte_w(kptr::<Pte>(pdpt).add(gb as usize), pd0 | PTE_P | PTE_RW | PTE_US);
                 }
-                mmu::GbKind::Ram1G => pte_w((pdpt as *mut Pte).add(gb as usize), (gb << 30) | PTE_P | PTE_RW | PTE_PS),
+                mmu::GbKind::Ram1G => pte_w(kptr::<Pte>(pdpt).add(gb as usize), (gb << 30) | PTE_P | PTE_RW | PTE_PS),
                 // arm64's GB0 of devices is NOT mapped by its identity: the kernel reaches it through
                 // the devices' alias (below), and the gigabyte is free for a workload whose image is
                 // linked there (ClickHouse's arm64 ET_EXEC: 2 MB..458 MB) — every process copies this L1
                 mmu::GbKind::Device if gb == 0 && cfg!(target_arch = "aarch64") => {}
-                mmu::GbKind::Device => pte_w((pdpt as *mut Pte).add(gb as usize), (gb << 30) | PTE_P | PTE_RW | PTE_PS | PTE_UC),
+                mmu::GbKind::Device => pte_w(kptr::<Pte>(pdpt).add(gb as usize), (gb << 30) | PTE_P | PTE_RW | PTE_PS | PTE_UC),
             }
         }
         // arm64: the devices' alias (`mmu::DEV_SLOT`) — GB0's Device block once more in a slot
@@ -108,9 +109,9 @@ pub fn init() {
         #[cfg(target_arch = "aarch64")]
         {
             let dl1 = crate::mem::alloc_frame().expect("frame: the devices' alias");
-            core::ptr::write_bytes(dl1 as *mut u8, 0, 4096);
-            pte_w(dl1 as *mut Pte, PTE_P | PTE_RW | PTE_PS | PTE_UC);
-            pte_w((pml4 as *mut Pte).add(mmu::DEV_SLOT), dl1 | PTE_P | PTE_RW);
+            core::ptr::write_bytes(kptr::<u8>(dl1), 0, 4096);
+            pte_w(kptr::<Pte>(dl1), PTE_P | PTE_RW | PTE_PS | PTE_UC);
+            pte_w(kptr::<Pte>(pml4).add(mmu::DEV_SLOT), dl1 | PTE_P | PTE_RW);
         }
         mmu::set_root(pml4);
     }
@@ -159,7 +160,7 @@ unsafe fn pte_r(p: *const Pte) -> u64 { mmu::dec(core::ptr::read_volatile(p).0) 
 #[inline(always)]
 #[track_caller]
 unsafe fn pte_w(p: *mut Pte, canonical: u64) {
-    if PTLOG_ON.load(core::sync::atomic::Ordering::Relaxed) { ptlog(p as u64, core::ptr::read_volatile(p).0, mmu::enc(canonical), core::panic::Location::caller().line()); }
+    if PTLOG_ON.load(core::sync::atomic::Ordering::Relaxed) { ptlog(crate::mem::vaddr(p), core::ptr::read_volatile(p).0, mmu::enc(canonical), core::panic::Location::caller().line()); }
     core::ptr::write_volatile(p, Pte(mmu::enc(canonical)))
 }
 
@@ -207,10 +208,10 @@ pub fn ptlog_dump(root: u64, vaddr: u64) {
     if !PTLOG_ON.load(Relaxed) { return; }
     // SAFETY: P1 + P2 — a read-only walk for a diagnosis.
     let Some(pt) = (unsafe { pt_for(root, vaddr, false) }) else { crate::println!("ptlog: {:#x} has no 4K entry", vaddr); return; };
-    let e = unsafe { pt.add(pt_idx(vaddr)) } as u64;
+    let e = crate::mem::vaddr(unsafe { pt.add(pt_idx(vaddr)) });
     let n = PTLOG_I.load(Relaxed);
     let from = n.saturating_sub(PTLOG_N);
-    crate::println!("ptlog: the entry of {:#x} at {:#x} (now {:#x}); {} writes journaled:", vaddr, e, unsafe { core::ptr::read_volatile(e as *const u64) }, n);
+    crate::println!("ptlog: the entry of {:#x} at {:#x} (now {:#x}); {} writes journaled:", vaddr, e, unsafe { core::ptr::read_volatile(crate::mem::vptr::<u64>(e)) }, n);
     let mut k = 0;
     for j in from..n {
         let r = &PTLOG[j % PTLOG_N];
@@ -230,7 +231,7 @@ unsafe fn pte_cas(p: *mut Pte, expect: u64, new: u64) -> bool {
     let a = &*(p as *const core::sync::atomic::AtomicU64);
     let ok = a.compare_exchange(mmu::enc(expect), mmu::enc(new), core::sync::atomic::Ordering::SeqCst,
                        core::sync::atomic::Ordering::SeqCst).is_ok();
-    if ok && PTLOG_ON.load(core::sync::atomic::Ordering::Relaxed) { ptlog(p as u64, mmu::enc(expect), mmu::enc(new), core::panic::Location::caller().line()); }
+    if ok && PTLOG_ON.load(core::sync::atomic::Ordering::Relaxed) { ptlog(crate::mem::vaddr(p), mmu::enc(expect), mmu::enc(new), core::panic::Location::caller().line()); }
     ok
 }
 
@@ -322,7 +323,7 @@ const INHERIT: u64 = PTE_P | PTE_RW | PTE_US | PTE_UC | PTE_NX | PTE_PRIV | PTE_
 /// pointer is valid for as long as this core does not switch CR3 — that is, for the
 /// walk it is used in.
 unsafe fn cr3_root() -> *mut Pte {
-    (mmu::root() & ADDR_MASK) as *mut Pte
+    kptr::<Pte>(mmu::root() & ADDR_MASK)
 }
 
 /// # Safety
@@ -397,7 +398,7 @@ unsafe fn new_level(slot: *mut Pte, what: &str) {
     let old = pte_r(slot);
     if old & PTE_P != 0 { return; }
     let t = crate::mem::alloc_frame().expect(what);
-    core::ptr::write_bytes(t as *mut u8, 0, 4096);
+    core::ptr::write_bytes(kptr::<u8>(t), 0, 4096);
     if !install_table(slot, old, t, PTE_P | PTE_RW | PTE_US) {
         crate::mem::free_contig(t, 1);
     }
@@ -411,7 +412,7 @@ unsafe fn new_level_opt(slot: *mut Pte) -> Option<()> {
     let old = pte_r(slot);
     if old & PTE_P != 0 { return Some(()); }
     let t = crate::mem::alloc_frame()?;
-    core::ptr::write_bytes(t as *mut u8, 0, 4096);
+    core::ptr::write_bytes(kptr::<u8>(t), 0, 4096);
     if !install_table(slot, old, t, PTE_P | PTE_RW | PTE_US) { crate::mem::free_contig(t, 1); }
     Some(())
 }
@@ -426,12 +427,12 @@ unsafe fn split_1g(e3: *mut Pte) {
     if parent & PTE_PS == 0 { return; }          // a neighbour managed to split it — we work with its table
     let base = parent & 0x000F_FFFF_C000_0000; // the 1G-aligned base
     let flags = parent & (INHERIT); // inherit RW/US/NX/the cacheability
-    let pd = crate::mem::alloc_frame().expect("split_1g: there is no frame") as *mut Pte;
+    let pd = kptr::<Pte>(crate::mem::alloc_frame().expect("split_1g: there is no frame"));
     for m in 0..512u64 {
         pte_w(pd.add(m as usize), (base + m * 0x20_0000) | flags | PTE_PS);
     }
-    if !install_table(e3, parent, pd as u64, PTE_P | PTE_RW | PTE_US) {
-        crate::mem::free_contig(pd as u64, 1);   // we lost the race — the neighbour's table is already in place
+    if !install_table(e3, parent, kpa_of(pd), PTE_P | PTE_RW | PTE_US) {
+        crate::mem::free_contig(kpa_of(pd), 1);   // we lost the race — the neighbour's table is already in place
     }
 }
 
@@ -450,10 +451,10 @@ unsafe fn split_2m_lazy(e2: *mut Pte) {
     if parent & (PTE_LAZY | PTE_PS) != (PTE_LAZY | PTE_PS) || parent & PTE_P != 0 { return; }
     HUGE_SPLIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let flags = parent & (PTE_LAZY | PTE_PRIV | PTE_PNONE | LAZY_W | LAZY_X); // without PS and LAZY_4K: they are about the directory entry
-    let pt = crate::mem::alloc_frame().expect("split_2m_lazy: there is no frame") as *mut Pte;
+    let pt = kptr::<Pte>(crate::mem::alloc_frame().expect("split_2m_lazy: there is no frame"));
     for m in 0..512usize { pte_w(pt.add(m), flags); }
-    if !install_table(e2, parent, pt as u64, PTE_P | PTE_RW | PTE_US) {
-        crate::mem::free_contig(pt as u64, 1);
+    if !install_table(e2, parent, kpa_of(pt), PTE_P | PTE_RW | PTE_US) {
+        crate::mem::free_contig(kpa_of(pt), 1);
     }
 }
 
@@ -467,12 +468,12 @@ unsafe fn split_2m(e2: *mut Pte) {
     if parent & PTE_PS == 0 { return; }          // a neighbour has already split it
     let base = parent & 0x000F_FFFF_FFE0_0000; // the 2M-aligned base
     let flags = parent & (INHERIT);
-    let pt = crate::mem::alloc_frame().expect("split_2m: there is no frame") as *mut Pte;
+    let pt = kptr::<Pte>(crate::mem::alloc_frame().expect("split_2m: there is no frame"));
     for m in 0..512u64 {
         pte_w(pt.add(m as usize), (base + m * 0x1000) | flags);
     }
-    if !install_table(e2, parent, pt as u64, PTE_P | PTE_RW | PTE_US) {
-        crate::mem::free_contig(pt as u64, 1);
+    if !install_table(e2, parent, kpa_of(pt), PTE_P | PTE_RW | PTE_US) {
+        crate::mem::free_contig(kpa_of(pt), 1);
     }
 }
 
@@ -489,17 +490,17 @@ unsafe fn pte_ptr(vaddr: u64) -> Option<*mut Pte> {
     let pml4 = cr3_root();
     let e4 = pml4.add(l4);
     if pte_r(e4) & PTE_P == 0 { return None; }
-    let pdpt = (pte_r(e4) & ADDR_MASK) as *mut Pte;
+    let pdpt = kptr::<Pte>(pte_r(e4) & ADDR_MASK);
     let e3 = pdpt.add(l3);
     if pte_r(e3) & PTE_P == 0 { return None; }
     if pte_r(e3) & PTE_PS != 0 { split_1g(e3); }
-    let pd = (pte_r(e3) & ADDR_MASK) as *mut Pte;
+    let pd = kptr::<Pte>(pte_r(e3) & ADDR_MASK);
     let e2 = pd.add(l2);
     if pte_r(e2) & PTE_P == 0 {
         if pte_r(e2) & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS) { split_2m_lazy(e2); } // a lazy 2M reservation
         else { return None; }
     } else if pte_r(e2) & PTE_PS != 0 { split_2m(e2); }
-    let pt = (pte_r(e2) & ADDR_MASK) as *mut Pte;
+    let pt = kptr::<Pte>(pte_r(e2) & ADDR_MASK);
     Some(pt.add(l1))
 }
 
@@ -516,7 +517,7 @@ unsafe fn walk_entry(vaddr: u64) -> u64 {
     for lvl in 1..4 {
         if e & PTE_P == 0 { return e; }              // it is not mapped
         if e & PTE_PS != 0 { return e; }             // a large leaf
-        tbl = (e & ADDR_MASK) as *mut Pte;
+        tbl = kptr::<Pte>(e & ADDR_MASK);
         e = pte_r(tbl.add(idx[lvl]));
     }
     e
@@ -535,7 +536,7 @@ unsafe fn walk_leaf(vaddr: u64) -> (u64, u64) {
     let mut e = pte_r(tbl.add(idx[0]));
     for lvl in 1..4 {
         if e & PTE_P == 0 || e & PTE_PS != 0 { return (e, SPAN[lvl - 1]); }
-        tbl = (e & ADDR_MASK) as *mut Pte;
+        tbl = kptr::<Pte>(e & ADDR_MASK);
         e = pte_r(tbl.add(idx[lvl]));
     }
     (e, SPAN[3])
@@ -602,12 +603,12 @@ pub fn take_dirty(vaddr: u64) -> bool {
         let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize,
                    ((vaddr >> 21) & 0x1FF) as usize, ((vaddr >> 12) & 0x1FF) as usize];
         let root = current_cr3() & ADDR_MASK;
-        let e4 = pte_r((root as *const Pte).add(idx[0])); if e4 & PTE_P == 0 { return false; }
-        let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(idx[1])); if e3 & PTE_P == 0 { return false; }
+        let e4 = pte_r(kptr::<Pte>(root).add(idx[0])); if e4 & PTE_P == 0 { return false; }
+        let e3 = pte_r(kptr::<Pte>(e4 & ADDR_MASK).add(idx[1])); if e3 & PTE_P == 0 { return false; }
         if e3 & PTE_PS != 0 { return true; } // a 1G leaf: we consider it changed (crudely, but safely)
-        let e2 = pte_r(((e3 & ADDR_MASK) as *const Pte).add(idx[2])); if e2 & PTE_P == 0 { return false; }
+        let e2 = pte_r(kptr::<Pte>(e3 & ADDR_MASK).add(idx[2])); if e2 & PTE_P == 0 { return false; }
         if e2 & PTE_PS != 0 { return true; } // a 2M leaf (the kernel's identity region)
-        let pte = ((e2 & ADDR_MASK) as *mut Pte).add(idx[3]);
+        let pte = kptr::<Pte>(e2 & ADDR_MASK).add(idx[3]);
         let v = pte_r(pte);
         if v & PTE_P == 0 || v & PTE_D == 0 { return false; }
         pte_w(pte, v & !PTE_D);
@@ -682,7 +683,7 @@ pub fn protect_none(vaddr: u64, len: u64) {
                 }
             }
             let stop = chunk_end(a, end);
-            let pt = match pt_for(cr3_root() as u64, a, false) { Some(p) => p, None => { a = stop; continue; } };
+            let pt = match pt_for(kpa_of(cr3_root()), a, false) { Some(p) => p, None => { a = stop; continue; } };
             while a < stop {
                 let pte = pt.add(pt_idx(a));
                 let old = pte_r(pte);
@@ -734,7 +735,7 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
                 }
             }
             let stop = chunk_end(a, end);
-            let pt = match pt_for(cr3_root() as u64, a, false) { Some(p) => p, None => { a = stop; continue; } };
+            let pt = match pt_for(kpa_of(cr3_root()), a, false) { Some(p) => p, None => { a = stop; continue; } };
             while a < stop {
                 let pte = pt.add(pt_idx(a));
                 // A LAZY reservation: there is no frame yet — we correct only the FUTURE rights (and remove PROT_NONE)
@@ -794,12 +795,12 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
 /// it, so a stray value would write tables into somebody else's frames.
 unsafe fn pde_ptr_in(pml4_phys: u64, vaddr: u64) -> *mut Pte {
     let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize, ((vaddr >> 21) & 0x1FF) as usize];
-    let e4 = (pml4_phys as *mut Pte).add(idx[0]);
+    let e4 = kptr::<Pte>(pml4_phys).add(idx[0]);
     if pte_r(e4) & PTE_P == 0 { new_level(e4, "pde_in: pdpt"); }
-    let e3 = ((pte_r(e4) & ADDR_MASK) as *mut Pte).add(idx[1]);
+    let e3 = kptr::<Pte>(pte_r(e4) & ADDR_MASK).add(idx[1]);
     if pte_r(e3) & PTE_P == 0 { new_level(e3, "pde_in: pd"); }
     else if pte_r(e3) & PTE_PS != 0 { split_1g(e3); }
-    ((pte_r(e3) & ADDR_MASK) as *mut Pte).add(idx[2])
+    kptr::<Pte>(pte_r(e3) & ADDR_MASK).add(idx[2])
 }
 
 /// The PD entry for vaddr in the active AS, WITHOUT creating tables. None — there is no path.
@@ -822,17 +823,17 @@ unsafe fn pde_ptr_in(pml4_phys: u64, vaddr: u64) -> *mut Pte {
 unsafe fn pt_for(pml4_phys: u64, vaddr: u64, create: bool) -> Option<*mut Pte> {
     let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize,
                ((vaddr >> 21) & 0x1FF) as usize];
-    let e4 = (pml4_phys as *mut Pte).add(idx[0]);
+    let e4 = kptr::<Pte>(pml4_phys).add(idx[0]);
     if pte_r(e4) & PTE_P == 0 {
         if !create { return None; }
         new_level_opt(e4)?;
     }
-    let e3 = ((pte_r(e4) & ADDR_MASK) as *mut Pte).add(idx[1]);
+    let e3 = kptr::<Pte>(pte_r(e4) & ADDR_MASK).add(idx[1]);
     if pte_r(e3) & PTE_P == 0 {
         if !create { return None; }
         new_level_opt(e3)?;
     } else if pte_r(e3) & PTE_PS != 0 { split_1g(e3); }
-    let e2 = ((pte_r(e3) & ADDR_MASK) as *mut Pte).add(idx[2]);
+    let e2 = kptr::<Pte>(pte_r(e3) & ADDR_MASK).add(idx[2]);
     if pte_r(e2) & PTE_P == 0 {
         if pte_r(e2) & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS) { split_2m_lazy(e2); } // a lazy 2M reservation
         else if !create { return None; }
@@ -842,7 +843,7 @@ unsafe fn pt_for(pml4_phys: u64, vaddr: u64, create: bool) -> Option<*mut Pte> {
     // A NEIGHBOURING core could have won: one must work with the table that
     // really stands in the entry rather than with the one we tried to install.
     if pte_r(e2) & PTE_P == 0 { return None; }
-    Some((pte_r(e2) & ADDR_MASK) as *mut Pte)
+    Some(kptr::<Pte>(pte_r(e2) & ADDR_MASK))
 }
 
 /// The page's index inside the table (0..511).
@@ -860,10 +861,10 @@ unsafe fn pde_ptr_existing(vaddr: u64) -> Option<*mut Pte> {
     let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize, ((vaddr >> 21) & 0x1FF) as usize];
     let e4 = cr3_root().add(idx[0]);
     if pte_r(e4) & PTE_P == 0 { return None; }
-    let e3 = ((pte_r(e4) & ADDR_MASK) as *mut Pte).add(idx[1]);
+    let e3 = kptr::<Pte>(pte_r(e4) & ADDR_MASK).add(idx[1]);
     if pte_r(e3) & PTE_P == 0 { return None; }
     if pte_r(e3) & PTE_PS != 0 { return None; } // a 1G leaf of the kernel — not our case
-    Some(((pte_r(e3) & ADDR_MASK) as *mut Pte).add(idx[2]))
+    Some(kptr::<Pte>(pte_r(e3) & ADDR_MASK).add(idx[2]))
 }
 
 /// How many huge pages (2 MB) were really given to the workload — it is visible in `stat:`.
@@ -1616,7 +1617,7 @@ pub fn relazy_pages(vaddr: u64, pages: u64) {
                 }
             }
             let stop = chunk_end(a, end);
-            let pt = match pt_for(cr3_root() as u64, a, false) { Some(p) => p, None => { a = stop; continue; } };
+            let pt = match pt_for(kpa_of(cr3_root()), a, false) { Some(p) => p, None => { a = stop; continue; } };
             while a < stop {
                 let pte = pt.add(pt_idx(a));
                 let e = pte_r(pte);
@@ -1669,7 +1670,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
                 let base = a & !0x1F_FFFF;
                 match crate::mem::alloc_workload_aligned(512, 0x20_0000) {
                     Some(fr) => {
-                        core::ptr::write_bytes(fr as *mut u8, 0, 0x20_0000);
+                        core::ptr::write_bytes(kptr::<u8>(fr), 0, 0x20_0000);
                         let mut ne = fr | PTE_P | PTE_US | PTE_PS | PTE_PRIV;
                         if e & LAZY_W != 0 { ne |= PTE_RW; }
                         if e & LAZY_X == 0 { ne |= PTE_NX; }
@@ -1738,7 +1739,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
             }
             return false;
         }
-        core::ptr::write_bytes(fr as *mut u8, 0, 4096);
+        core::ptr::write_bytes(kptr::<u8>(fr), 0, 4096);
         let mut ne = fr | PTE_P | PTE_US | PTE_PRIV;
         if e & LAZY_W != 0 { ne |= PTE_RW; }
         if e & LAZY_X == 0 { ne |= PTE_NX; }
@@ -1760,7 +1761,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
             if e2 & (LAZY_W | LAZY_X) != e & (LAZY_W | LAZY_X) { break; } // different rights — a different mmap
             let f2 = match crate::mem::alloc_contig_node(1, node) { Some(f) => f, None => break };
             if virt_to_phys(f2) != f2 { crate::mem::free_contig(f2, 1); break; }
-            core::ptr::write_bytes(f2 as *mut u8, 0, 4096);
+            core::ptr::write_bytes(kptr::<u8>(f2), 0, 4096);
             let mut n2 = f2 | PTE_P | PTE_US | PTE_PRIV;
             if e2 & LAZY_W != 0 { n2 |= PTE_RW; }
             if e2 & LAZY_X == 0 { n2 |= PTE_NX; }
@@ -1792,7 +1793,7 @@ pub fn map_fresh_pages(vaddr: u64, pages: u64) -> bool {
         if fr == 0 { return false; }
         // SAFETY: P1 — a frame straight from the allocator, zeroed through the identity map before
         // anybody can see it.
-        unsafe { core::ptr::write_bytes(fr as *mut u8, 0, 4096); }
+        unsafe { core::ptr::write_bytes(kptr::<u8>(fr), 0, 4096); }
         map_leaf(cr3, a, fr, true, true, false);
         a += 4096;
     }
@@ -1837,13 +1838,13 @@ pub fn is_guard_in(pml4_phys: u64, vaddr: u64) -> bool {
     if pml4_phys == 0 { return false; }
     // SAFETY: P1 + P2 — a read-only descent.
     unsafe {
-        let e4 = pte_r((pml4_phys as *const Pte).add(((a >> 39) & 0x1FF) as usize));
+        let e4 = pte_r(kptr::<Pte>(pml4_phys).add(((a >> 39) & 0x1FF) as usize));
         if e4 & PTE_P == 0 { return false; }
-        let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(((a >> 30) & 0x1FF) as usize));
+        let e3 = pte_r(kptr::<Pte>(e4 & ADDR_MASK).add(((a >> 30) & 0x1FF) as usize));
         if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { return false; }
-        let e2 = pte_r(((e3 & ADDR_MASK) as *const Pte).add(((a >> 21) & 0x1FF) as usize));
+        let e2 = pte_r(kptr::<Pte>(e3 & ADDR_MASK).add(((a >> 21) & 0x1FF) as usize));
         if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { return false; }
-        let e = pte_r(((e2 & ADDR_MASK) as *const Pte).add(((a >> 12) & 0x1FF) as usize));
+        let e = pte_r(kptr::<Pte>(e2 & ADDR_MASK).add(((a >> 12) & 0x1FF) as usize));
         e & PTE_P == 0 && e & PTE_GUARD != 0
     }
 }
@@ -1863,13 +1864,13 @@ pub fn unguard_in(pml4_phys: u64, vaddr: u64) {
     // leaf are only read), and one store into the entry of a KERNEL-STACK page, which the
     // space's owner never writes: its `mprotect`/`munmap` work on its own ranges.
     unsafe {
-        let e4 = pte_r((pml4_phys as *const Pte).add(((a >> 39) & 0x1FF) as usize));
+        let e4 = pte_r(kptr::<Pte>(pml4_phys).add(((a >> 39) & 0x1FF) as usize));
         if e4 & PTE_P == 0 { return; }
-        let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(((a >> 30) & 0x1FF) as usize));
+        let e3 = pte_r(kptr::<Pte>(e4 & ADDR_MASK).add(((a >> 30) & 0x1FF) as usize));
         if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { return; }
-        let e2 = pte_r(((e3 & ADDR_MASK) as *const Pte).add(((a >> 21) & 0x1FF) as usize));
+        let e2 = pte_r(kptr::<Pte>(e3 & ADDR_MASK).add(((a >> 21) & 0x1FF) as usize));
         if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { return; }
-        let pte = ((e2 & ADDR_MASK) as *mut Pte).add(((a >> 12) & 0x1FF) as usize);
+        let pte = kptr::<Pte>(e2 & ADDR_MASK).add(((a >> 12) & 0x1FF) as usize);
         let e = pte_r(pte);
         if e & PTE_P == 0 && e & PTE_GUARD != 0 { pte_w(pte, ident_leaf(a)); }
     }
@@ -1918,13 +1919,13 @@ pub fn ident_check() -> (u64, u64, u64) {
         while a < IDENT_HI {
             let e4 = pte_r(pml4.add(((a >> 39) & 0x1FF) as usize));
             if e4 & PTE_P == 0 { holes += 512 * 512; a += 1 << 30; continue; }
-            let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(((a >> 30) & 0x1FF) as usize));
+            let e3 = pte_r(kptr::<Pte>(e4 & ADDR_MASK).add(((a >> 30) & 0x1FF) as usize));
             if e3 & PTE_P == 0 { holes += 512 * 512; a += 1 << 30; continue; }
             if e3 & PTE_PS != 0 { // a 1G leaf
                 if e3 & ADDR_MASK != a { shadow += 512 * 512; } else if e3 & PTE_RW == 0 { ro += 512 * 512; }
                 a += 1 << 30; continue;
             }
-            let pd = (e3 & ADDR_MASK) as *const Pte;
+            let pd = kptr::<Pte>(e3 & ADDR_MASK);
             let e2 = pte_r(pd.add(((a >> 21) & 0x1FF) as usize));
             if e2 & PTE_PS != 0 || e2 & PTE_P == 0 {
                 if e2 & PTE_P == 0 { holes += 512; }
@@ -1932,7 +1933,7 @@ pub fn ident_check() -> (u64, u64, u64) {
                 else if e2 & PTE_RW == 0 { ro += 512; }
                 a += 0x20_0000; continue;
             }
-            let pt = (e2 & ADDR_MASK) as *const Pte;
+            let pt = kptr::<Pte>(e2 & ADDR_MASK);
             for l1 in 0..512usize {
                 let va = a + (l1 as u64) * 4096;
                 let e1 = pte_r(pt.add(l1));
@@ -1971,13 +1972,13 @@ pub fn unguard(vaddr: u64, len: u64) {
             let l1 = ((a >> 12) & 0x1FF) as usize;
             let e4 = cr3_root().add(l4);
             if pte_r(e4) & PTE_P != 0 {
-                let pdpt = (pte_r(e4) & ADDR_MASK) as *mut Pte;
+                let pdpt = kptr::<Pte>(pte_r(e4) & ADDR_MASK);
                 let e3 = pdpt.add(l3);
                 if pte_r(e3) & PTE_P != 0 && pte_r(e3) & PTE_PS == 0 {
-                    let pd = (pte_r(e3) & ADDR_MASK) as *mut Pte;
+                    let pd = kptr::<Pte>(pte_r(e3) & ADDR_MASK);
                     let e2 = pd.add(l2);
                     if pte_r(e2) & PTE_P != 0 && pte_r(e2) & PTE_PS == 0 {
-                        let pt = (pte_r(e2) & ADDR_MASK) as *mut Pte;
+                        let pt = kptr::<Pte>(pte_r(e2) & ADDR_MASK);
                         let pte = pt.add(l1);
                         if pte_r(pte) & PTE_P == 0 && pte_r(pte) & PTE_LAZY == 0 && pte_r(pte) & ADDR_MASK != 0 {
                             // an extinguished 4K page: return present (RW for the kernel's needs);
@@ -2010,11 +2011,11 @@ pub fn nx_range(vaddr: u64, len: u64) {
             let pml4 = cr3_root();
             let e4 = pml4.add(l4);
             if pte_r(e4) & PTE_P == 0 { a += 0x1000; continue; }
-            let pdpt = (pte_r(e4) & ADDR_MASK) as *mut Pte;
+            let pdpt = kptr::<Pte>(pte_r(e4) & ADDR_MASK);
             let e3 = pdpt.add(l3);
             if pte_r(e3) & PTE_P == 0 { a += 0x1000; continue; }
             if pte_r(e3) & PTE_PS != 0 { split_1g(e3); }
-            let pd = (pte_r(e3) & ADDR_MASK) as *mut Pte;
+            let pd = kptr::<Pte>(pte_r(e3) & ADDR_MASK);
             let e2 = pd.add(l2);
             if pte_r(e2) & PTE_P == 0 { a += 0x1000; continue; }
             if pte_r(e2) & PTE_PS != 0 {
@@ -2024,7 +2025,7 @@ pub fn nx_range(vaddr: u64, len: u64) {
                 }
                 split_2m(e2); // a partial 2M — split it and set the rights line by line
             }
-            let pt = (pte_r(e2) & ADDR_MASK) as *mut Pte;
+            let pt = kptr::<Pte>(pte_r(e2) & ADDR_MASK);
             let l1 = ((a >> 12) & 0x1FF) as usize;
             let pte = pt.add(l1);
             pte_w(pte, pte_r(pte) | PTE_NX);
@@ -2067,11 +2068,11 @@ pub fn ident_leaf_overlap(vaddr: u64, pages: u64) -> bool {
     // SAFETY: P1 + P2 — a read-only walk of the reference kernel table.
     unsafe {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
-        let pml4 = if k != 0 { k as *const Pte } else { cr3_root() as *const Pte };
+        let pml4 = if k != 0 { kptr::<Pte>(k) } else { cr3_root() };
         while g < end && g < USER_TOP {
             let e4 = pte_r(pml4.add(((g >> 39) & 0x1FF) as usize));
             if e4 & PTE_P == 0 { g = ((g >> 39) + 1) << 39; continue; }
-            let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(((g >> 30) & 0x1FF) as usize));
+            let e3 = pte_r(kptr::<Pte>(e4 & ADDR_MASK).add(((g >> 30) & 0x1FF) as usize));
             if g >= 4u64 << 30 && e3 & PTE_P != 0 && e3 & PTE_PS != 0 { return true; }
             g += 1 << 30;
         }
@@ -2089,17 +2090,17 @@ fn map_1g(phys: u64, cached: bool) -> u64 {
     // CAS.
     unsafe {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
-        let pml4 = if k != 0 { k as *mut Pte } else { cr3_root() };
+        let pml4 = if k != 0 { kptr::<Pte>(k) } else { cr3_root() };
         // The PML4 slot may be empty (the firmware's BARs lie high: under OVMF q35
         // the NVMe's 64-bit BAR moves to 0x3800_0000_0000 — that is PML4[112]) —
         // then we create a PDPT table for it.
         let e4 = pml4.add(l4);
         if pte_r(e4) & PTE_P == 0 {
             let pdpt = match crate::mem::alloc_frame() { Some(f) => f, None => return 0 };
-            core::ptr::write_bytes(pdpt as *mut u8, 0, 4096);
+            core::ptr::write_bytes(kptr::<u8>(pdpt), 0, 4096);
             pte_w(e4, pdpt | PTE_P | PTE_RW);
         }
-        let pdpt = (pte_r(e4) & ADDR_MASK) as *mut Pte;
+        let pdpt = kptr::<Pte>(pte_r(e4) & ADDR_MASK);
         let e3 = pdpt.add(l3);
         if pte_r(e3) & PTE_P == 0 {
             // A 1G identity leaf: P|RW|PS (+PCD|PWT for a device's registers)
@@ -2128,8 +2129,8 @@ pub fn kernel_pdpt_entry(l3: usize) -> u64 {
     // SAFETY: P1 + P2 — one read of the reference kernel PDPT (a gate's introspection).
     unsafe {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
-        let pml4 = if k != 0 { k as *const Pte } else { cr3_root() as *const Pte };
-        pte_r(((pte_r(pml4) & ADDR_MASK) as *const Pte).add(l3 & 0x1FF))
+        let pml4 = if k != 0 { kptr::<Pte>(k) } else { cr3_root() };
+        pte_r(kptr::<Pte>(pte_r(pml4) & ADDR_MASK).add(l3 & 0x1FF))
     }
 }
 /// The same entry in a given AS (the gate `highmem`: a process inherits the kernel's leaf),
@@ -2137,9 +2138,9 @@ pub fn kernel_pdpt_entry(l3: usize) -> u64 {
 pub fn pdpt_entry_in(pml4_phys: u64, l3: usize) -> u64 {
     // SAFETY: P1 + P2 — one read of the AS `pml4_phys`, which the caller owns.
     unsafe {
-        let e4 = pte_r(pml4_phys as *const Pte);
+        let e4 = pte_r(kptr::<Pte>(pml4_phys));
         if e4 & PTE_P == 0 { return 0; }
-        pte_r(((e4 & ADDR_MASK) as *const Pte).add(l3 & 0x1FF))
+        pte_r(kptr::<Pte>(e4 & ADDR_MASK).add(l3 & 0x1FF))
     }
 }
 
@@ -2164,7 +2165,7 @@ static AS_LIVE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::n
 unsafe fn copy_kernel_pml4(src: *const Pte, dst: u64) {
     for i in 1..512usize {
         let e = pte_r(src.add(i));
-        if e & PTE_P != 0 { pte_w((dst as *mut Pte).add(i), e); }
+        if e & PTE_P != 0 { pte_w(kptr::<Pte>(dst).add(i), e); }
     }
 }
 
@@ -2173,16 +2174,16 @@ pub fn new_address_space() -> u64 {
     // any CR3 yet, so nothing walks it while it is built.
     unsafe {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
-        let base_pml4 = if k != 0 { k as *const Pte } else { cr3_root() as *const Pte };
-        let kern_pdpt = (pte_r(base_pml4) & ADDR_MASK) as *const Pte; // PML4[0] -> kernel PDPT
+        let base_pml4 = if k != 0 { kptr::<Pte>(k) } else { cr3_root() };
+        let kern_pdpt = kptr::<Pte>(pte_r(base_pml4) & ADDR_MASK); // PML4[0] -> kernel PDPT
         let new_pml4 = crate::mem::alloc_frame().expect("as: pml4");
         let new_pdpt = crate::mem::alloc_frame().expect("as: pdpt");
-        core::ptr::write_bytes(new_pml4 as *mut u8, 0, 4096);
+        core::ptr::write_bytes(kptr::<u8>(new_pml4), 0, 4096);
         copy_kernel_pml4(base_pml4, new_pml4);
         for i in 0..512usize { // a copy of the kernel PDPT (0..3 are filled, 4.. are free for the private one)
-            pte_w((new_pdpt as *mut Pte).add(i), pte_r(kern_pdpt.add(i)));
+            pte_w(kptr::<Pte>(new_pdpt).add(i), pte_r(kern_pdpt.add(i)));
         }
-        pte_w(new_pml4 as *mut Pte, new_pdpt | PTE_P | PTE_RW | PTE_US);
+        pte_w(kptr::<Pte>(new_pml4), new_pdpt | PTE_P | PTE_RW | PTE_US);
         AS_LIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         new_pml4
     }
@@ -2197,14 +2198,14 @@ pub fn new_process_space() -> u64 {
     // that is what keeps a process out of the kernel's memory (the gate `isolation`).
     unsafe {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
-        let base_pml4 = if k != 0 { k as *const Pte } else { cr3_root() as *const Pte };
-        let kern_pdpt = (pte_r(base_pml4) & ADDR_MASK) as *const Pte;
+        let base_pml4 = if k != 0 { kptr::<Pte>(k) } else { cr3_root() };
+        let kern_pdpt = kptr::<Pte>(pte_r(base_pml4) & ADDR_MASK);
         let kgb = user_gb();
-        let kern_pd0 = (pte_r(kern_pdpt.add(kgb)) & ADDR_MASK) as *const Pte; // PDPT[kgb] -> the kernel's GB PD
+        let kern_pd0 = kptr::<Pte>(pte_r(kern_pdpt.add(kgb)) & ADDR_MASK); // PDPT[kgb] -> the kernel's GB PD
         let pml4 = crate::mem::alloc_frame().expect("proc: pml4");
         let pdpt = crate::mem::alloc_frame().expect("proc: pdpt");
         let pd0 = crate::mem::alloc_frame().expect("proc: pd0");
-        core::ptr::write_bytes(pml4 as *mut u8, 0, 4096);
+        core::ptr::write_bytes(kptr::<u8>(pml4), 0, 4096);
         copy_kernel_pml4(base_pml4, pml4);
         // THE GB0 IDENTITY WINDOW IN A PROCESS'S AS IS FOR THE KERNEL ONLY. In the kernel's AS everything
         // above the kernel's image is marked U/S (that is how the modes in an identity AS live: `run`,
@@ -2218,26 +2219,26 @@ pub fn new_process_space() -> u64 {
         // only explicitly — a `protect()` on a handed-out region (MAP_SHARED,
         // shm, a zero-syscall region), and `fork` carries it over to the child.
         for i in 0..512usize {
-            pte_w((pdpt as *mut Pte).add(i), pte_r(kern_pdpt.add(i)));
+            pte_w(kptr::<Pte>(pdpt).add(i), pte_r(kern_pdpt.add(i)));
             let e = pte_r(kern_pd0.add(i));
             if e & PTE_P != 0 && e & PTE_PS == 0 {
                 // the entry is already split into 4K ones (e.g. the kernel's heap after nx_range): a DEEP COPY of the PT,
                 // otherwise the process and the kernel would share one PT -> a map_leaf in this region would spoil the shared one.
-                let src_pt = (e & ADDR_MASK) as *const Pte;
+                let src_pt = kptr::<Pte>(e & ADDR_MASK);
                 let new_pt = crate::mem::alloc_frame().expect("proc: pt-copy");
                 for j in 0..512usize {
                     let v = pte_r(src_pt.add(j));
                     let v = if v & PTE_PRIV == 0 { v & !PTE_US } else { v };
-                    pte_w((new_pt as *mut Pte).add(j), v);
+                    pte_w(kptr::<Pte>(new_pt).add(j), v);
                 }
-                pte_w((pd0 as *mut Pte).add(i), (new_pt & ADDR_MASK) | (e & 0xFFF));
+                pte_w(kptr::<Pte>(pd0).add(i), (new_pt & ADDR_MASK) | (e & 0xFFF));
             } else {
                 let e = if e & PTE_P != 0 && e & PTE_PRIV == 0 { e & !PTE_US } else { e };
-                pte_w((pd0 as *mut Pte).add(i), e); // a 2M identity (supervisor) or empty
+                pte_w(kptr::<Pte>(pd0).add(i), e); // a 2M identity (supervisor) or empty
             }
         }
-        pte_w((pdpt as *mut Pte).add(kgb), pd0 | PTE_P | PTE_RW | PTE_US); // the private PD of the kernel's GB
-        pte_w(pml4 as *mut Pte, pdpt | PTE_P | PTE_RW | PTE_US);
+        pte_w(kptr::<Pte>(pdpt).add(kgb), pd0 | PTE_P | PTE_RW | PTE_US); // the private PD of the kernel's GB
+        pte_w(kptr::<Pte>(pml4), pdpt | PTE_P | PTE_RW | PTE_US);
         AS_LIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         pml4
     }
@@ -2250,17 +2251,17 @@ pub fn new_process_space() -> u64 {
 unsafe fn pte_ptr_in(pml4_phys: u64, vaddr: u64) -> *mut Pte {
     let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize,
                ((vaddr >> 21) & 0x1FF) as usize, ((vaddr >> 12) & 0x1FF) as usize];
-    let e4 = (pml4_phys as *mut Pte).add(idx[0]);
+    let e4 = kptr::<Pte>(pml4_phys).add(idx[0]);
     if pte_r(e4) & PTE_P == 0 { new_level(e4, "pte_in: pdpt"); }
-    let e3 = ((pte_r(e4) & ADDR_MASK) as *mut Pte).add(idx[1]);
+    let e3 = kptr::<Pte>(pte_r(e4) & ADDR_MASK).add(idx[1]);
     if pte_r(e3) & PTE_P == 0 { new_level(e3, "pte_in: pd"); }
     else if pte_r(e3) & PTE_PS != 0 { split_1g(e3); }
-    let e2 = ((pte_r(e3) & ADDR_MASK) as *mut Pte).add(idx[2]);
+    let e2 = kptr::<Pte>(pte_r(e3) & ADDR_MASK).add(idx[2]);
     if pte_r(e2) & PTE_P == 0 {
         if pte_r(e2) & (PTE_LAZY | PTE_PS) == (PTE_LAZY | PTE_PS) { split_2m_lazy(e2); } // a lazy 2M reservation
         else { new_level(e2, "pte_in: pt"); }
     } else if pte_r(e2) & PTE_PS != 0 { split_2m(e2); }
-    ((pte_r(e2) & ADDR_MASK) as *mut Pte).add(idx[3])
+    kptr::<Pte>(pte_r(e2) & ADDR_MASK).add(idx[3])
 }
 
 /// Map the 4K page vaddr->phys in A GIVEN space with full rights
@@ -2313,10 +2314,10 @@ pub fn phys_of_in(pml4_phys: u64, vaddr: u64) -> Option<u64> {
     // SAFETY: P1 + P2 — a read-only walk of the address space `pml4_phys`, which the caller owns.
     unsafe {
         let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize, ((vaddr >> 21) & 0x1FF) as usize, ((vaddr >> 12) & 0x1FF) as usize];
-        let e4 = pte_r((pml4_phys as *const Pte).add(idx[0])); if e4 & PTE_P == 0 { return None; }
-        let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(idx[1])); if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { return None; }
-        let e2 = pte_r(((e3 & ADDR_MASK) as *const Pte).add(idx[2])); if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { return None; }
-        let e1 = pte_r(((e2 & ADDR_MASK) as *const Pte).add(idx[3])); if e1 & PTE_P == 0 || e1 & PTE_PRIV == 0 { return None; }
+        let e4 = pte_r(kptr::<Pte>(pml4_phys).add(idx[0])); if e4 & PTE_P == 0 { return None; }
+        let e3 = pte_r(kptr::<Pte>(e4 & ADDR_MASK).add(idx[1])); if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { return None; }
+        let e2 = pte_r(kptr::<Pte>(e3 & ADDR_MASK).add(idx[2])); if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { return None; }
+        let e1 = pte_r(kptr::<Pte>(e2 & ADDR_MASK).add(idx[3])); if e1 & PTE_P == 0 || e1 & PTE_PRIV == 0 { return None; }
         Some(e1 & ADDR_MASK)
     }
 }
@@ -2360,7 +2361,7 @@ pub fn kernel_cr3() -> u64 { KERNEL_PML4.load(core::sync::atomic::Ordering::Rela
 /// Where the kernel's root is kept: a secondary arm64 core reads it with its MMU (and so its
 /// caches) off, and the boot core cleans the word to the point of coherency first.
 #[cfg(target_arch = "aarch64")]
-pub fn kernel_cr3_word() -> u64 { core::ptr::addr_of!(KERNEL_PML4) as u64 }
+pub fn kernel_cr3_word() -> u64 { crate::mem::vaddr(core::ptr::addr_of!(KERNEL_PML4)) }
 
 pub fn current_cr3() -> u64 { mmu::root() }
 
@@ -2374,21 +2375,21 @@ pub fn fork_address_space(src_pml4: u64) -> u64 {
     // the caller (`fork` runs with the parent's threads stopped at this point), and the
     // child's table is not in any CR3 yet.
     unsafe {
-        let src_pdpt = (pte_r(src_pml4 as *const Pte) & ADDR_MASK) as *const Pte;
+        let src_pdpt = kptr::<Pte>(pte_r(kptr::<Pte>(src_pml4)) & ADDR_MASK);
         for l3 in 4..512usize { // the private region (the kernel has slots 0..3)
             let e3 = pte_r(src_pdpt.add(l3));
             if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; }
-            let pd = (e3 & ADDR_MASK) as *const Pte;
+            let pd = kptr::<Pte>(e3 & ADDR_MASK);
             for l2 in 0..512usize {
                 let e2 = pte_r(pd.add(l2));
                 if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { continue; }
-                let pt = (e2 & ADDR_MASK) as *const Pte;
+                let pt = kptr::<Pte>(e2 & ADDR_MASK);
                 for l1 in 0..512usize {
                     let e1 = pte_r(pt.add(l1));
                     if e1 & PTE_P == 0 { continue; }
                     let vaddr = ((l3 as u64) << 30) | ((l2 as u64) << 21) | ((l1 as u64) << 12);
                     let np = crate::mem::alloc_frame().expect("fork: page");
-                    core::ptr::copy_nonoverlapping((e1 & ADDR_MASK) as *const u8, np as *mut u8, 4096);
+                    core::ptr::copy_nonoverlapping(kptr::<u8>(e1 & ADDR_MASK), kptr::<u8>(np), 4096);
                     map_in(dst, vaddr, np, e1 & PTE_RW != 0, e1 & PTE_US != 0);
                 }
             }
@@ -2431,15 +2432,15 @@ pub fn fork_cow_space(src: u64) -> u64 {
     // SAFETY: P1 + P2 + P3 — as `fork_address_space`, but the leaves are shared read-only (COW);
     // the reference counting of the frames is `mem`'s business.
     unsafe {
-        let src_pml4 = src as *const Pte;
+        let src_pml4 = kptr::<Pte>(src);
         for l4 in 0..512usize {
             let e4 = pte_r(src_pml4.add(l4));
             if e4 & PTE_P == 0 { continue; }
-            let pdpt = (e4 & ADDR_MASK) as *mut Pte;
+            let pdpt = kptr::<Pte>(e4 & ADDR_MASK);
             for l3 in 0..512usize {
                 let e3 = pte_r(pdpt.add(l3));
                 if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; }
-                let pd = (e3 & ADDR_MASK) as *mut Pte;
+                let pd = kptr::<Pte>(e3 & ADDR_MASK);
                 for l2 in 0..512usize {
                     let mut e2 = pte_r(pd.add(l2));
                     // A huge page of the workload: our COW is page-by-page, so
@@ -2454,7 +2455,7 @@ pub fn fork_cow_space(src: u64) -> u64 {
                         }
                     }
                     if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { continue; }
-                    let pt = (e2 & ADDR_MASK) as *mut Pte;
+                    let pt = kptr::<Pte>(e2 & ADDR_MASK);
                     for l1 in 0..512usize {
                         let e1p = pt.add(l1);
                         let e1 = pte_r(e1p);
@@ -2524,7 +2525,7 @@ pub fn cow_fault(vaddr: u64) -> bool {
                     // there are other co-owners -> a private copy, the original has one reference less.
                     // The copy comes from the node OF THE ONE WHO WRITES: the page moves to it forever.
                     let np = crate::mem::alloc_contig_node(1, crate::affinity::my_node()).expect("cow: page");
-                    core::ptr::copy_nonoverlapping(phys as *const u8, np as *mut u8, 4096);
+                    core::ptr::copy_nonoverlapping(kptr::<u8>(phys), kptr::<u8>(np), 4096);
                     if keep & PTE_NX == 0 { crate::arch::icache::sync(np, 4096); }   // an executable page: fetch must see the copy
                     // The copy is installed by a CAS over the entry the decision was made on: two
                     // threads of one process faulting on the same page used to both install
@@ -2617,7 +2618,7 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
                 }
             }
             let stop = chunk_end(a, end);
-            let pt = match pt_for(cr3_root() as u64, a, false) { Some(p) => p, None => { a = stop; continue; } };
+            let pt = match pt_for(kpa_of(cr3_root()), a, false) { Some(p) => p, None => { a = stop; continue; } };
             while a < stop {
                 let pte = pt.add(pt_idx(a));
                 let e = pte_r(pte);
@@ -2659,16 +2660,16 @@ pub fn find_phys_in(pml4: u64, phys: u64) -> Option<(u64, u64)> {
     // SAFETY: P1 + P2 — a read-only search over the tables of `pml4_phys`, which the caller owns.
     unsafe {
         for l4 in 0..512usize {
-            let e4 = pte_r((pml4 as *const Pte).add(l4)); if e4 & PTE_P == 0 { continue; }
+            let e4 = pte_r(kptr::<Pte>(pml4).add(l4)); if e4 & PTE_P == 0 { continue; }
             let p3 = e4 & ADDR_MASK;
             for l3 in 0..512usize {
-                let e3 = pte_r((p3 as *const Pte).add(l3)); if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; }
+                let e3 = pte_r(kptr::<Pte>(p3).add(l3)); if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; }
                 let pd = e3 & ADDR_MASK;
                 for l2 in 0..512usize {
-                    let e2 = pte_r((pd as *const Pte).add(l2)); if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { continue; }
+                    let e2 = pte_r(kptr::<Pte>(pd).add(l2)); if e2 & PTE_P == 0 || e2 & PTE_PS != 0 { continue; }
                     let pt = e2 & ADDR_MASK;
                     for l1 in 0..512usize {
-                        let e1 = pte_r((pt as *const Pte).add(l1));
+                        let e1 = pte_r(kptr::<Pte>(pt).add(l1));
                         let va = ((l4 as u64) << 39) | ((l3 as u64) << 30) | ((l2 as u64) << 21) | ((l1 as u64) << 12);
                         if e1 & PTE_P != 0 && e1 & ADDR_MASK == phys && (e1 & PTE_PRIV != 0 || va != phys) { return Some((va, e1)); }
                     }
@@ -2684,7 +2685,7 @@ pub fn find_phys_in(pml4: u64, phys: u64) -> Option<(u64, u64)> {
 /// otherwise a walk would follow freed frames.
 unsafe fn free_pt(pt: u64) {
     for l1 in 0..512usize {
-        let e1 = pte_r((pt as *const Pte).add(l1));
+        let e1 = pte_r(kptr::<Pte>(pt).add(l1));
         if e1 & PTE_PRIV == 0 || e1 & PTE_LAZY != 0 { continue; } // identity/shared ones are not ours; LAZY — there is no frame
         if e1 & (PTE_P | PTE_PNONE) == 0 { continue; }            // a PROT_NONE page holds a frame — free it
         release_priv_frame(e1 & ADDR_MASK);
@@ -2695,7 +2696,7 @@ unsafe fn free_pt(pt: u64) {
 /// P1 + P4, as `free_pt`, one level up.
 unsafe fn free_pd(pd: u64) {
     for l2 in 0..512usize {
-        let e2 = pte_r((pd as *const Pte).add(l2));
+        let e2 = pte_r(kptr::<Pte>(pd).add(l2));
         if e2 & PTE_PS != 0 {
             // A huge page OF THE WORKLOAD (PRIV) — its 2 MB must be returned; a 2M leaf
             // of the kernel (identity) is shared, we do not touch it. Behind a lazy reservation there are no
@@ -2754,16 +2755,16 @@ pub fn free_address_space(pml4: u64) {
     // SAFETY: P1 + P2 — the walk that collects the frames to free; no core walks this table any
     // more (the APs have been moved to the kernel's CR3).
     unsafe {
-        let kpml4 = if kern != 0 { kern as *const Pte } else { core::ptr::null() };
-        let kpdpt = if kpml4.is_null() { core::ptr::null() } else { (pte_r(kpml4) & ADDR_MASK) as *const Pte };
+        let kpml4 = if kern != 0 { kptr::<Pte>(kern).cast_const() } else { core::ptr::null() };
+        let kpdpt = if kpml4.is_null() { core::ptr::null() } else { kptr::<Pte>(pte_r(kpml4) & ADDR_MASK) };
         for l4 in 0..512usize {
-            let e4 = pte_r((pml4 as *const Pte).add(l4));
+            let e4 = pte_r(kptr::<Pte>(pml4).add(l4));
             if e4 & PTE_P == 0 { continue; }
             // A copied entry of the kernel's PML4: the PDPT behind it is shared entirely.
             if !kpml4.is_null() && e4 == pte_r(kpml4.add(l4)) { continue; }
             let pdpt = e4 & ADDR_MASK;
             for l3 in 0..512usize {
-                let e3 = pte_r((pdpt as *const Pte).add(l3));
+                let e3 = pte_r(kptr::<Pte>(pdpt).add(l3));
                 if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; } // a 1G leaf of the kernel (GB1-3) — shared
                 // A directory copied from the kernel PDPT (GB1-3, split for
                 // a device's window) is shared. The process's GB0 PD is a copy, it has its own
@@ -2798,15 +2799,15 @@ pub fn as_footprint(pml4: u64) -> (u64, u64, u64, u64) {
     // SAFETY: P1 + P2 — a read-only walk over an address space (`top`/`ps` introspection).
     unsafe {
         for l4 in 0..256usize {
-            let e4 = pte_r((pml4 as *const Pte).add(l4));
+            let e4 = pte_r(kptr::<Pte>(pml4).add(l4));
             if e4 & PTE_P == 0 { continue; }
             let pdpt = e4 & ADDR_MASK;
             for l3 in 0..512usize {
-                let e3 = pte_r((pdpt as *const Pte).add(l3));
+                let e3 = pte_r(kptr::<Pte>(pdpt).add(l3));
                 if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; } // a 1G leaf — shared with the kernel
                 let pd = e3 & ADDR_MASK;
                 for l2 in 0..512usize {
-                    let e2 = pte_r((pd as *const Pte).add(l2));
+                    let e2 = pte_r(kptr::<Pte>(pd).add(l2));
                     if e2 & PTE_PS != 0 {
                         if e2 & PTE_PRIV == 0 { continue; }
                         if e2 & PTE_P != 0 { res += 512; huge += 512;
@@ -2820,7 +2821,7 @@ pub fn as_footprint(pml4: u64) -> (u64, u64, u64, u64) {
                     }
                     let pt = e2 & ADDR_MASK;
                     for l1 in 0..512usize {
-                        let e1 = pte_r((pt as *const Pte).add(l1));
+                        let e1 = pte_r(kptr::<Pte>(pt).add(l1));
                         if e1 & PTE_PRIV == 0 { continue; }
                         if e1 & PTE_P != 0 {
                             res += 1;
@@ -2877,15 +2878,15 @@ pub fn as_runs(pml4: u64, mut emit: impl FnMut(&Run)) {
     // SAFETY: P1 + P2 — a read-only walk over an address space, as `as_footprint`.
     unsafe {
         for l4 in 0..256usize {
-            let e4 = pte_r((pml4 as *const Pte).add(l4));
+            let e4 = pte_r(kptr::<Pte>(pml4).add(l4));
             if e4 & PTE_P == 0 { continue; }
             let pdpt = e4 & ADDR_MASK;
             for l3 in 0..512usize {
-                let e3 = pte_r((pdpt as *const Pte).add(l3));
+                let e3 = pte_r(kptr::<Pte>(pdpt).add(l3));
                 if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; }
                 let pd = e3 & ADDR_MASK;
                 for l2 in 0..512usize {
-                    let e2 = pte_r((pd as *const Pte).add(l2));
+                    let e2 = pte_r(kptr::<Pte>(pd).add(l2));
                     let va2 = ((l4 as u64) << 39) | ((l3 as u64) << 30) | ((l2 as u64) << 21);
                     if e2 & PTE_P == 0 { continue; }
                     if e2 & PTE_PS != 0 {
@@ -2894,7 +2895,7 @@ pub fn as_runs(pml4: u64, mut emit: impl FnMut(&Run)) {
                     }
                     let pt = e2 & ADDR_MASK;
                     for l1 in 0..512usize {
-                        let e1 = pte_r((pt as *const Pte).add(l1));
+                        let e1 = pte_r(kptr::<Pte>(pt).add(l1));
                         if e1 & PTE_PRIV == 0 || e1 & PTE_P == 0 { continue; }
                         page(va2 | ((l1 as u64) << 12), 1, e1, &mut emit);
                     }
@@ -2914,11 +2915,11 @@ pub fn virt_to_phys(vaddr: u64) -> u64 {
         let l4 = ((vaddr >> 39) & 0x1FF) as usize; let l3 = ((vaddr >> 30) & 0x1FF) as usize;
         let l2 = ((vaddr >> 21) & 0x1FF) as usize; let l1 = ((vaddr >> 12) & 0x1FF) as usize;
         let e4 = pte_r(cr3_root().add(l4)); if e4 & PTE_P == 0 { return vaddr; }
-        let e3 = pte_r(((e4 & ADDR_MASK) as *const Pte).add(l3)); if e3 & PTE_P == 0 { return vaddr; }
+        let e3 = pte_r(kptr::<Pte>(e4 & ADDR_MASK).add(l3)); if e3 & PTE_P == 0 { return vaddr; }
         if e3 & PTE_PS != 0 { return (e3 & 0x000F_FFFF_C000_0000) | (vaddr & 0x3FFF_FFFF); }
-        let e2 = pte_r(((e3 & ADDR_MASK) as *const Pte).add(l2)); if e2 & PTE_P == 0 { return vaddr; }
+        let e2 = pte_r(kptr::<Pte>(e3 & ADDR_MASK).add(l2)); if e2 & PTE_P == 0 { return vaddr; }
         if e2 & PTE_PS != 0 { return (e2 & 0x000F_FFFF_FFE0_0000) | (vaddr & 0x1F_FFFF); }
-        let e1 = pte_r(((e2 & ADDR_MASK) as *const Pte).add(l1)); if e1 & PTE_P == 0 { return vaddr; }
+        let e1 = pte_r(kptr::<Pte>(e2 & ADDR_MASK).add(l1)); if e1 & PTE_P == 0 { return vaddr; }
         (e1 & ADDR_MASK) | (vaddr & 0xFFF)
     }
 }

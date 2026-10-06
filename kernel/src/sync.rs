@@ -244,7 +244,7 @@ fn waiter_ready(t: usize) -> bool {
     if a == 0 { return true; }
     let kind = WKIND[t].load(Ordering::SeqCst) as u64;
     if kind == 0 { return true; } // futex: the addressee is the application's business
-    !still_waiting(a as *const u32, WVAL[t].load(Ordering::SeqCst), kind, WEXTRA[t].load(Ordering::SeqCst))
+    !still_waiting(crate::mem::vptr::<u32>(a), WVAL[t].load(Ordering::SeqCst), kind, WEXTRA[t].load(Ordering::SeqCst))
 }
 
 /// Is the task t ready to execute (without the side counter WSKIP): it is not sleeping on a
@@ -298,7 +298,7 @@ fn ready_now(t: usize) -> bool {
     let cr3 = crate::sched::task_cr3(t);
     if cr3 != 0 && cr3 != crate::paging::current_cr3() & !0xFFF { return false; }
     let kind = WKIND[t].load(Ordering::SeqCst) as u64;
-    !still_waiting(a as *const u32, WVAL[t].load(Ordering::SeqCst), kind, WEXTRA[t].load(Ordering::SeqCst))
+    !still_waiting(crate::mem::vptr::<u32>(a), WVAL[t].load(Ordering::SeqCst), kind, WEXTRA[t].load(Ordering::SeqCst))
 }
 
 /// For the scheduler: the task t is sleeping on a futex word and it may be left unscheduled.
@@ -381,14 +381,14 @@ pub fn demote_preempted_sleeper(t: usize) {
     // SAFETY: W2 + W3 — the state word lives in the PROCESS's memory (the sleeper passed it to
     // `upark`), and the demotion to 2 must be seen by the producer before we go on; the LVT
     // timer this task borrowed is returned just above.
-    if sp != 0 { unsafe { core::ptr::write_volatile(sp as *mut u32, 2); } }
+    if sp != 0 { unsafe { core::ptr::write_volatile(crate::uaccess::uptr::<u32>(sp), 2); } }
     fence(Ordering::SeqCst);
     let a = WADDR[t].load(Ordering::SeqCst);
     if a == 0 { return; }
     // SAFETY: W1 — the word waited on is re-read to decide whether the predicate is ALREADY satisfied:
     // if it is, the task is marked runnable, otherwise a wakeup that the producer decided to
     // skip would be lost.
-    let cur = unsafe { core::ptr::read_volatile(a as *const u32) };
+    let cur = unsafe { core::ptr::read_volatile(crate::mem::vptr::<u32>(a)) };
     let val = WVAL[t].load(Ordering::SeqCst);
     // kind1: the index has grown up; kind0/2: the word has changed / the door was rung
     let sat = crate::waitpred::satisfied(crate::waitpred::kind_of(WKIND[t].load(Ordering::SeqCst) as u64), cur, val);
@@ -402,7 +402,7 @@ pub fn dump_waiters() {
         if a == 0 { continue; }
         // SAFETY: W1 — a diagnostic read of the word a task sleeps on; a task with `WADDR == 0` is
         // skipped, so the address is one a sleeper validated.
-        let cur = unsafe { core::ptr::read_volatile(a as *const u32) };
+        let cur = unsafe { core::ptr::read_volatile(crate::mem::vptr::<u32>(a)) };
         crate::println!("[futex] t{} waits @{:#x} cur={:#x} val={:#x} kind={} wsleep={} woken={} dl={} cpu={}",
             t, a, cur, WVAL[t].load(Ordering::SeqCst), WKIND[t].load(Ordering::SeqCst),
             WSLEEP[t].load(Ordering::SeqCst), WOKEN[t].load(Ordering::SeqCst),
@@ -443,11 +443,11 @@ fn still_waiting(addr: *const u32, val: u32, kind: u64, extra: u64) -> bool {
     let idx = if k == crate::waitpred::Kind::Door && extra != 0 {
         // SAFETY: W1 — the doorbell's pair {idx_ptr, target} lies in the process's memory; `uaccess`
         // validated the `upark` argument, and a zero pointer is handled below.
-        let idx_ptr = unsafe { core::ptr::read_volatile(extra as *const u64) };
+        let idx_ptr = unsafe { core::ptr::read_volatile(crate::uaccess::uptr::<u64>(extra)) };
         // SAFETY: W1 — as above: the partner's index.
-        let target = unsafe { core::ptr::read_volatile((extra + 8) as *const u32) };
+        let target = unsafe { core::ptr::read_volatile(crate::uaccess::uptr::<u32>(extra + 8)) };
         // SAFETY: W1 — as above.
-        if idx_ptr == 0 { None } else { Some((unsafe { core::ptr::read_volatile(idx_ptr as *const u32) }, target)) }
+        if idx_ptr == 0 { None } else { Some((unsafe { core::ptr::read_volatile(crate::uaccess::uptr::<u32>(idx_ptr)) }, target)) }
     } else { None };
     crate::waitpred::still_waiting(k, cur, val, idx)
 }
@@ -455,7 +455,7 @@ fn still_waiting(addr: *const u32, val: u32, kind: u64, extra: u64) -> bool {
 fn set_state(state: u64, v: u32) {
     // SAFETY: W1 — the state word of the wait (`upark`'s argument, validated); 0 means the caller
     // passed none.
-    if state != 0 { unsafe { core::ptr::write_volatile(state as *mut u32, v); } }
+    if state != 0 { unsafe { core::ptr::write_volatile(crate::uaccess::uptr::<u32>(state), v); } }
 }
 
 /// The extended wait (PLAN-SYNC SPSC v2): a kind predicate + a state word for
@@ -575,7 +575,7 @@ pub fn wait_on_ex(addr: *const u32, val: u32, deadline: Option<u64>, kind: u64, 
     WEXTRA[t].store(extra, Ordering::SeqCst);
     WSTATE[t].store(state, Ordering::SeqCst);
     WSLEEP[t].store(0, Ordering::SeqCst);
-    WADDR[t].store(addr as u64, Ordering::SeqCst);
+    WADDR[t].store(crate::mem::vaddr(addr), Ordering::SeqCst);
     fence(Ordering::SeqCst);
     let threaded = crate::syscall::THREADED.load(Ordering::Relaxed);
     let mut r = 0i64;
@@ -651,7 +651,7 @@ pub fn wait_on_ex(addr: *const u32, val: u32, deadline: Option<u64>, kind: u64, 
             if HANG_PRN.load(Ordering::Relaxed) == 1 { dump_tasks(); } // the first one to notice prints EVERYBODY
             crate::println!("[futex] IT HAS HUNG: t{} on cpu{} has been waiting for 3 s @{:#x} val={:#x} cur={:#x} woken={} kind={} sleep={} deadline={} \
                 LVT={:#x} armed-preempt={}",
-                t, cpu, addr as u64, val, cur, WOKEN[t].load(Ordering::SeqCst), kind,
+                t, cpu, crate::mem::vaddr(addr), val, cur, WOKEN[t].load(Ordering::SeqCst), kind,
                 WSLEEP[t].load(Ordering::SeqCst), deadline.is_some(), lvt,
                 ARMED_PREEMPT.load(Ordering::SeqCst));
         }
@@ -805,9 +805,9 @@ pub fn wait_on_ex(addr: *const u32, val: u32, deadline: Option<u64>, kind: u64, 
             // 'a timeout' when the predicate is already satisfied.
             let cur = unsafe { core::ptr::read_volatile(addr) };
             crate::println!("[slow-wait] t{} @{:#x} {} us: val={:#x} cur={:#x} woken={} kind={} r={}",
-                t, addr as u64, us, val, cur, WOKEN[t].load(Ordering::SeqCst), kind, r);
+                t, crate::mem::vaddr(addr), us, val, cur, WOKEN[t].load(Ordering::SeqCst), kind, r);
         }
-        slow_note(t, addr as u64, us);
+        slow_note(t, crate::mem::vaddr(addr), us);
     }
     r
 }
@@ -849,7 +849,7 @@ pub fn dump_tasks() {
             continue;
         }
         // SAFETY: W1 — a diagnostic read of the word a task sleeps on (see `dump_waiters`).
-        let cur = unsafe { core::ptr::read_volatile(a as *const u32) };
+        let cur = unsafe { core::ptr::read_volatile(crate::mem::vptr::<u32>(a)) };
         let val = WVAL[t].load(Ordering::SeqCst);
         let (taken, pend) = crate::sched::sched_flags(t);
         crate::println!("[futex]   t{} cpu{} {} @{:#x} val={:#x} cur={:#x} kind={} rn={} blk={} woken={} sleep={} dl={} taken={} pend={} {}",
@@ -863,7 +863,7 @@ pub fn dump_tasks() {
             // has changed": with kind 1 (the index has grown up) an equality means FULFILLED, and
             // the line "cur == val" read as "it waits lawfully", hiding exactly the
             // case for whose sake the snapshot is printed.
-            if !still_waiting(a as *const u32, val, WKIND[t].load(Ordering::SeqCst) as u64, WEXTRA[t].load(Ordering::SeqCst))
+            if !still_waiting(crate::mem::vptr::<u32>(a), val, WKIND[t].load(Ordering::SeqCst) as u64, WEXTRA[t].load(Ordering::SeqCst))
                 { "<-- THE PREDICATE IS FULFILLED (the wakeup was lost)" } else { "" });
     }
 }
@@ -1023,7 +1023,7 @@ fn wake_impl(addr: u64, maxn: usize, leader: usize, allow_switch: bool) -> usize
             && WKIND[t].load(Ordering::SeqCst) == 0
             // SAFETY: W1 — the word of the task being woken is read to decide whether the store has
             // already woken it (then the IPI is skipped).
-            && unsafe { core::ptr::read_volatile(addr as *const u32) } != WVAL[t].load(Ordering::SeqCst);
+            && unsafe { core::ptr::read_volatile(crate::mem::vptr::<u32>(addr)) } != WVAL[t].load(Ordering::SeqCst);
         if c == my_cpu {
             WK_SAME.fetch_add(1, Ordering::Relaxed);
             if hint.is_none() { hint = Some(t); }

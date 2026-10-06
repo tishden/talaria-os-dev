@@ -651,7 +651,7 @@ unsafe fn prefetch_run(ino: u32, inb: &mut [u8; 128], fb0: u64, maxfb: u64) -> u
         n += 1;
     }
     if n < 2 { return 0; }
-    let buf = core::slice::from_raw_parts_mut(RA_BUF as *mut u8, n * BS);
+    let buf = core::slice::from_raw_parts_mut(crate::mem::kptr::<u8>(RA_BUF), n * BS);
     if !crate::fs::blk_read((first as usize) * SPB, buf) { return 0; } // it did not work out — the ordinary path
     STATS_RD += n as u64;
     STATS_RA.0 += 1; STATS_RA.1 += n as u64 - 1;
@@ -660,7 +660,7 @@ unsafe fn prefetch_run(ino: u32, inb: &mut [u8; 128], fb0: u64, maxfb: u64) -> u
     // one range.
     for k in 0..n {
         let p = cblk_new(first + k as u32);
-        core::ptr::copy_nonoverlapping((RA_BUF as *const u8).add(k * BS), p, BS);
+        core::ptr::copy_nonoverlapping(crate::mem::kptr::<u8>(RA_BUF).add(k * BS), p, BS);
     }
     n
 }
@@ -677,7 +677,7 @@ unsafe fn cblk_mode(bn: u32, read: bool) -> *mut u8 {
     let slot = match find_slot(bn) { Some(s) => s, None => victim(set_of(bn)) };
     touch(slot);
     let tag = core::ptr::read_volatile(addr_of_mut!(CTAG[slot]));
-    let p = (CACHE_BASE as *mut u8).add(slot * BSZ);
+    let p = crate::mem::kptr::<u8>(CACHE_BASE).add(slot * BSZ);
     if tag == bn + 1 { STATS_HIT += 1; } else { STATS_MISS += 1; }
     if tag != bn + 1 {
         // §8.4: evicting dirty METADATA in place while their transaction is not
@@ -797,7 +797,7 @@ unsafe fn writeback_slot(slot: usize) {
             }
         wbage_note(WbC::Evict, age_k, age_sum, age_max);
     }
-    let p = (CACHE_BASE as *mut u8).add(slot * BSZ);
+    let p = crate::mem::kptr::<u8>(CACHE_BASE).add(slot * BSZ);
     let buf = core::slice::from_raw_parts(p, BS * k);
     if !crate::fs::blk_write((bn as usize) * SPB, buf) { crate::println!("ext2: an error writing the block {}", bn); }
     STATS_WR += k as u64;
@@ -1244,7 +1244,7 @@ unsafe fn writeback_unlocked(sel: Sel, max_chunks: usize, chunk: usize, cause: W
                 else {
                 let bn = CTAG[s] - 1;
                 if COWN[s] != 0 { let a = age_of(now, CDIRTIME[s]); age_sum += a as u64; if a > age_max { age_max = a; } }
-                core::ptr::copy_nonoverlapping((CACHE_BASE as *const u8).add(s * BSZ), (buf as *mut u8).add(k * BSZ), BS);
+                core::ptr::copy_nonoverlapping(crate::mem::kptr::<u8>(CACHE_BASE).add(s * BSZ), crate::mem::kptr::<u8>(buf).add(k * BSZ), BS);
                 dcnt_del(s);
                 CDIRTY[s] = false; COWN[s] = 0; CJRN[s] = false; CJOLD[s] = false;
                 core::ptr::write_volatile(addr_of_mut!(CWB[s]), true);
@@ -3497,7 +3497,7 @@ pub fn pread_direct(h: i64, dst: *mut u8, len: usize, off: u64) -> i64 {
             let b = bmap(ino, &mut inb, fb, false, &mut added);
             if b == 0 { core::ptr::write_bytes(dst.add(k * BS), 0, BS); k += 1; continue; } // a hole — zeroes
             if let Some(slot) = find_slot(b) {                                              // a fresh version is in the cache
-                core::ptr::copy_nonoverlapping((CACHE_BASE as *const u8).add(slot * BSZ), dst.add(k * BS), BS);
+                core::ptr::copy_nonoverlapping(crate::mem::kptr::<u8>(CACHE_BASE).add(slot * BSZ), dst.add(k * BS), BS);
                 k += 1; continue;
             }
             let mut run = 1usize;                                                           // the gluing of the neighbouring blocks
@@ -4357,7 +4357,7 @@ unsafe fn jwrite(i: usize, buf: &[u8]) -> bool { crate::fs::blk_write((JBLK[i] a
 /// are sound only for DIFFERENT `k` — which is how they are taken (`jrn_replay` holds
 /// `stage(0)` and `stage(1)` at once, and they are disjoint pages). Asking twice for the
 /// same `k` would be two `&mut` to the same bytes.
-unsafe fn stage(k: usize) -> &'static mut [u8] { core::slice::from_raw_parts_mut((JSTAGE + (k * BSZ) as u64) as *mut u8, BSZ) }
+unsafe fn stage(k: usize) -> &'static mut [u8] { core::slice::from_raw_parts_mut(crate::mem::kptr::<u8>(JSTAGE + (k * BSZ) as u64), BSZ) }
 
 /// Find the journal (the inode s_journal_inum), parse its superblock, with a non-empty
 /// journal REPLAY it, then mark it clean. It is called from mount().
@@ -4482,7 +4482,7 @@ unsafe fn set_recover(on: bool) {
     // the next transaction (on sigtest that gave 44 transactions instead of 2).
     let (b, off) = if BS == 1024 { (1u32, 0usize) } else { (0u32, 1024usize) };
     if let Some(slot) = find_slot(b) {
-        let p = (CACHE_BASE as *mut u8).add(slot * BSZ + off);
+        let p = crate::mem::kptr::<u8>(CACHE_BASE).add(slot * BSZ + off);
         core::ptr::copy_nonoverlapping(sbm.as_ptr(), p, 1024);
     }
 }
@@ -4922,20 +4922,20 @@ unsafe fn jrn_txn(sel: JSel, cap: usize) -> usize {
                 let bn = CTAG[slot] - 1;
                 let addr = CACHE_BASE + (slot * BSZ) as u64;
                 // the escaping: a block that starts with the journal's magic must not be written as it is
-                let head = core::ptr::read_volatile(addr as *const u32);
+                let head = core::ptr::read_volatile(crate::mem::kptr::<u32>(addr));
                 let esc = head.to_be() == JMAGIC;
                 last_tag = o;
                 o = crate::jbd2::put_tag(d, o, bn, first, esc);
                 first = false;
                 if esc {
                     let e = stage(1);
-                    core::ptr::copy_nonoverlapping(addr as *const u8, e.as_mut_ptr(), BS);
+                    core::ptr::copy_nonoverlapping(crate::mem::kptr::<u8>(addr), e.as_mut_ptr(), BS);
                     wrbe32(e, 0, 0);
                     jwrite(pos, e);
                 } else {
                     // the slot's snapshot goes into JCOPY (§8.12), the DMA will go already without the FS lock
                     let cp = JCOPY + ((nr - 1) * BSZ) as u64;
-                    core::ptr::copy_nonoverlapping(addr as *const u8, cp as *mut u8, BS);
+                    core::ptr::copy_nonoverlapping(crate::mem::kptr::<u8>(addr), crate::mem::kptr::<u8>(cp), BS);
                     reqs[nr] = ((JBLK[pos] as usize) * SPB, cp, SPB as u16); nr += 1;
                 }
                 CJPOS[slot] = pos as u32 | if esc { 0x8000_0000 } else { 0 };
@@ -5147,7 +5147,7 @@ pub fn mmap_prepare(h: i64, off: u64, len: usize) -> Option<usize> {
         let set = set_of(b);
         // do not occupy the set's last evictable way
         if find_slot(b).is_none() && pinned_in_set(set) >= WAYS - 1 { break; }
-        let p = cblk(b) as u64;
+        let p = crate::mem::kpa_of(cblk(b));
         let slot = ((p - CACHE_BASE) / BSZ as u64) as usize;
         if CPIN[slot] == 0 && pinned_in_set(set) >= WAYS - 1 { break; }
         CPIN[slot] += 1;

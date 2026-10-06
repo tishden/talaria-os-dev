@@ -363,7 +363,7 @@ STUB_FATAL 15
 pub fn init() {
     unsafe extern "C" { static vectors_el1: u8; }
     unsafe {
-        core::arch::asm!("msr vbar_el1, {}", "isb", in(reg) core::ptr::addr_of!(vectors_el1) as u64, options(nostack));
+        core::arch::asm!("msr vbar_el1, {}", "isb", in(reg) crate::mem::vaddr(core::ptr::addr_of!(vectors_el1)), options(nostack));
     }
 }
 
@@ -470,7 +470,7 @@ extern "C" fn trap(kind: u64, f: &Frame) -> ! {
         crate::println!("║ the stack @ {:#x}:", sp);
         for i in 0..8u64 {
             let a = sp + i * 8;
-            let v = unsafe { core::ptr::read_volatile(a as *const u64) };
+            let v = unsafe { core::ptr::read_volatile(crate::mem::vptr::<u64>(a)) };
             crate::println!("║   [{:#014x}] = {:#018x}", a, v);
         }
     } else {
@@ -586,7 +586,7 @@ pub fn guarded_load(addr: u64) -> Option<u64> {
 /// resumes at its fixup; anything else is fatal.
 #[unsafe(no_mangle)]
 extern "C" fn sync_el1_entry(kind: u64, f: &mut Frame) -> u64 {
-    let me = f as *mut Frame as u64;
+    let me = crate::mem::vaddr(f as *mut Frame);
     let ec = (f.esr >> 26) & 0x3F;
     // An exception BEFORE the per-core block exists (the bring-up, up to `percpu::init`),
     // in raw hex and before any logic: a fault whose handler faults again leaves this
@@ -750,7 +750,7 @@ fn user_fault(f: &mut Frame) -> bool {
         // and what the process saw (docs/ARM64-PLAN.md §4.12).
         if ec == 0 {
             let user = if root != 0 { crate::paging::phys_of_in(root, f.pc) } else { None };
-            let word = user.map(|ph| unsafe { core::ptr::read_volatile(ph as *const u32) });
+            let word = user.map(|ph| unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(ph)) });
             match (user, word) {
                 (Some(ph), Some(w)) => crate::println!("[fault] EL0: the data side holds {:#010x} at the pc (the frame {:#x})", w, ph),
                 _ => crate::println!("[fault] EL0: the pc is not mapped in the process's tables"),
@@ -778,7 +778,7 @@ fn user_fault(f: &mut Frame) -> bool {
 /// console has a lock and the interrupted code may hold it.
 #[unsafe(no_mangle)]
 extern "C" fn irq_entry(_kind: u64, f: &mut Frame) -> u64 {
-    let me = f as *mut Frame as u64;
+    let me = crate::mem::vaddr(f as *mut Frame);
     let cpu = cpu::cpu_index();
     let mut tick = false;
     loop {

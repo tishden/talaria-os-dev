@@ -51,7 +51,7 @@ pub unsafe fn fpu_restore(area: *const u8) {
 pub fn fpu_image_check(area: *const u8) -> Result<(), u32> {
     // SAFETY: the caller hands a task's FPU slot — at least 512 bytes of it.
     let mxcsr = unsafe { core::ptr::read_volatile(area.add(24) as *const u32) };
-    if mxcsr & 0xFFFF_0000 != 0 || area as usize & 0xF != 0 { Err(mxcsr) } else { Ok(()) }
+    if mxcsr & 0xFFFF_0000 != 0 || crate::mem::vaddr(area) & 0xF != 0 { Err(mxcsr) } else { Ok(()) }
 }
 /// How much of an entry's FP area a forked task inherits: the legacy fxsave area.
 pub const FPU_INHERIT: usize = 512;
@@ -188,7 +188,7 @@ pub fn flags_irq_on(f: u64) -> bool { f & 0x200 != 0 }
 /// C3: `kstack_top` is the top of a kernel stack nobody runs on.
 pub unsafe fn build_user_ctx(kstack_top: u64, pc: u64, usp: u64, flags: u64, gp: &Gp) -> u64 {
     let mut sp = kstack_top & !0xF;
-    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(*sp as *mut u64, v); };
+    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(crate::mem::vptr::<u64>(*sp), v); };
     push(&mut sp, 0x23); push(&mut sp, usp); push(&mut sp, flags); push(&mut sp, 0x2B); push(&mut sp, pc);
     for k in 0..15 { push(&mut sp, gp[k]); } // rax is pushed first (popped last)
     sp
@@ -199,14 +199,14 @@ pub unsafe fn build_user_ctx(kstack_top: u64, pc: u64, usp: u64, flags: u64, gp:
 /// As `build_user_ctx`.
 pub unsafe fn build_kernel_ctx(stack_top: u64, entry: extern "C" fn() -> !) -> u64 {
     let mut sp = stack_top & !0xF;
-    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(*sp as *mut u64, v); };
+    let push = |sp: &mut u64, v: u64| { *sp -= 8; core::ptr::write(crate::mem::vptr::<u64>(*sp), v); };
     push(&mut sp, 0x10); push(&mut sp, (stack_top & !0xF) - 8); push(&mut sp, 0x202); push(&mut sp, 0x08);
     push(&mut sp, entry as usize as u64);
     for _ in 0..15 { push(&mut sp, 0); }
     sp
 }
 #[inline(always)]
-fn slot(sp: u64, k: u64) -> u64 { unsafe { core::ptr::read_volatile((sp + k * 8) as *const u64) } }
+fn slot(sp: u64, k: u64) -> u64 { unsafe { core::ptr::read_volatile(crate::mem::vptr::<u64>(sp + k * 8)) } }
 /// The program counter, the user stack pointer, the frame pointer and the flags of a context.
 pub fn ctx_pc(sp: u64) -> u64 { slot(sp, 15) }
 pub fn ctx_sp(sp: u64) -> u64 { slot(sp, 18) }
@@ -237,6 +237,6 @@ pub fn ctx_exit_uregs(sp: u64) -> [u64; 10] {
 /// # Safety
 /// C3: `sp` is a saved frame of a task this core owns.
 pub unsafe fn ctx_park(sp: u64, f: extern "C" fn() -> !, ksp: u64) {
-    let w = |k: u64, v: u64| core::ptr::write_volatile((sp + k * 8) as *mut u64, v);
+    let w = |k: u64, v: u64| core::ptr::write_volatile(crate::mem::vptr::<u64>(sp + k * 8), v);
     w(15, f as usize as u64); w(16, 0x08); w(17, 0x2); w(18, ksp); w(19, 0x10);
 }

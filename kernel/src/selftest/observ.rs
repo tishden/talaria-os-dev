@@ -18,7 +18,7 @@ use core::fmt::Write;
 // Three frames before the fault: the chain in the stack is bound to be visible both in the text and in
 // the core dump. `inline(never)` — otherwise the compiler would collapse them into one.
 #[inline(never)]
-fn core_fault_l1() { unsafe { core::ptr::write_volatile(0x0000_7EFF_DEAD_0000u64 as *mut u64, 1); } }
+fn core_fault_l1() { unsafe { core::ptr::write_volatile(crate::mem::vptr::<u64>(0x0000_7EFF_DEAD_0000u64), 1); } }
 #[inline(never)]
 fn core_fault_l2() { core_fault_l1(); core::hint::black_box(()); }
 #[inline(never)]

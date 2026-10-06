@@ -279,12 +279,12 @@ pub unsafe fn enter(nr: u64, args: &mut [u64; 6], b: &mut Bounce) {
         257 => args[2] = oflags(args[2]),                              // openat(dirfd, path, flags, mode)
         293 => args[1] = oflags(args[1]),                              // pipe2(fds, flags): O_DIRECT
         72 if args[1] == 4 => args[2] = oflags(args[2]),               // fcntl(F_SETFL)
-        5 => args[1] = b.ptr() as u64,                                 // fstat(fd, st)
-        262 => args[2] = b.ptr() as u64,                               // newfstatat(dirfd, path, st, flags)
+        5 => args[1] = crate::mem::vaddr(b.ptr()),                         // fstat(fd, st)
+        262 => args[2] = crate::mem::vaddr(b.ptr()),                       // newfstatat(dirfd, path, st, flags)
         233 if args[3] != 0 => {                                       // epoll_ctl(ep, op, fd, event)
-            let a = core::ptr::read_unaligned(args[3] as *const [u8; EPOLL_EVENT_SIZE]);
+            let a = core::ptr::read_unaligned(crate::uaccess::uptr::<[u8; EPOLL_EVENT_SIZE]>(args[3]));
             core::ptr::write_unaligned(b.ptr() as *mut [u8; EPOLL_EVENT_INTERNAL], epoll_event_to_internal(&a));
-            args[3] = b.ptr() as u64;
+            args[3] = crate::mem::vaddr(b.ptr());
         }
         _ => {}
     }
@@ -301,12 +301,12 @@ pub unsafe fn leave(nr: u64, user: &[u64; 6], b: &mut Bounce, r: u64) -> u64 {
         5 | 262 if r == 0 => {
             let dst = if nr == 5 { user[1] } else { user[2] };
             let x = core::ptr::read_unaligned(b.ptr() as *const [u8; STAT_INTERNAL]);
-            core::ptr::write_unaligned(dst as *mut [u8; STAT_SIZE], stat_from_internal(&x));
+            core::ptr::write_unaligned(crate::uaccess::uptr::<[u8; STAT_SIZE]>(dst), stat_from_internal(&x));
         }
         // epoll_pwait(ep, events, max, ...): `r` packed events lie at the start of an array
         // sized for `max` 16-byte ones — spread them out from the last one down.
         281 if (r as i64) > 0 => {
-            let base = user[1] as *mut u8;
+            let base = crate::uaccess::uptr::<u8>(user[1]);
             for i in (0..r as usize).rev() {
                 let x = core::ptr::read_unaligned(base.add(i * EPOLL_EVENT_INTERNAL) as *const [u8; EPOLL_EVENT_INTERNAL]);
                 core::ptr::write_unaligned(base.add(i * EPOLL_EVENT_SIZE) as *mut [u8; EPOLL_EVENT_SIZE], epoll_event_from_internal(&x));

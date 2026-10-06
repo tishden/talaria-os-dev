@@ -48,9 +48,9 @@ pub fn init() {
     };
     let fr = match crate::mem::alloc_contig(PAGES) { Some(f) => f, None => return };
     unsafe {
-        core::ptr::write_bytes(fr as *mut u8, 0, load);
-        core::ptr::copy_nonoverlapping(IMAGE.as_ptr(), fr as *mut u8, load);
-        crate::arch::icache::sync(fr, load as u64);   // the trampolines and the clock calls are code
+        core::ptr::write_bytes(crate::mem::kptr::<u8>(fr), 0, load);
+        core::ptr::copy_nonoverlapping(IMAGE.as_ptr(), crate::mem::kptr::<u8>(fr), load);
+        crate::arch::icache::sync(crate::mem::kva(fr), load as u64);   // the trampolines and the clock calls are code
     }
     BASE.store(fr, Ordering::SeqCst);
     crate::tsc::publish_vdso_now(); // the clock's parameters go at once, before the first discipline
@@ -116,7 +116,7 @@ pub fn publish(tsc_base: u64, ns_base: u64, hz: u64, wall_off: u64) {
     if base == 0 || hz == 0 { return; }
     // ns = (dt * mult) >> 32; mult = 1e9 * 2^32 / hz
     let mult = ((1_000_000_000u128 << 32) / hz as u128) as u64;
-    let d = (base + 4096) as *mut u64;
+    let d = crate::mem::kptr::<u64>(base + 4096);
     unsafe {
         let seq = d as *mut u32;
         let s = core::ptr::read_volatile(seq);

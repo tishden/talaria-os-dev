@@ -61,7 +61,7 @@ static ECAM_BUSN: AtomicUsize = AtomicUsize::new(255);
     ecam() != 0 && (bus as usize) <= ECAM_BUSN.load(Ordering::Relaxed)
 }
 #[inline] fn cfg(bus: u8, dev: u8, func: u8, off: u16) -> *mut u32 {
-    (ecam() + ((bus as u64) << 20) + ((dev as u64) << 15) + ((func as u64) << 12) + off as u64) as *mut u32
+    crate::mem::devptr::<u32>(ecam() + ((bus as u64) << 20) + ((dev as u64) << 15) + ((func as u64) << 12) + off as u64)
 }
 // Legacy access to the config through the ports 0xCF8/0xCFC: on EC2 virtual machines (Nitro
 // emulates an i440FX) there is no MCFG in the ACPI at all, ECAM is unavailable — only this works.
@@ -492,14 +492,14 @@ pub fn msix_enable_masked(d: &PciDev) -> u16 {
             unsafe {
                 match msg {
                     Some((lo, hi, data)) => {
-                        core::ptr::write_volatile(e as *mut u32, lo);                 // msg addr
-                        core::ptr::write_volatile((e + 4) as *mut u32, hi);           // msg addr hi
-                        core::ptr::write_volatile((e + 8) as *mut u32, data);         // msg data
+                        core::ptr::write_volatile(crate::mem::devptr::<u32>(e), lo);                 // msg addr
+                        core::ptr::write_volatile(crate::mem::devptr::<u32>(e + 4), hi);           // msg addr hi
+                        core::ptr::write_volatile(crate::mem::devptr::<u32>(e + 8), data);         // msg data
                         // vector control: unmasked (in the IDT there stand the stubs
                         // MSI_VECTOR_BASE.. with an EOI — the delivery is safe)
-                        core::ptr::write_volatile((e + 12) as *mut u32, 0);
+                        core::ptr::write_volatile(crate::mem::devptr::<u32>(e + 12), 0);
                     }
-                    None => core::ptr::write_volatile((e + 12) as *mut u32, 1),
+                    None => core::ptr::write_volatile(crate::mem::devptr::<u32>(e + 12), 1),
                 }
             }
         }
@@ -537,8 +537,8 @@ pub fn msix_route(d: &PciDev, cpu: usize) -> u32 {
         // collection and the entry keeps the address of the translation register.
         if let Some((lo, hi)) = crate::arch::msi::retarget(d, i as u16, size as u16, cpu) {
             unsafe {
-                core::ptr::write_volatile(e as *mut u32, lo);
-                core::ptr::write_volatile((e + 4) as *mut u32, hi);
+                core::ptr::write_volatile(crate::mem::devptr::<u32>(e), lo);
+                core::ptr::write_volatile(crate::mem::devptr::<u32>(e + 4), hi);
             }
         }
     }
@@ -631,7 +631,7 @@ pub fn msix_msg_addr(d: &PciDev, idx: u16) -> u32 {
     let tbl = rd(d.bus, d.dev, d.func, d.msix_cap + 4);
     let (bar_base, _) = bar(d.bus, d.dev, d.func, (tbl & 0x7) as u16);
     if bar_base == 0 { return u32::MAX; }
-    unsafe { core::ptr::read_volatile((bar_base + (tbl & !0x7) as u64 + (idx as u64) * 16) as *const u32) }
+    unsafe { core::ptr::read_volatile(crate::mem::devptr::<u32>(bar_base + (tbl & !0x7) as u64 + (idx as u64) * 16)) }
 }
 
 /// Find a device by vendor:device (the first one). None — there is none.

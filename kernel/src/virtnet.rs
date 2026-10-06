@@ -41,7 +41,7 @@ pub struct VirtioNic {
 }
 
 #[inline]
-unsafe fn frame(addr: u64) -> &'static mut [u8; FRAME] { &mut *(addr as *mut [u8; FRAME]) }
+unsafe fn frame(addr: u64) -> &'static mut [u8; FRAME] { &mut *crate::mem::vptr::<[u8; FRAME]>(addr) }
 
 impl NetDev for VirtioNic {
     fn name(&self) -> &'static str { "virtio-net" }
@@ -142,10 +142,10 @@ fn find_mmio(inst: usize) -> Option<(usize, usize)> {
     for i in 0..crate::arch::VIRTIO_MMIO_SLOTS {
         if n >= list.len() { break; }
         let Some((addr, size)) = crate::arch::virtio_mmio_slot(i) else { continue };
-        let magic = unsafe { core::ptr::read_volatile(addr as *const u32) };
+        let magic = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u32>(addr as u64)) };
         if magic != 0x7472_6976 { continue; }
         if addr == a0 { continue; }
-        let header = match NonNull::new(addr as *mut VirtIOHeader) { Some(h) => h, None => continue };
+        let header = match NonNull::new(crate::mem::devptr::<VirtIOHeader>(addr as u64)) { Some(h) => h, None => continue };
         if let Ok(t) = unsafe { MmioTransport::new(header, size) } {
             use virtio_drivers::transport::{DeviceType, Transport};
             let net = t.device_type() == DeviceType::Network;
@@ -171,7 +171,7 @@ fn probe(_: Option<&PciDev>, inst: usize) -> Option<&'static mut dyn NetDev> {
     if inst >= NSLOT { return None; }
     let (a, sz) = find_mmio(inst)?;
     crate::println!("virtio-net: the instance {} — the window {:#x} ({} B)", inst, crate::arch::mmio_pa(a as u64), sz);
-    let header = NonNull::new(a as *mut VirtIOHeader)?;
+    let header = NonNull::new(crate::mem::devptr::<VirtIOHeader>(a as u64))?;
     let transport = unsafe { MmioTransport::new(header, sz) }.ok()?;
     let dev: Net = VirtIONetRaw::new(SomeTransport::from(transport)).ok()?;
     install(unsafe { core::ptr::addr_of_mut!(SLOT[inst]) }, dev, a)
@@ -258,7 +258,7 @@ pub fn mmio_window_from_cmdline(cmdline: &str) -> Option<(usize, usize)> {
         let (addr_s, _irq) = rest.split_once(':')?;
         let size = parse_size(size_s)?;
         let addr = crate::arch::mmio_va(parse_num(addr_s)? as u64) as usize; // the kernel's pointer (arm64: the devices' alias)
-        let header = NonNull::new(addr as *mut VirtIOHeader)?;
+        let header = NonNull::new(crate::mem::devptr::<VirtIOHeader>(addr as u64))?;
         if let Ok(t) = unsafe { MmioTransport::new(header, size) } {
             let net = t.device_type() == DeviceType::Network;
             core::mem::forget(t); // a Drop resets the device — an inspection does not put out a foreign one
@@ -274,13 +274,13 @@ pub fn mmio_window_from_cmdline(cmdline: &str) -> Option<(usize, usize)> {
 pub fn scan_mmio_window() -> Option<(usize, usize)> {
     for i in 0..crate::arch::VIRTIO_MMIO_SLOTS {
         let Some((addr, size)) = crate::arch::virtio_mmio_slot(i) else { continue };
-        let magic = unsafe { core::ptr::read_volatile(addr as *const u32) };
-        let dev_id = unsafe { core::ptr::read_volatile((addr + 8) as *const u32) };
+        let magic = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u32>(addr as u64)) };
+        let dev_id = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u32>(addr as u64 + 8)) };
         if i < 4 || (magic == 0x7472_6976 && dev_id != 0) {
             println!("talaria: mmio slot {} @ {:#x}: magic={:#x} dev_id={}", i, addr, magic, dev_id);
         }
         if magic != 0x7472_6976 { continue; }
-        let header = NonNull::new(addr as *mut VirtIOHeader)?;
+        let header = NonNull::new(crate::mem::devptr::<VirtIOHeader>(addr as u64))?;
         if let Ok(t) = unsafe { MmioTransport::new(header, size) } {
             let net = t.device_type() == DeviceType::Network;
             core::mem::forget(t); // a Drop resets the device — an inspection does not put out a foreign one
@@ -297,7 +297,7 @@ pub fn mmio_slot_max() -> usize {
     let mut m = 0;
     for i in 0..crate::arch::VIRTIO_MMIO_SLOTS {
         let Some((addr, _)) = crate::arch::virtio_mmio_slot(i) else { continue };
-        if unsafe { core::ptr::read_volatile(addr as *const u32) } == 0x7472_6976 { m = i; }
+        if unsafe { core::ptr::read_volatile(crate::mem::devptr::<u32>(addr as u64)) } == 0x7472_6976 { m = i; }
     }
     m
 }
@@ -305,9 +305,9 @@ pub fn mmio_slot_max() -> usize {
 pub fn mmio_slot() -> Option<usize> {
     for i in 0..crate::arch::VIRTIO_MMIO_SLOTS {
         let Some((addr, size)) = crate::arch::virtio_mmio_slot(i) else { continue };
-        let magic = unsafe { core::ptr::read_volatile(addr as *const u32) };
+        let magic = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u32>(addr as u64)) };
         if magic != 0x7472_6976 { continue; }
-        let header = NonNull::new(addr as *mut VirtIOHeader)?;
+        let header = NonNull::new(crate::mem::devptr::<VirtIOHeader>(addr as u64))?;
         if let Ok(t) = unsafe { MmioTransport::new(header, size) } {
             let net = t.device_type() == DeviceType::Network;
             core::mem::forget(t); // a Drop resets the device — an inspection does not put out a foreign one

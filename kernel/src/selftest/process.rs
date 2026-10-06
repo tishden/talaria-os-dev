@@ -162,12 +162,12 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             const V: u64 = 0x1_0000_0000;
             crate::paging::map_in(parent, V, pp, true, false);
             let (pval, cval1, cval2, pval2) = unsafe {
-                crate::paging::switch(parent); core::ptr::write_volatile(V as *mut u64, 0x1111);
+                crate::paging::switch(parent); core::ptr::write_volatile(crate::mem::vptr::<u64>(V), 0x1111);
                 let child = crate::paging::fork_address_space(parent); // the clone AFTER the write of 0x1111
-                crate::paging::switch(child);  let cval1 = core::ptr::read_volatile(V as *const u64); // we expect 0x1111
-                core::ptr::write_volatile(V as *mut u64, 0x2222); // change it in the child
-                let cval2 = core::ptr::read_volatile(V as *const u64);
-                crate::paging::switch(parent); let pval2 = core::ptr::read_volatile(V as *const u64); // we expect still 0x1111
+                crate::paging::switch(child);  let cval1 = core::ptr::read_volatile(crate::mem::vptr::<u64>(V)); // we expect 0x1111
+                core::ptr::write_volatile(crate::mem::vptr::<u64>(V), 0x2222); // change it in the child
+                let cval2 = core::ptr::read_volatile(crate::mem::vptr::<u64>(V));
+                crate::paging::switch(parent); let pval2 = core::ptr::read_volatile(crate::mem::vptr::<u64>(V)); // we expect still 0x1111
                 crate::paging::switch(orig);
                 (0x1111u64, cval1, cval2, pval2)
             };
@@ -245,12 +245,12 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 crate::user::setup_thread_mode(kmain);
                 // a page of ring3 code: inc qword [rdi]; jmp loop  (48 FF 07 EB FB)
                 let code = crate::mem::alloc_frame().unwrap();
-                let cp = code as *mut u8;
+                let cp = crate::mem::kptr::<u8>(code);
                 for (i, b) in [0x48u8, 0xFF, 0x07, 0xEB, 0xFB].iter().enumerate() { core::ptr::write(cp.add(i), *b); }
                 // the page of counters (2 x u64)
                 let ctr = crate::mem::alloc_frame().unwrap();
-                core::ptr::write(ctr as *mut u64, 0);
-                core::ptr::write((ctr + 8) as *mut u64, 0);
+                core::ptr::write(crate::mem::kptr::<u64>(ctr), 0); // DMAP: ring 3 (thread mode, the identity) uses `code`/`ctr` by these physical addresses
+                core::ptr::write(crate::mem::kptr::<u64>(ctr + 8), 0);
                 CTR_BASE.store(ctr, Ordering::SeqCst);
                 // the stacks: 2 user + 2 kernel
                 let us0 = crate::mem::alloc_frame().unwrap() + 4096;
@@ -288,8 +288,8 @@ extern "C" fn task_thread_printer() -> ! {
     let mut last = 0u64;
     loop {
         for _ in 0..80_000_000u64 { core::hint::spin_loop(); }
-        let c0 = unsafe { core::ptr::read_volatile(base as *const u64) };
-        let c1 = unsafe { core::ptr::read_volatile((base + 8) as *const u64) };
+        let c0 = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u64>(base)) };
+        let c1 = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u64>(base + 8)) };
         println!("talaria: the ring3 threads -> the counters [{}] [{}] (both growing = the pre-emption works)", c0, c1);
         if c0 > 0 && c1 > 0 && last > 0 { /* proven */ }
         last = c0;

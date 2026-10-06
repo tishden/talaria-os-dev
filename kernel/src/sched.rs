@@ -218,7 +218,7 @@ pub fn set_fpu(tid: usize, area: u64) {
     unsafe {
         let dst = core::ptr::addr_of_mut!(FPU[tid]) as *mut u8;
         core::ptr::write_bytes(dst, 0, FPU_AREA);                       // the XSAVE header must be clean
-        core::ptr::copy_nonoverlapping(area as *const u8, dst, crate::arch::switch::FPU_INHERIT); // the legacy area from the syscall's frame
+        core::ptr::copy_nonoverlapping(crate::mem::vptr::<u8>(area), dst, crate::arch::switch::FPU_INHERIT); // the legacy area from the syscall's frame
         // XSTATE_BV = x87|SSE: XRSTOR will restore what was copied, while the AVX part
         // will be brought to the initial (zero) state — and that is what a new thread needs.
         if XSAVE_MASK.load(Ordering::Relaxed) != 0 { core::ptr::write_unaligned(dst.add(512) as *mut u64, 0x3); }
@@ -1654,7 +1654,7 @@ pub fn nmi_note(rip: u64, cs: u64, rflags: u64, rsp: u64) {
         // SAFETY: C3 — the interrupt/syscall FRAME of the thread this core interrupted: it lies
         // on that thread's kernel stack, which is alive for as long as the thread is, and the
         // offsets are the ones the stub pushed.
-        w.store(if kstack { unsafe { core::ptr::read_volatile((rsp + i as u64 * 8) as *const u64) } } else { 0 }, Ordering::Relaxed);
+        w.store(if kstack { unsafe { core::ptr::read_volatile(crate::mem::vptr::<u64>(rsp + i as u64 * 8)) } } else { 0 }, Ordering::Relaxed);
     }
     s.seq.fetch_add(1, Ordering::SeqCst);
 }
@@ -2129,7 +2129,7 @@ pub static KQ_ON: AtomicBool = AtomicBool::new(false);
 unsafe fn kstack_quarantine(base: u64, pages: u64) {
     if !KQ_ON.load(Ordering::Relaxed) || pages > 0xFFF { crate::mem::free_contig(base, pages); return; }
     let words = (pages * 4096 / 8) as usize;
-    for k in 0..words { core::ptr::write_volatile((base as *mut u64).add(k), KQ_POISON); }
+    for k in 0..words { core::ptr::write_volatile(crate::mem::kptr::<u64>(base).add(k), KQ_POISON); }
     let slot = KQ_NEXT.fetch_add(1, Ordering::Relaxed) % KQ_N;
     let old = KQ[slot].swap(base | pages, Ordering::AcqRel); // base is page-aligned: the low 12 bits carry the page count
     if old == 0 { return; }
@@ -2137,7 +2137,7 @@ unsafe fn kstack_quarantine(base: u64, pages: u64) {
     let ow = (op * 4096 / 8) as usize;
     let mut first = usize::MAX; let mut count = 0usize; let mut sample = [(0usize, 0u64); 4];
     for k in 0..ow {
-        let v = core::ptr::read_volatile((ob as *const u64).add(k));
+        let v = core::ptr::read_volatile(crate::mem::kptr::<u64>(ob).add(k));
         if v != KQ_POISON { if count < 4 { sample[count] = (k * 8, v); } if first == usize::MAX { first = k; } count += 1; }
     }
     if count != 0 {
@@ -2296,7 +2296,7 @@ pub fn set_task_cr3(tid: usize, cr3: u64) { unsafe { core::ptr::write_volatile(c
 /// that has already left does not clear anything.
 unsafe fn clear_ctid(ct: u64, leader: usize) {
     let (present, _, _, _) = crate::paging::query(ct);
-    if present { core::ptr::write_volatile(ct as *mut i32, 0); } // RO/COW -> a #PF in ring 0 -> cow_fault
+    if present { core::ptr::write_volatile(crate::uaccess::uptr::<i32>(ct), 0); } // RO/COW -> a #PF in ring 0 -> cow_fault
     // CLONE_CHILD_CLEARTID: a futex wake of those waiting for a join (Linux's semantics); the store itself
     // already wakes the mwait sleepers, the wake finishes the job with WOKEN/an IPI for those sleeping on the BSP
     crate::sync::wake_addr(ct, usize::MAX, leader, false);
@@ -3632,7 +3632,7 @@ fn ap_schedule(cpu: usize, cur_rsp: u64) -> u64 {
 unsafe extern "C" { fn timer_stub_sched(); }
 /// Redirect the LAPIC timer to the scheduler (a context switch).
 pub fn install() {
-    crate::idt::set_vector(crate::idt::TIMER_VECTOR, timer_stub_sched as *const () as u64);
+    crate::idt::set_vector(crate::idt::TIMER_VECTOR, crate::mem::vaddr(timer_stub_sched as *const ()));
     crate::affinity::apply_stashed(); // the layout from the command line — the scheduler's cores are already sorted out
 }
 /// A12: the LAPIC timer's first tick — it is printed ONCE. Without it "the workload

@@ -17,6 +17,12 @@
 
 #![no_std]
 #![no_main]
+// EVERY ADDRESS SAYS WHAT IT IS (docs/ARM64-PLAN.md §10.16). A bare `int as *mut T` or
+// `ptr as u64` does not compile: it goes through the helper naming its kind (`mem::kptr`/`kpa_of`
+// for RAM by its physical address, `mem::vptr`/`vaddr` for a virtual one, `uaccess::uptr` for
+// ring 3, `mem::devptr` for MMIO) — the direct map makes those kinds different numbers.
+#![feature(strict_provenance_lints)]
+#![deny(implicit_provenance_casts)]
 // THE ONE LINT OF EDITION 2024 WE TURN OFF, AND WHY.
 //
 // `unsafe_op_in_unsafe_fn` asks every unsafe operation inside an `unsafe fn` to sit
@@ -86,6 +92,7 @@ mod placement;
 mod syscall;
 mod user;
 mod mem;
+mod kaddr;    // the address kinds: `mem::kptr`/`kpa_of`/`vptr`/`vaddr`/`devptr` (the direct map's vocabulary)
 mod memspan;  // which pieces of the RAM above 4 GB the workload gets (host-tested)
 mod acpi;
 use arch::smp;
@@ -301,7 +308,7 @@ pub fn boot_shared(start_info: u64, mut cmdline: &'static str, tsc_hz: u64, earl
     // every phase (`trace::mark`) appends to the trace, so that after a hang the disk
     // holds the log up to exactly the last point passed.
     // ACPI: rsdp_paddr from start_info (+32) — the UEFI stub/QEMU; 0 -> the fallbacks
-    acpi::init(unsafe { *((start_info + 32) as *const u64) });
+    acpi::init(unsafe { *mem::kptr::<u64>(start_info + 32) });
     // The power button (stop-instances / system_powerdown): a SIGTERM to the workload,
     // a deadline to exit, a sync, S5. Without this an instance stop is a power cut.
     acpi::button_arm(cmdline::num(cmdline, "talaria.pwrbtn").unwrap_or(20));
@@ -867,9 +874,9 @@ fn rebootat(tag: &str, cmdline: &str) {
 
 fn read_cmdline(start_info: u64) -> &'static str {
     unsafe {
-        let magic = *(start_info as *const u32);
-        let version = *((start_info + 4) as *const u32);
-        let cl = *((start_info + 24) as *const u64);
+        let magic = *mem::kptr::<u32>(start_info);
+        let version = *mem::kptr::<u32>(start_info + 4);
+        let cl = *mem::kptr::<u64>(start_info + 24);
         println!(
             "talaria: start_info magic={:#x} ver={} cmdline_paddr={:#x}",
             magic, version, cl
@@ -877,11 +884,11 @@ fn read_cmdline(start_info: u64) -> &'static str {
         if magic != 0x336E_C578 {
             return "";
         }
-        let cmdline_paddr = *((start_info + 24) as *const u64);
+        let cmdline_paddr = *mem::kptr::<u64>(start_info + 24);
         if cmdline_paddr == 0 {
             return "";
         }
-        let p = cmdline_paddr as *const u8;
+        let p = mem::kptr::<u8>(cmdline_paddr);
         let mut len = 0;
         while len < CL_MAX - 1 && *p.add(len) != 0 {
             len += 1;

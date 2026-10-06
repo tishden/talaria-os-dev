@@ -432,7 +432,7 @@ fn dump(addr: u64) {
         let base = addr + row * 16;
         serial::putb(b' ');
         for col in 0..16u64 {
-            let v = unsafe { core::ptr::read_volatile((base + col) as *const u8) };
+            let v = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u8>(base + col)) };
             let hex = b"0123456789abcdef";
             serial::putb(hex[(v >> 4) as usize]);
             serial::putb(hex[(v & 0xf) as usize]);

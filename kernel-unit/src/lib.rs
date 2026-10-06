@@ -28,6 +28,10 @@ macro_rules! println {
 
 // ── kernel modules under test ────────────────────────────────────────────────
 
+// The address kinds, under the name the kernel's modules call them by (`crate::mem::kptr`, ...).
+#[path = "../../kernel/src/kaddr.rs"]
+pub mod mem;
+
 #[path = "../../kernel/src/cellman.rs"]
 pub mod cellman;
 #[path = "../../kernel/src/clock.rs"]

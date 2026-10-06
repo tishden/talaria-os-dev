@@ -129,7 +129,7 @@ pub fn common(p: &Port, buf: &[u8], n: usize, me: u64, sel: &mut u64) -> bool {
                 let b = (unhex(buf[j]) << 4) | unhex(buf[j + 1]);
                 let (present, writable, _, _) = crate::paging::query(addr + k);
                 if !present || !writable { ok = false; break; }
-                unsafe { core::ptr::write_volatile((addr + k) as *mut u8, b); }
+                unsafe { core::ptr::write_volatile(crate::mem::vptr::<u8>(addr + k), b); }
                 k += 1; j += 2;
             }
             p.send(if ok { b"OK" } else { b"E14" });

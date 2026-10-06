@@ -53,7 +53,7 @@ fn x2_msr(reg: u64) -> u32 { 0x800 + (reg >> 4) as u32 }
 
 unsafe fn lapic_write(reg: u64, val: u32) {
     if X2APIC.load(Ordering::Relaxed) { wrmsr(x2_msr(reg), val as u64); }
-    else { core::ptr::write_volatile((LAPIC + reg) as *mut u32, val); }
+    else { core::ptr::write_volatile(crate::mem::devptr::<u32>(LAPIC + reg), val); }
 }
 
 /// Enable the LAPIC: mask all the LVTs (so as not to catch unexpected vectors),
@@ -125,7 +125,7 @@ pub fn lapic_enable() {
 }
 unsafe fn lapic_read(reg: u64) -> u32 {
     if X2APIC.load(Ordering::Relaxed) { rdmsr(x2_msr(reg)) as u32 }
-    else { core::ptr::read_volatile((LAPIC + reg) as *const u32) }
+    else { core::ptr::read_volatile(crate::mem::devptr::<u32>(LAPIC + reg)) }
 }
 
 /// Write the ICR (send an IPI). In xAPIC that is TWO accesses to the MMIO — the upper
@@ -255,7 +255,7 @@ pub fn steal_enable_here() {
     if feat & (1 << 5) == 0 { return; } // KVM_FEATURE_STEAL_TIME is not declared
     let cpu = crate::percpu::cpu_id();
     if cpu >= MAXCPU { return; }
-    let pa = unsafe { core::ptr::addr_of!(STEAL[cpu]) as u64 }; // the kernel is mapped one to one
+    let pa = unsafe { crate::mem::kpa_of(core::ptr::addr_of!(STEAL[cpu])) }; // the kernel is mapped one to one
     unsafe { wrmsr(MSR_KVM_STEAL_TIME, pa | 1); }
     if feat & (1 << 9) != 0 { PV_TLB_FLUSH.store(true, Ordering::SeqCst); } // KVM_FEATURE_PV_TLB_FLUSH
     if !STEAL_ON.swap(true, Ordering::SeqCst) {
@@ -597,15 +597,15 @@ pub fn start_ap(apic_id: u32) -> bool {
         crate::sched::set_ap_stack(lg, lbase + 5 * 4096);
 
         let src = tramp_start as *const () as *const u8;
-        let len = (tramp_end as *const () as usize) - (tramp_start as *const () as usize);
-        core::ptr::copy_nonoverlapping(src, TRAMP as *mut u8, len);
+        let len = (crate::mem::vaddr(tramp_end as *const ()) - crate::mem::vaddr(tramp_start as *const ())) as usize;
+        core::ptr::copy_nonoverlapping(src, crate::mem::kptr::<u8>(TRAMP), len);
         // the patching of the parameters in the trampoline's data area (see the offsets in the asm)
-        let cr3_off = (tramp_cr3 as *const () as usize) - (tramp_start as *const () as usize);
-        let stack_off = (tramp_stack as *const () as usize) - (tramp_start as *const () as usize);
-        let entry_off = (tramp_entry as *const () as usize) - (tramp_start as *const () as usize);
-        core::ptr::write_volatile((TRAMP + cr3_off as u64) as *mut u64, cr3);
-        core::ptr::write_volatile((TRAMP + stack_off as u64) as *mut u64, stack);
-        core::ptr::write_volatile((TRAMP + entry_off as u64) as *mut u64, ap_entry as *const () as u64);
+        let cr3_off = (crate::mem::vaddr(tramp_cr3 as *const ()) - crate::mem::vaddr(tramp_start as *const ())) as usize;
+        let stack_off = (crate::mem::vaddr(tramp_stack as *const ()) - crate::mem::vaddr(tramp_start as *const ())) as usize;
+        let entry_off = (crate::mem::vaddr(tramp_entry as *const ()) - crate::mem::vaddr(tramp_start as *const ())) as usize;
+        core::ptr::write_volatile(crate::mem::kptr::<u64>(TRAMP + cr3_off as u64), cr3);
+        core::ptr::write_volatile(crate::mem::kptr::<u64>(TRAMP + stack_off as u64), stack);
+        core::ptr::write_volatile(crate::mem::kptr::<u64>(TRAMP + entry_off as u64), crate::mem::vaddr(ap_entry as *const ()));
 
         // the reference of the BSP's state for the APs
         {

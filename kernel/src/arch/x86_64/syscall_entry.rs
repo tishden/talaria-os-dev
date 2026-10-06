@@ -26,7 +26,7 @@ pub unsafe fn init_msrs() {
     // sysret: user CS = 0x18+16=0x28 (|3), SS = 0x18+8=0x20 (|3). STAR[63:48]=0x18|3=0x1B
     let star: u64 = (0x1Bu64 << 48) | (0x08u64 << 32);
     wrmsr(MSR_STAR, star);
-    wrmsr(MSR_LSTAR, syscall_entry as *const () as u64);
+    wrmsr(MSR_LSTAR, crate::mem::vaddr(syscall_entry as *const ()));
     wrmsr(MSR_FMASK, 0x200); // clear IF at the entry into a syscall
     wrmsr(MSR_EFER, rdmsr(MSR_EFER) | 1); // SCE
 }

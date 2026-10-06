@@ -390,7 +390,7 @@ fn write_core(sig: u32, pid: i32, name: &[u8], tids: &[usize], segs: &[Seg],
         let end = s.vaddr + s.len;
         while a < end && w.ok {
             let chunk = (end - a).min(4096);
-            w.put(unsafe { core::slice::from_raw_parts(a as *const u8, chunk as usize) });
+            w.put(unsafe { core::slice::from_raw_parts(crate::uaccess::uptr::<u8>(a), chunk as usize) });
             a += chunk;
         }
     }

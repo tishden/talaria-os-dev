@@ -853,6 +853,21 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     bump has and requires the bump unchanged and a small block after it — the old order gives
     "0 after, NO" (checked), both gates run it. **A failure path must leave the state it found:
     test the refusal, not only the grant.**
+50. **"Let the compiler count."** The direct map's first stage (ARM64-PLAN §10.16) had to find
+    every place the kernel turns an integer into a pointer or back, because the map makes "a
+    frame" and "a virtual address" different numbers. A grep for `as *mut` finds a guess; the
+    plan's own estimate was ~150 sites. The nightly lint `implicit_provenance_casts` (ex
+    `fuzzy_provenance_casts`; it now also covers the pointer->integer direction of
+    `lossy_provenance_casts`) found 609 on x86 and 639 on arm64 — four times the estimate, most
+    of them ring-3 addresses in `syscall.rs` that the estimate had not counted as sites at all.
+    `kernel/census-dmap.sh` turned the lint into a meter; every site was given its kind
+    (`kptr`/`kpa_of`/`vptr`/`vaddr`/`uptr`/`devptr`, `kernel/src/kaddr.rs`) by four agents on
+    disjoint files; at 0 the lint became `deny` in `main.rs`, so a new bare cast is a build
+    error, shown to fail on both directions. On the way the drivers' review found three ENA
+    sites that gave the device a kernel pointer with no cast at all (an integer that was the
+    buffer's virtual address) — the lint cannot see those, which is why the plan keeps a `Pa`
+    type for drivers. **A meter the compiler computes cannot drift from the code; a gate the
+    compiler enforces cannot be skipped.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

@@ -75,7 +75,7 @@ impl NetDev for LoopNic {
         };
         let n = n.min(FRAME);
         unsafe {
-            core::ptr::copy_nonoverlapping(addr as *const u8, self.rx_addr[dst] as *mut u8, n);
+            core::ptr::copy_nonoverlapping(crate::mem::vptr::<u8>(addr), crate::mem::vptr::<u8>(self.rx_addr[dst]), n);
         }
         self.done[self.wr % NRING] = (dst as u16, n as u16);
         self.wr = self.wr.wrapping_add(1);

@@ -287,10 +287,10 @@ pub unsafe fn early_enable(rams: &[(u64, u64)], devs: &[u64]) {
         if d != 0 && i < 512 && l1.0[i] == 0 { l1.0[i] = device_block((i as u64) << 30); }
     }
     let l0 = &mut *core::ptr::addr_of_mut!(L0);
-    l0.0[0] = (core::ptr::addr_of!(L1) as u64) | VALID | TABLE_OR_PAGE;
+    l0.0[0] = crate::mem::kpa_of(core::ptr::addr_of!(L1)) | VALID | TABLE_OR_PAGE;
     // the devices' alias (see DEV_SLOT): GB0's Device block once more, high
     (*core::ptr::addr_of_mut!(L1DEV)).0[0] = device_block(0);
-    l0.0[DEV_SLOT] = (core::ptr::addr_of!(L1DEV) as u64) | VALID | TABLE_OR_PAGE;
+    l0.0[DEV_SLOT] = crate::mem::kpa_of(core::ptr::addr_of!(L1DEV)) | VALID | TABLE_OR_PAGE;
     // The intermediate physical address size: what the core supports, capped at 48 bits
     // (the encodings of PARange and TCR.IPS coincide up to that point).
     HW_DIRTY.store(cpu::has_hw_dirty(), core::sync::atomic::Ordering::Relaxed);
@@ -302,7 +302,7 @@ pub unsafe fn early_enable(rams: &[(u64, u64)], devs: &[u64]) {
         "tlbi vmalle1",
         "dsb ish",
         "isb",
-        mair = in(reg) MAIR_VALUE, tcr = in(reg) tcr, ttbr = in(reg) core::ptr::addr_of!(L0) as u64,
+        mair = in(reg) MAIR_VALUE, tcr = in(reg) tcr, ttbr = in(reg) crate::mem::kpa_of(core::ptr::addr_of!(L0)),
         options(nostack),
     );
     enable_here();
@@ -351,5 +351,5 @@ fn tcr_value() -> u64 {
 /// The root a core coming up should use: `paging::init`'s table once it exists, the early one before.
 fn root_for_new_core() -> u64 {
     let k = crate::paging::kernel_cr3();
-    if k != 0 { k } else { core::ptr::addr_of!(L0) as u64 }
+    if k != 0 { k } else { crate::mem::kpa_of(core::ptr::addr_of!(L0)) }
 }

@@ -47,7 +47,7 @@ pub fn handler_of(intid: u32) -> Option<extern "C" fn()> {
     if h == 0 { None } else { Some(unsafe { core::mem::transmute::<usize, extern "C" fn()>(h as usize) }) }
 }
 extern "C" fn nic_stub() { crate::netsys::nic_irq(); }
-pub fn nic_handler() -> u64 { nic_stub as *const () as u64 }
+pub fn nic_handler() -> u64 { crate::mem::vaddr(nic_stub as *const ()) }
 
 /// The exception frame the shared code reads: the trap frame.
 pub type ExcFrame = super::trap::Frame;

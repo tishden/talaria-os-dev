@@ -86,7 +86,7 @@ pub fn init() {
         // not to catch a #GP if Nitro does deliver a message after all.
         for v in MSI_VECTOR_BASE..MSI_VECTOR_BASE + 8 { IDT[v].set(ipi_stub_ptr); }
         let idtr = Idtr { limit: (core::mem::size_of::<[IdtEntry;256]>() - 1) as u16,
-                          base: core::ptr::addr_of!(IDT) as u64 };
+                          base: crate::mem::vaddr(core::ptr::addr_of!(IDT)) };
         core::arch::asm!("lidt [{}]", in(reg) &idtr, options(readonly, nostack, preserves_flags));
     }
 }
@@ -140,7 +140,7 @@ unsafe fn exc_return(fp: *mut ExcFrame, fpu: u64) -> ! {
         "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax",
         "add rsp, 16",   // skip vec, err
         "iretq",
-        fp = in(reg) fp as u64, fpu = in(reg) fpu, options(noreturn)
+        fp = in(reg) crate::mem::vaddr(fp), fpu = in(reg) fpu, options(noreturn)
     );
 }
 #[unsafe(no_mangle)]
@@ -180,7 +180,7 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
                     "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax",
                     "add rsp, 16",   // skip vec, err
                     "iretq",
-                    fp = in(reg) f as *const ExcFrame as u64, fpu = in(reg) fpu, options(noreturn)
+                    fp = in(reg) crate::mem::vaddr(f as *const ExcFrame), fpu = in(reg) fpu, options(noreturn)
                 );
             }
         }
@@ -200,7 +200,7 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
                     "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax",
                     "add rsp, 16",
                     "iretq",
-                    fp = in(reg) fp as u64, fpu = in(reg) fpu, options(noreturn)
+                    fp = in(reg) crate::mem::vaddr(fp), fpu = in(reg) fpu, options(noreturn)
                 );
             }
         }
@@ -232,7 +232,7 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
                         "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax",
                         "add rsp, 16",   // skip vec, err
                         "iretq",
-                        fp = in(reg) fp as u64, fpu = in(reg) fpu, options(noreturn)
+                        fp = in(reg) crate::mem::vaddr(fp), fpu = in(reg) fpu, options(noreturn)
                     );
                 }
             }
@@ -287,7 +287,7 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
         // physical address (identity), or honestly print "it is not mapped".
         let cr3 = crate::sched::task_cr3(crate::sched::current_id()) & 0x000f_ffff_ffff_f000;
         let tls0 = if fsb != 0 && fsb < 0x0000_8000_0000_0000 && cr3 != 0 {
-            crate::paging::phys_of_in(cr3, fsb).map(|ph| unsafe { core::ptr::read_volatile((ph + (fsb & 0xFFF)) as *const u64) })
+            crate::paging::phys_of_in(cr3, fsb).map(|ph| unsafe { core::ptr::read_volatile(crate::mem::kptr::<u64>(ph + (fsb & 0xFFF))) })
         } else { None };
         // The TLS self-pointer: in a healthy thread on musl `[fs:0] == fs`.
         crate::println!("\n[fault] ring 3: the exception #{} err={:#x} rip={:#x} cr2={:#x} rsp={:#x} fs={:#x} [fs:0]={:#x}{}",
@@ -355,7 +355,7 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
         crate::println!("║ the stack @ {:#x}:", f.rsp);
         for i in 0..8u64 {
             let a = f.rsp + i * 8;
-            let v = unsafe { core::ptr::read_volatile(a as *const u64) };
+            let v = unsafe { core::ptr::read_volatile(crate::mem::vptr::<u64>(a)) }; // DMAP: the faulting rsp, kernel or user, read in the current space
             crate::println!("║   [{:#014x}] = {:#018x}", a, v);
         }
     }

@@ -52,19 +52,19 @@ const CR: u64 = 0x30;
 const ICR: u64 = 0x44;
 const FR_TXFF: u32 = 1 << 5;
 
-#[inline] unsafe fn w(off: u64, v: u32) { core::ptr::write_volatile((BASE.load(Ordering::Relaxed) + off) as *mut u32, v) }
-#[inline] unsafe fn r(off: u64) -> u32 { core::ptr::read_volatile((BASE.load(Ordering::Relaxed) + off) as *const u32) }
+#[inline] unsafe fn w(off: u64, v: u32) { core::ptr::write_volatile(crate::mem::devptr::<u32>(BASE.load(Ordering::Relaxed) + off), v) }
+#[inline] unsafe fn r(off: u64) -> u32 { core::ptr::read_volatile(crate::mem::devptr::<u32>(BASE.load(Ordering::Relaxed) + off)) }
 
 // The 16550's registers, by index; the stride and the width come from the SPCR.
 const NS_THR: u64 = 0; const NS_IER: u64 = 1; const NS_LSR: u64 = 5;
 const NS_LSR_DR: u32 = 1; const NS_LSR_THRE: u32 = 1 << 5;
 #[inline] unsafe fn nsw(idx: u64, v: u32) {
     let a = BASE.load(Ordering::Relaxed) + (idx << SHIFT.load(Ordering::Relaxed));
-    match WIDTH.load(Ordering::Relaxed) { 4 => core::ptr::write_volatile(a as *mut u32, v), 2 => core::ptr::write_volatile(a as *mut u16, v as u16), _ => core::ptr::write_volatile(a as *mut u8, v as u8) }
+    match WIDTH.load(Ordering::Relaxed) { 4 => core::ptr::write_volatile(crate::mem::devptr::<u32>(a), v), 2 => core::ptr::write_volatile(crate::mem::devptr::<u16>(a), v as u16), _ => core::ptr::write_volatile(crate::mem::devptr::<u8>(a), v as u8) }
 }
 #[inline] unsafe fn nsr(idx: u64) -> u32 {
     let a = BASE.load(Ordering::Relaxed) + (idx << SHIFT.load(Ordering::Relaxed));
-    match WIDTH.load(Ordering::Relaxed) { 4 => core::ptr::read_volatile(a as *const u32), 2 => core::ptr::read_volatile(a as *const u16) as u32, _ => core::ptr::read_volatile(a as *const u8) as u32 }
+    match WIDTH.load(Ordering::Relaxed) { 4 => core::ptr::read_volatile(crate::mem::devptr::<u32>(a)), 2 => core::ptr::read_volatile(crate::mem::devptr::<u16>(a)) as u32, _ => core::ptr::read_volatile(crate::mem::devptr::<u8>(a)) as u32 }
 }
 #[inline] fn is_16550() -> bool { KIND.load(Ordering::Relaxed) == 1 }
 

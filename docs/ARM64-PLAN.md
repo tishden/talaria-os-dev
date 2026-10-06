@@ -2026,6 +2026,25 @@ be break-before-make on memory other cores use).
 7. Later: the image in the higher half (x86 −2 GiB, `code-model: kernel`; arm64 linked high),
    where TTBR1 is reconsidered; ClickHouse's high-base kernel retires.
 
+**Stage 1 is done (2026-10-06).** The meter is the compiler: `kernel/census-dmap.sh` counts
+the nightly lint `implicit_provenance_casts` (integer->pointer and pointer->integer) on both
+machines — 609 sites on x86 and 639 on arm64 at the start, four times the estimate above,
+because the 190 ring-3 addresses of `syscall.rs` and its kin are sites too. Each one now names
+its kind through `kernel/src/kaddr.rs` (re-exported as `mem::`): `kptr`/`kva` (RAM by its
+physical address, ~290 sites), `kpa_of`/`kpa` (to a device, an entry, CR3/TTBR, ~40),
+`vptr`/`vaddr` (already virtual, ~140), `uaccess::uptr` (ring 3, ~220), `devptr` (MMIO, ~65).
+At 0 the lint is `deny` in `main.rs`. The drivers' pass found three ENA sites that gave the
+device the buffer's virtual address as a plain integer (no cast to see) — they `kpa()` it now,
+and the `NetDev` contract is "the kernel's virtual address, the driver translates". Gate
+`talaria.test=dmapid` on both machines. Left for later stages, marked `// DMAP:` in the code
+(`grep -rn 'DMAP:' kernel/src`): the identity modes' dual addresses (a frame that is also ring 3's
+address — the fast ring, `load_elf` in `run_disk`, the shm/`MAP_SHARED` zeroing, stage 4); the
+PRP buffers on a kernel stack (`fs::read_raw`/`write_raw`, `nvme::read_blocks_boot`: stage 3
+moves the stacks out of RAM's map, so those need a bounce frame); the probes that test the
+identity leaf itself (stage 4 rewrites them); `mem::init` reading the boot hand-off before any
+map exists (kind (e): it must stay the identity); `kva` must stay the identity until the map is
+built in `paging::init` (stage 2's ordering). The `Pa` newtype for the drivers is not done yet.
+
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
 check on every queued address); arm64 attribute aliasing (map RAM only, never split a leaf);

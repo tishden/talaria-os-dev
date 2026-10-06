@@ -642,6 +642,8 @@ echo "== observability on arm64: PMUv3, the profile with stacks, the gdb stub ==
 A0=$ACCEL; IC=0; [ "$ACCEL" = "-cpu max" ] && { ACCEL="$ACCEL -icount shift=0"; IC=1; }
 boot 30 "talaria.test=allocfail"
 assert 'allocfail: ALL OK'                                                 'allocfail: a refused contiguous request leaves the bump whole (a Graviton'"'"'s refused fscache=512 took it and the next kernel stack panicked)'
+boot 30 "talaria.test=dmapid"
+assert 'dmapid: ALL OK'                                                    'dmapid: the address kinds round-trip (a low and a high frame, a .bss and a stack word) — the contract the direct map keeps (ARM64-PLAN §10.16)'
 boot 60 "talaria.test=wakeprobe"
 assert 'wakeprobe: a store under wfe: the median wake after 30 us, 100 us, 300 us, 1 ms of sleep: [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: a store wakes a wfe sleeper, timed after four lengths of sleep'
 assert 'wakeprobe: an SGI under wfe: the median wake after .* [0-9]+ [0-9]+ [0-9]+ [0-9]+ ns' 'wakeprobe: an SGI wakes a wfe sleeper, timed'

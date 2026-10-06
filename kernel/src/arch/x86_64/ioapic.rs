@@ -44,12 +44,12 @@ pub fn available() -> bool { NIOAPIC.load(Ordering::Relaxed) != 0 }
 pub fn count() -> usize { NIOAPIC.load(Ordering::Relaxed) as usize }
 
 unsafe fn read(b: u64, reg: u32) -> u32 {
-    core::ptr::write_volatile(b as *mut u32, reg);
-    core::ptr::read_volatile((b + 0x10) as *const u32)
+    core::ptr::write_volatile(crate::mem::devptr::<u32>(b), reg);
+    core::ptr::read_volatile(crate::mem::devptr::<u32>(b + 0x10))
 }
 unsafe fn write(b: u64, reg: u32, val: u32) {
-    core::ptr::write_volatile(b as *mut u32, reg);
-    core::ptr::write_volatile((b + 0x10) as *mut u32, val);
+    core::ptr::write_volatile(crate::mem::devptr::<u32>(b), reg);
+    core::ptr::write_volatile(crate::mem::devptr::<u32>(b + 0x10), val);
 }
 
 /// How many lines the controller `i` has (from the version register).
