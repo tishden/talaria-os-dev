@@ -15,7 +15,7 @@
 #     --smp N        cores for the workload (default 2)
 #     --ok REGEX     the console line that ends a variant's run (default "mdpipe: (OK|FAIL)")
 #     --linux N      how many runs on the Linux control (default 3; 0 = no control)
-#     --wait SEC     how long to wait for each console (default 360)
+#     --wait SEC     how long to wait for every verdict, from the launch (default 900)
 #     --out DIR      where the results go (default bench/suite/results/variants-<time>)
 #   A tail of "-" is the default kernel (empty user-data).
 #   Out: DIR/v<i>.console (each variant's serial), DIR/linux.txt, DIR/ids.
@@ -24,7 +24,7 @@
 # an interrupt; the instances are tagged Project=talaria, Name=variants-<time>.
 set -u
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-TYPE=c7g.large SMP=2 OK='mdpipe: (OK|FAIL)' NLINUX=3 WAIT=360 OUT= APP= ARGS=
+TYPE=c7g.large SMP=2 OK='mdpipe: (OK|FAIL)' NLINUX=3 WAIT=900 OUT= APP= ARGS=
 while [ $# -gt 0 ]; do
   case "$1" in
     --app) APP=$2; shift 2;; --args) ARGS=$2; shift 2;; --type) TYPE=$2; shift 2;;
@@ -52,7 +52,7 @@ trap 'cleanup; exit 1' INT TERM
 
 echo "== variants -> $OUT ($# variants on $TYPE, the Linux control: $NLINUX runs)"
 "$REPO/infra/aws/talaria-deploy.sh" --app "$APP" --args "$ARGS" --type "$TYPE" --smp "$SMP" --restart 0 \
-  --stop-after $((WAIT - 60)) --userdata --name "variants-$STAMP" --ami-only > "$OUT/deploy.log" 2>&1
+  --stop-after $((WAIT - 120)) --userdata --name "variants-$STAMP" --ami-only > "$OUT/deploy.log" 2>&1
 AMI=$(sed -n 's/^AMI_ID=//p' "$OUT/deploy.log" | tail -1)
 [ -n "$AMI" ] || { echo "no AMI (see $OUT/deploy.log)"; tail -5 "$OUT/deploy.log"; exit 1; }
 SNAP=$(aws ec2 describe-images --image-ids "$AMI" --query 'Images[0].BlockDeviceMappings[0].Ebs.SnapshotId' --output text)
@@ -86,15 +86,21 @@ if [ -n "$LID" ]; then
   for r in $(seq 1 "$NLINUX"); do ssh $SSHO ec2-user@"$LIP" "cd /tmp && ./app $LARGS 2>&1 | tail -6" >> "$OUT/linux.txt" 2>&1; done
   ssh $SSHO ec2-user@"$LIP" "nproc; uname -r" >> "$OUT/linux.txt" 2>&1
 fi
-i=0
-for id in $VIDS; do
-  i=$((i+1)); t0=$SECONDS
-  while [ $((SECONDS - t0)) -lt "$WAIT" ]; do
+# ONE deadline for all, from the launch: EC2 serves a console minutes late, and a per-variant
+# window that starts at once (no Linux control to wait for) gave the first variant an empty
+# file while its run had finished. A variant without a verdict is polled again until the end.
+T0=$SECONDS; LEFT=$VIDS
+while [ -n "$LEFT" ] && [ $((SECONDS - T0)) -lt "$WAIT" ]; do
+  NEXT=
+  i=0
+  for id in $VIDS; do
+    i=$((i+1)); case " $LEFT " in *" $id "*) ;; *) continue;; esac
     aws ec2 get-console-output --instance-id "$id" --latest --output text > "$OUT/v$i.console" 2>/dev/null
-    grep -aqE "$OK|PANIC" "$OUT/v$i.console" && break
-    sleep 15
+    if grep -aqE "$OK|PANIC" "$OUT/v$i.console"; then echo "v$i: $(grep -aoE "$OK|PANIC" "$OUT/v$i.console" | tail -1)"
+    else NEXT="$NEXT $id"; fi
   done
-  echo "v$i: $(grep -aoE "$OK|PANIC" "$OUT/v$i.console" | tail -1)"
+  LEFT=$NEXT; [ -n "$LEFT" ] && sleep 15
 done
+i=0; for id in $VIDS; do i=$((i+1)); case " $LEFT " in *" $id "*) echo "v$i: NO VERDICT in ${WAIT}s";; esac; done
 cleanup
 echo "== done: $OUT"

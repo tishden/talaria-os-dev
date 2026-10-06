@@ -875,6 +875,18 @@ must be kicked off it. The 33 us is what that eviction path costs when there is 
 which step of it (the kick that a running core ignores, the threshold of `wakepreempt`, the
 yield of the evicted waiter) is still to be traced per tick.
 
+The threshold's value is not it. A second batch, `smp=2`: the default (150 us) 34.0,
+`wakepreempt=5000` 34.2, `20000` 34.1, `60000` 32.6 — only 0 helps (8.1), and 0 is not "a small
+threshold" but another branch: `busy_long` is then true for any current task, so every wake to
+a core running something sends a resched IPI instead of a kick that a running core ignores
+(`sync::wake_addr`). The kicked core's current task has run ~1 us when the kick lands (the
+kick line above), under any of these thresholds. Talaria's "queue max" is 13-25 in every
+two-core variant (5 on four cores, 2 on Linux) — the generator's `nanosleep` sleeps in 200 us
+coarse windows and catches up in bursts — but `sync=hlt` has 21 with a p99 of 7, so the bursts
+are not the tail by themselves. (The first batch's first variant lost its console to the tool's
+per-variant window; it was fetched by hand, and `variants.sh` now polls every variant until one
+deadline.)
+
 **The cache counter on a `c7g.large`** (`talaria.test=pmu`, `pmu-ev:` — each event on the last
 counter across a random walk of 64 MB, 1 M line loads): L2D_CACHE_REFILL (0x17) 0.99 per
 line, L2D_CACHE (0x16) 2.00, L1D_CACHE_REFILL 0.99, L1D_CACHE 1.00, MEM_ACCESS 1.00,
