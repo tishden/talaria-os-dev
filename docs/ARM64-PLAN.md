@@ -2063,6 +2063,28 @@ four, against 32.9-34.0 and 2.6 without the map); a `c6i.xlarge` (tboot) maps 80
 1462 2M) and gives p99 7.6 / 6.3 against Linux's 10.7 in the same hour. Not done from the stage's gate list: a NUMA node's area and the refcount top are
 covered by the same RAM walk, not tested separately.
 
+**Stage 3 is done (2026-10-06).** The kernel stacks have a window of their own: top-level slot
+257 (`mem::KWIN_BASE`, x86 `0xFFFF_8080_0000_0000`, arm64 `0x0000_8080_0000_0000`), its table
+built with the map, so every space shares every table under it. Slot i is 64 KB of addresses:
+page 0 the guard, never mapped — in every space at once — and pages 1..15 mapped one by one
+from single frames the first time the slot is used (`paging::kwin_map`; arm64 publishes with
+`dsb ishst`). A freed stack's slot goes back to `sched`'s pool WITH its frames, so the window is
+never unmapped and never needs a shootdown, and no leaf of it changes while in use. This
+retires both the per-space guard dance (item 25) and a stack's need for 64 KB of contiguous
+memory (item 49's panic). `migrate_current_to` takes a window stack too. `talaria.kwin=0` keeps
+the identity stacks (and the old gate still runs on them). A crash dump names a fault in the
+window: "A KERNEL STACK OVERFLOW: CR2/far is the GUARD page, slot N". Not done: a push
+overflow still double-faults on x86 (no IST for #PF/#DF) — as with the identity stacks.
+
+The regression found what stage 1 had marked: a buffer on a kernel stack handed to a device by
+`kpa_of` of its first byte. A window stack's pages are separate frames, so the physical address
+was wrong — the power-button gates lost an unsynced file and the second boot saw no ext2 (a
+journal commit block built on the stack went to the disk from another frame). `fs::Bounce`
+copies such a buffer through contiguous frames at the three doors (`read_raw`/`write_raw`,
+`io_one`, `blk_write_durable`) and `nvme::read_blocks_boot`. x86 513/0, arm64 350/0. On the
+machines (mdpipe, threads by `clone`, ext2 on EBS with fsync): `c7g.xlarge` p99 33.5 / 2.7 on two
+/ four cores, `c6i.xlarge` 7.3 / 5.4 — the stage-2 numbers.
+
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
 check on every queued address); arm64 attribute aliasing (map RAM only, never split a leaf);

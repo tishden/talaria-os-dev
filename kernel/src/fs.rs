@@ -47,6 +47,27 @@ use crate::serial;
 type VBlk = VirtIOBlk<TalariaHal, MmioTransport<'static>>;
 /// The disk's block device: virtio-blk (QEMU microvm) or NVMe (EC2/EBS, §4.5).
 /// A single Result interface — the callers do not know what is under them.
+/// A DMA bounce for a buffer a device cannot be given: one on a kernel stack in the stacks' window
+/// (stage 3 of the direct map) is pages of separate frames, so its first byte's physical address
+/// says nothing of the rest — a sector read into a stack array landed in another frame and an
+/// unsynced file did not survive the power button (`pwrbtn`, `ext2v`). Contiguous frames, copied
+/// through, given back on drop. Only stack buffers take it: a sector, the GPT header, the suite's state.
+pub struct Bounce { pa: u64, pages: u64, len: usize }
+impl Bounce {
+    pub fn need(p: *const u8, len: usize) -> Option<Bounce> {
+        if !crate::mem::in_kwin(crate::mem::vaddr(p)) || len == 0 { return None; }
+        let pages = (len as u64).div_ceil(4096);
+        let pa = crate::mem::alloc_contig(pages).expect("fs: a DMA bounce for a stack buffer");
+        Some(Bounce { pa, pages, len })
+    }
+    #[allow(clippy::mut_from_ref)]
+    pub fn slice(&self) -> &mut [u8] {
+        // SAFETY: the frames are this bounce's alone until drop.
+        unsafe { core::slice::from_raw_parts_mut(crate::mem::kptr::<u8>(self.pa), self.len) }
+    }
+}
+impl Drop for Bounce { fn drop(&mut self) { crate::mem::free_contig(self.pa, self.pages); } }
+
 enum Blk { Virtio(VBlk), Nvme(crate::nvme::Nvme) }
 impl Blk {
     fn read_blocks(&mut self, lba: usize, buf: &mut [u8]) -> Result<(), ()> {
@@ -55,6 +76,11 @@ impl Blk {
     }
     /// A read WITHOUT the partition's offset (the GPT headers).
     fn read_raw(&mut self, lba: usize, buf: &mut [u8]) -> Result<(), ()> {
+        if let Some(b) = Bounce::need(buf.as_ptr(), buf.len()) {
+            let r = self.read_raw(lba, b.slice());
+            buf.copy_from_slice(b.slice());
+            return r;
+        }
         match self {
             Blk::Virtio(b) => b.read_blocks(lba, buf).map_err(|_| ()),
             // NVMe goes through the same queue as everything else: its own CID,
@@ -63,20 +89,22 @@ impl Blk {
                 let dev: *mut crate::nvme::Nvme = n;
                 // SAFETY: D1 + D2 — the ring and the slot table under `ring_lock`; a slot is reused
                 // only after its completion has been seen.
-                // DMAP: `buf` may be on a kernel stack (a sector, the suite's state) — kpa_of breaks once stacks leave RAM's map (stage 3)
                 if unsafe { nvme_rw_queued(dev, false, lba, crate::mem::kpa_of(buf.as_mut_ptr()), buf.len()) } { Ok(()) } else { Err(()) }
             }
         }
     }
     /// A write WITHOUT the partition's offset (the trace of `talaria.trace=` in the gap before the kernel).
     fn write_raw(&mut self, lba: usize, buf: &[u8]) -> Result<(), ()> {
+        if let Some(b) = Bounce::need(buf.as_ptr(), buf.len()) {
+            b.slice().copy_from_slice(buf);
+            return self.write_raw(lba, b.slice());
+        }
         match self {
             Blk::Virtio(b) => b.write_blocks(lba, buf).map_err(|_| ()),
             Blk::Nvme(n) => {
                 let dev: *mut crate::nvme::Nvme = n;
                 // SAFETY: D1 + D2 — the ring and the slot table under `ring_lock`; a slot is reused
                 // only after its completion has been seen.
-                // DMAP: `buf` may be on a kernel stack (a sector, the suite's state) — kpa_of breaks once stacks leave RAM's map (stage 3)
                 if unsafe { nvme_rw_queued(dev, true, lba, crate::mem::kpa_of(buf.as_ptr()), buf.len()) } { Ok(()) } else { Err(()) }
             }
         }
@@ -1357,6 +1385,10 @@ fn fua_now() -> bool {
 pub fn fua_write() -> bool { matches!(blk(), Some(Blk::Nvme(_))) }
 pub fn blk_write_durable(lba: usize, buf: &[u8]) -> bool {
     if FAIL_WRITES.load(core::sync::atomic::Ordering::Relaxed) { return write_failed(); }
+    if let Some(b) = Bounce::need(buf.as_ptr(), buf.len()) { // a journal commit block built on the stack
+        b.slice().copy_from_slice(buf);
+        return blk_write_durable(lba, b.slice());
+    }
     if !fua_write() {
         if !blk_write(lba, buf) { return false; }
         return blk_flush();
@@ -1389,6 +1421,14 @@ pub fn blk_write_durable(lba: usize, buf: &[u8]) -> bool {
 /// completion without it. NVMe goes along the former synchronous path — it has its own
 /// queue and its own batch (`rw_many`).
 fn io_one(lba: usize, buf: *mut u8, len: usize, write: bool) -> bool {
+    if let Some(b) = Bounce::need(buf, len) { // a stack buffer in the stacks' window (the superblock's read)
+        // SAFETY: `buf` is the caller's `len` bytes, as for the device below.
+        let user = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+        if write { b.slice().copy_from_slice(user); }
+        let ok = io_one(lba, b.slice().as_mut_ptr(), len, write);
+        if !write { user.copy_from_slice(b.slice()); }
+        return ok;
+    }
     let _g = Busy::new();
     // SAFETY: D3 — the buffer handed to the device is a frame the kernel owns (a block-cache slot or a
     // staging page), untouched for the length of the command.

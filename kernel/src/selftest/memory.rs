@@ -212,6 +212,39 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             let child = crate::paging::new_process_space();
             let top = crate::sched::alloc_kstack_in(child).expect("kstackguard: stack");
             let base = top - crate::sched::KSTACK_PAGES * 4096;
+            if crate::paging::KWIN_ON.load(core::sync::atomic::Ordering::Relaxed) {
+                // THE WINDOW (stage 3 of the direct map): one set of tables under slot 257 that
+                // every space shares, the bottom page never mapped — a guard everywhere at once.
+                let ws = ((crate::mem::KWIN_BASE >> 39) & 0x1FF) as usize;
+                let kw = crate::paging::top_entry_in(k, ws);
+                check(&mut ok, "the stack is in the window", crate::mem::in_kwin(base));
+                check(&mut ok, "its bottom page is the guard (never mapped)", crate::paging::kwin_frame(base).is_none());
+                check(&mut ok, "the other 15 pages are mapped", (1..crate::sched::KSTACK_PAGES).all(|p| crate::paging::kwin_frame(base + p * 4096).is_some()));
+                let later = crate::paging::new_process_space();
+                check(&mut ok, "the child, the parent and a later space share the window's tables",
+                    kw & 1 != 0 && [child, parent, later].iter().all(|&a| crate::paging::top_entry_in(a, ws) == kw));
+                // a live access through the kernel's recovering load: the guard faults, the stack does not
+                check(&mut ok, "a read of the guard faults (recovered)", crate::obs::unwind::try_read(base, false).is_none());
+                // SAFETY: the stack was just allocated and no task runs on it.
+                let rw = unsafe {
+                    let w = crate::mem::vptr::<u64>(top - 8);
+                    core::ptr::write_volatile(w, 0x5741_434b);
+                    core::ptr::read_volatile(w) == 0x5741_434b
+                };
+                check(&mut ok, "the top word is written and read back", rw);
+                crate::paging::free_address_space(parent);
+                crate::paging::free_address_space(child);
+                crate::paging::free_address_space(later);
+                let (_, built, _, _) = crate::sched::kwin_stats();
+                crate::sched::release_kstack(top);
+                let again = crate::sched::alloc_kstack().expect("kstackguard: again");
+                let (given, built2, refused, held) = crate::sched::kwin_stats();
+                check(&mut ok, "a released slot is taken again without new frames", built2 == built && again == top);
+                crate::sched::release_kstack(again);
+                println!("kstackguard: the window: given {} built {} refused {} held {}", given, built2, refused, held);
+                println!("kstackguard: {}", if ok { "ALL OK" } else { "FAILED" });
+                crate::suite::park()
+            }
             check(&mut ok, "the guard is in the child's space", crate::paging::is_guard_in(child, base));
             check(&mut ok, "the guard is in the kernel's reference space", crate::paging::is_guard_in(k, base));
             check(&mut ok, "only the bottom page is a guard", !crate::paging::is_guard_in(child, base + 4096));

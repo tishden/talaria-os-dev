@@ -173,6 +173,13 @@ pub unsafe fn set_root(root: u64) {
 /// the call is a store, and a walk after the invalidation must not find the old one in a
 /// store buffer the `tlbi` overtook (the Arm ARM's break-before-make sequence).
 #[inline(always)]
+/// Leaves written to tables no TLB holds (new, never-mapped pages) become visible to another
+/// core's walker after `dsb ishst` (the stores complete in the inner-shareable domain); `isb`
+/// for this core's own next access. No `tlbi`: there is nothing stale to drop.
+pub fn tables_published() {
+    // SAFETY: barriers only.
+    unsafe { core::arch::asm!("dsb ishst", "isb", options(nostack, preserves_flags)); }
+}
 pub unsafe fn flush_all() { core::arch::asm!("dsb nshst", "tlbi vmalle1", "dsb nsh", "isb", options(nostack)); }
 
 /// Drop every translation on EVERY core (`IS`): what a flush too large to go page by page

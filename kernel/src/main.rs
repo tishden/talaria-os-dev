@@ -219,6 +219,7 @@ extern "C" fn rust_main(start_info: u64) -> ! {
     rebootat("mem", cmdline);
     paging::init(); // our own page tables (1G) instead of the static boot tables
     paging::dmap_init(cmdline::num(cmdline, "talaria.dmap") != Some(0)); // RAM once more at mem::DMAP_BASE (ARM64-PLAN §10.16)
+    paging::kwin_init(cmdline::num(cmdline, "talaria.kwin") != Some(0)); // the kernel stacks at addresses of their own, a guard under each in every space
     fr::record(fr::PAGING, 0);
     rebootat("paging", cmdline);
 

@@ -1054,6 +1054,12 @@ pub fn cpu_has_other_task(cpu: usize, me: usize) -> bool {
 /// The old kernel stacks of migrated tasks: they may be freed only when the BSP
 /// has left them (a limbo context lived on the old stack until the first tick).
 static DEAD_KSTK: [AtomicU64; NTASKS] = [const { AtomicU64::new(0) }; NTASKS]; // base | pages<<48 | (tid+1)<<56
+/// A stack base packed into the low 48 bits: x86's window (`0xFFFF_8080_...`) is the kernel
+/// half and comes back sign-extended; arm64's (`0x0000_8080_...`) and every identity base as is.
+fn kbase48(v: u64) -> u64 {
+    let b = v & 0xFFFF_FFFF_FFFF;
+    if cfg!(target_arch = "x86_64") && b & (1 << 47) != 0 { b | 0xFFFF_0000_0000_0000 } else { b }
+}
 pub fn queue_dead_kstack(tid: usize, base: u64, pages: u64) {
     for s in DEAD_KSTK.iter() {
         if s.compare_exchange(0, base | pages << 48 | ((tid as u64 + 1) << 56), Ordering::SeqCst, Ordering::SeqCst).is_ok() { return; }
@@ -1070,7 +1076,7 @@ unsafe fn reap_dead_kstacks() {
         let tid = (v >> 56) as usize - 1;
         if tid == cur { continue; } // the BSP may still be on this stack (limbo)
         if s.compare_exchange(v, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-            free_kstack(v & 0xFFFF_FFFF_FFFF, (v >> 48) & 0xFF);
+            free_kstack(kbase48(v), (v >> 48) & 0xFF);
         }
     }
 }
@@ -1649,7 +1655,7 @@ pub fn nmi_note(rip: u64, cs: u64, rflags: u64, rsp: u64) {
     s.rip.store(rip, Ordering::Relaxed); s.cs.store(cs, Ordering::Relaxed);
     s.rflags.store(rflags, Ordering::Relaxed); s.rsp.store(rsp, Ordering::Relaxed);
     s.task.store(crate::percpu::cur_task(), Ordering::Relaxed);
-    let kstack = cs & 3 == 0 && (0x1000..0x4000_0000_0000).contains(&rsp);
+    let kstack = cs & 3 == 0 && ((0x1000..0x4000_0000_0000).contains(&rsp) || crate::mem::in_kwin(rsp));
     for (i, w) in s.stack.iter().enumerate() {
         // SAFETY: C3 — the interrupt/syscall FRAME of the thread this core interrupted: it lies
         // on that thread's kernel stack, which is alive for as long as the thread is, and the
@@ -1889,8 +1895,10 @@ unsafe fn enter_ctx(sp: u64) -> ! {
 pub unsafe fn migrate_current_to(cpu: usize, rip: u64, ursp: u64, rflags: u64, gp: crate::arch::switch::Gp, fpu: u64) -> ! {
     let t = current_id();
     let from = crate::percpu::cpu_id();
-    let kpages = 4u64;
-    let kstack = crate::mem::alloc_contig(kpages).expect("migrate kstack") + kpages * 4096;
+    // A window stack when there is one (guarded everywhere); otherwise 4 bare identity pages, as before.
+    let win = if crate::paging::KWIN_ON.load(Ordering::Relaxed) { kwin_take() } else { None };
+    let kpages = if win.is_some() { KSTACK_PAGES } else { 4u64 };
+    let kstack = match win { Some(t) => t, None => crate::mem::alloc_contig(kpages).expect("migrate kstack") + kpages * 4096 };
     let sp = crate::arch::switch::build_user_ctx(kstack, rip, ursp, rflags | crate::arch::switch::USER_FLAGS_IRQ_ON, &gp);
     let old_kstack = KSTACK[t]; let old_pages = KSZ[t];
     RSP[t] = sp; KSTACK[t] = kstack; KSZ[t] = kpages; ctx_saved(t);
@@ -2082,7 +2090,7 @@ pub fn crash_facts(tid: usize) -> (u64, u64, u64, u8, bool, usize) {
 pub fn dead_kstacks(mut f: impl FnMut(usize, u64, u64)) {
     for s in DEAD_KSTK.iter() {
         let v = s.load(Ordering::Relaxed);
-        if v != 0 { f((v >> 56) as usize - 1, v & 0xFFFF_FFFF_FFFF, (v >> 48) & 0xFF); }
+        if v != 0 { f((v >> 56) as usize - 1, kbase48(v), (v >> 48) & 0xFF); }
     }
 }
 /// The top of a task's kernel stack (rsp0). It is needed by the return from a signal handler:
@@ -2102,6 +2110,7 @@ pub fn kstack_top(tid: usize) -> u64 { unsafe { core::ptr::read_volatile(core::p
 /// is read for the roots of the live spaces.
 unsafe fn free_kstack(base: u64, pages: u64) {
     if base == 0 || pages == 0 { return; }
+    if crate::mem::in_kwin(base) { kstack_quarantine(base, pages); return; } // the window's guard is everybody's: nothing to take back
     crate::paging::unguard_in(crate::paging::kernel_cr3(), base);
     crate::paging::unguard_in(crate::paging::current_cr3() & !0xFFF, base);
     let n = NREADY.load(Ordering::SeqCst).min(NTASKS);
@@ -2127,17 +2136,23 @@ static KQ_NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsiz
 pub static KQ_HITS: AtomicU64 = AtomicU64::new(0);
 pub static KQ_ON: AtomicBool = AtomicBool::new(false);
 unsafe fn kstack_quarantine(base: u64, pages: u64) {
-    if !KQ_ON.load(Ordering::Relaxed) || pages > 0xFFF { crate::mem::free_contig(base, pages); return; }
-    let words = (pages * 4096 / 8) as usize;
-    for k in 0..words { core::ptr::write_volatile(crate::mem::kptr::<u64>(base).add(k), KQ_POISON); }
+    // A window stack is reached at its own address and its bottom page is the (never mapped)
+    // guard; an identity stack by its frames, all of them.
+    let give = |b: u64, n: u64| if crate::mem::in_kwin(b) { kwin_release(b) } else { crate::mem::free_contig(b, n) };
+    let word = |b: u64, k: usize| -> *mut u64 {
+        if crate::mem::in_kwin(b) { crate::mem::vptr::<u64>(b + 4096).add(k) } else { crate::mem::kptr::<u64>(b).add(k) }
+    };
+    let span = |b: u64, n: u64| -> usize { ((if crate::mem::in_kwin(b) { n - 1 } else { n }) * 4096 / 8) as usize };
+    if !KQ_ON.load(Ordering::Relaxed) || pages > 0xFFF { give(base, pages); return; }
+    for k in 0..span(base, pages) { core::ptr::write_volatile(word(base, k), KQ_POISON); }
     let slot = KQ_NEXT.fetch_add(1, Ordering::Relaxed) % KQ_N;
     let old = KQ[slot].swap(base | pages, Ordering::AcqRel); // base is page-aligned: the low 12 bits carry the page count
     if old == 0 { return; }
     let (ob, op) = (old & !0xFFF, old & 0xFFF);
-    let ow = (op * 4096 / 8) as usize;
+    let ow = span(ob, op);
     let mut first = usize::MAX; let mut count = 0usize; let mut sample = [(0usize, 0u64); 4];
     for k in 0..ow {
-        let v = core::ptr::read_volatile(crate::mem::kptr::<u64>(ob).add(k));
+        let v = core::ptr::read_volatile(word(ob, k));
         if v != KQ_POISON { if count < 4 { sample[count] = (k * 8, v); } if first == usize::MAX { first = k; } count += 1; }
     }
     if count != 0 {
@@ -2147,7 +2162,66 @@ unsafe fn kstack_quarantine(base: u64, pages: u64) {
                 ob, ob + op * 4096, count, first * 8, &sample[..count.min(4)]);
         }
     }
-    crate::mem::free_contig(ob, op);
+    give(ob, op);
+}
+
+// ── THE WINDOW'S STACK SLOTS (stage 3 of the direct map, `paging::kwin_*`) ──
+// Slot i is the window's [KWIN_BASE + i*64 KB, +64 KB): page 0 the guard (never mapped), pages
+// 1..15 the stack, mapped from single frames the first time the slot is used and kept with it
+// for good — a freed stack's slot comes back to the pool with its frames, so the window is never
+// unmapped and never needs a shootdown. 2048 slots = 128 MB of addresses, ten times NTASKS.
+const KSLOTS: usize = 2048;
+static KSLOT_USED: [AtomicU64; KSLOTS / 64] = [const { AtomicU64::new(0) }; KSLOTS / 64];
+static KSLOT_MAPPED: [AtomicU64; KSLOTS / 64] = [const { AtomicU64::new(0) }; KSLOTS / 64];
+static KSLOT_NEXT: AtomicUsize = AtomicUsize::new(0);
+/// Stacks given from the window / slots built (each built once) / refusals (the pool full or no
+/// frame: the caller falls back to an identity stack).
+pub static KWIN_GIVEN: AtomicU64 = AtomicU64::new(0);
+pub static KWIN_BUILT: AtomicU64 = AtomicU64::new(0);
+pub static KWIN_REFUSED: AtomicU64 = AtomicU64::new(0);
+fn kslot_base(i: usize) -> u64 { crate::mem::KWIN_BASE + i as u64 * KSTACK_PAGES * 4096 }
+/// A stack from the window: its TOP, or None (then an identity stack is used).
+fn kwin_take() -> Option<u64> {
+    // a built slot nobody holds first
+    for w in 0..KSLOTS / 64 {
+        let mut free = KSLOT_MAPPED[w].load(Ordering::Acquire) & !KSLOT_USED[w].load(Ordering::Acquire);
+        while free != 0 {
+            let b = free.trailing_zeros() as u64;
+            if KSLOT_USED[w].fetch_or(1 << b, Ordering::AcqRel) & (1 << b) == 0 {
+                KWIN_GIVEN.fetch_add(1, Ordering::Relaxed);
+                return Some(kslot_base(w * 64 + b as usize) + KSTACK_PAGES * 4096);
+            }
+            free &= !(1 << b);
+        }
+    }
+    let i = KSLOT_NEXT.fetch_add(1, Ordering::AcqRel);
+    if i >= KSLOTS { KWIN_REFUSED.fetch_add(1, Ordering::Relaxed); return None; }
+    KSLOT_USED[i / 64].fetch_or(1 << (i % 64), Ordering::AcqRel);
+    let base = kslot_base(i);
+    for p in 1..KSTACK_PAGES {
+        let ok = match crate::mem::alloc_frame() {
+            Some(f) => crate::paging::kwin_map(base + p * 4096, f) || { crate::mem::free_contig(f, 1); false },
+            None => false,
+        };
+        // A slot left half-built stays held for good (its addresses are spent, its frames
+        // stay mapped): the next request takes a fresh slot or falls back to the identity.
+        if !ok { KWIN_REFUSED.fetch_add(1, Ordering::Relaxed); return None; }
+    }
+    crate::paging::kwin_publish();
+    KSLOT_MAPPED[i / 64].fetch_or(1 << (i % 64), Ordering::Release);
+    KWIN_BUILT.fetch_add(1, Ordering::Relaxed);
+    KWIN_GIVEN.fetch_add(1, Ordering::Relaxed);
+    Some(base + KSTACK_PAGES * 4096)
+}
+/// Give a window stack's slot back to the pool (its frames stay with it).
+fn kwin_release(base: u64) {
+    let i = ((base - crate::mem::KWIN_BASE) / (KSTACK_PAGES * 4096)) as usize;
+    if i < KSLOTS { KSLOT_USED[i / 64].fetch_and(!(1 << (i % 64)), Ordering::AcqRel); }
+}
+/// (given, built, refused, held now) — for the gates and `kstat`.
+pub fn kwin_stats() -> (u64, u64, u64, u64) {
+    let held: u64 = (0..KSLOTS / 64).map(|w| (KSLOT_USED[w].load(Ordering::Relaxed) & KSLOT_MAPPED[w].load(Ordering::Relaxed)).count_ones() as u64).sum();
+    (KWIN_GIVEN.load(Ordering::Relaxed), KWIN_BUILT.load(Ordering::Relaxed), KWIN_REFUSED.load(Ordering::Relaxed), held)
 }
 
 /// The pages of a kernel stack per task. It was 4 (16 KB) — that is too little for large
@@ -2170,6 +2244,8 @@ pub fn alloc_kstack() -> Option<u64> { alloc_kstack_in(crate::paging::current_cr
 /// and a hole in the parent's is not in the child's. `pml4` must not be running on another
 /// core while its directory may be split (a fork's child is not published yet).
 pub fn alloc_kstack_in(pml4: u64) -> Option<u64> {
+    // The window, when there is one: its guard is in every space already (no dance below).
+    if crate::paging::KWIN_ON.load(Ordering::Relaxed) { if let Some(top) = kwin_take() { return Some(top); } }
     let base = crate::mem::alloc_contig(KSTACK_PAGES)?;
     let k = crate::paging::kernel_cr3();
     crate::paging::guard_in(k, base);

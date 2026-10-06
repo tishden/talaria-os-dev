@@ -349,9 +349,15 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
         let d = if f.err & 1 == 0 { "not mapped" } else { "protection" };
         let rw = if f.err & 2 != 0 { "a write" } else { "a read" };
         crate::println!("║ #PF CR2={:#018x} ({}, {})", cr2, d, rw);
+        if crate::mem::in_kwin(cr2) && crate::paging::kwin_frame(cr2).is_none() {
+            let slot = (cr2 - crate::mem::KWIN_BASE) / (crate::sched::KSTACK_PAGES * 4096);
+            let page = (cr2 - crate::mem::KWIN_BASE) / 4096 % crate::sched::KSTACK_PAGES;
+            crate::println!("║ {} of the kernel stacks' window, slot {} (stage 3 of the direct map)",
+                if page == 0 { "<-- A KERNEL STACK OVERFLOW: CR2 is the GUARD page" } else { "<-- an unmapped page" }, slot);
+        }
     }
     // a hex dump of the stack (up to 8 qwords from the rsp), if the address looks valid
-    if f.rsp >= 0x1000 && f.rsp < 0x4000_0000_0000 {
+    if (f.rsp >= 0x1000 && f.rsp < 0x4000_0000_0000) || crate::mem::in_kwin(f.rsp) {
         crate::println!("║ the stack @ {:#x}:", f.rsp);
         for i in 0..8u64 {
             let a = f.rsp + i * 8;
