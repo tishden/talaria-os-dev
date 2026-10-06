@@ -151,6 +151,9 @@ assertnot '\[trap\]|PANIC|BOOT REFUSED'                                  'slice:
 # reference one): it went into the parent's, and the child ran on the stack unguarded.
 boot 30 "talaria.test=kstackguard"
 assert 'kstackguard: ALL OK'                                              'kstackguard: a stack for another space is guarded there and in the kernel space, inherited by later spaces, released with no hole'
+assert 'kstackguard: the child, the parent and a later space share the window.s tables: OK' 'kstackguard: the kernel stacks'"'"' window (TTBR0 slot 257): one guard for every space, never mapped (ARM64-PLAN §10.16 stage 3)'
+boot 30 "talaria.test=kstackguard talaria.kwin=0"
+assert 'kstackguard: ALL OK'                                              'kstackguard: talaria.kwin=0 — the identity stacks with the per-space guard still pass the old gate (the fallback)'
 boot 30 "talaria.test=ipi"
 assert 'the AP is up — the datapath on core 1, the BSP = the control plane' 'ipi: a secondary came up through PSCI under the scheduler'
 assert 'sched: the first entry'                                           'ipi: the tick entered the shared scheduler'

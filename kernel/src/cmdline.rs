@@ -310,6 +310,7 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.kq", Kind::Flag, "the kernel stacks' quarantine: a freed stack is poisoned and checked before reuse"),
     once("talaria.ksink", Kind::Num, "a UDP sink in the kernel, the port"),
     once("talaria.kts", Kind::Flag, "receive timestamps in the kernel"),
+    once("talaria.kwin", Kind::Num, "0 — no kernel stacks' window: stacks are identity frames guarded per space (ARM64-PLAN §10.16 stage 3; the A/B and the fallback)"),
     once("talaria.lazytlb", Kind::Num, "0 — ring a neighbour in hlt on a TLB flush (the default 1: it flushes by itself on wakeup)"),
     once("talaria.lowmem", Kind::Num, "cap the allocator below 4 GB, MB (a gate: the shape of a machine whose RAM is mostly above)"),
     once("talaria.manifest", Kind::Text, "the path of the workload's manifest"),

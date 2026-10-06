@@ -22,6 +22,9 @@ use super::cpu;
 #[inline(always)] pub unsafe fn set_root(root: u64) { cpu::write_cr3(root) }
 /// Drop every translation this core has cached (a CR3 reload).
 #[inline(always)] pub unsafe fn flush_all() { cpu::write_cr3(cpu::read_cr3()) }
+/// Leaves written to tables no TLB holds are visible to every walker once the stores are (TSO):
+/// only the compiler must not sink them.
+#[inline(always)] pub fn tables_published() { core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst); }
 /// Drop this core's translation of one page.
 #[inline(always)] pub unsafe fn flush_page(vaddr: u64) { cpu::invlpg(vaddr) }
 /// Does this core do 1 GiB leaves (CPUID 0x80000001 EDX bit 26)?

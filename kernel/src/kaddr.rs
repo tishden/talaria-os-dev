@@ -32,6 +32,13 @@ pub const DMAP_BASE: u64 = 0xFFFF_8000_0000_0000;
 pub const DMAP_BASE: u64 = 0x0000_8000_0000_0000;
 /// One top-level slot: the physical addresses 0..512 GiB.
 pub const DMAP_SPAN: u64 = 1 << 39;
+/// The kernel stacks' window (stage 3): the next top-level slot, 257 — virtual addresses only,
+/// each stack's pages mapped one by one from any frames, a never-mapped guard page under each
+/// (`paging::kwin_*`, `sched::alloc_kstack_in`).
+pub const KWIN_BASE: u64 = DMAP_BASE + DMAP_SPAN;
+pub const KWIN_SPAN: u64 = 1 << 39;
+/// Is `va` in the kernel stacks' window.
+#[inline(always)] pub fn in_kwin(va: u64) -> bool { va.wrapping_sub(KWIN_BASE) < KWIN_SPAN }
 /// Which 2 MiB pieces of physical memory the map covers (`paging::dmap_init` sets them, never
 /// clears them): a bit per piece, 32 KiB for the slot. Empty -> `kva` is the identity.
 static DMAP_2M: [AtomicU64; (DMAP_SPAN >> 21) as usize / 64] = [const { AtomicU64::new(0) }; (DMAP_SPAN >> 21) as usize / 64];

@@ -449,6 +449,8 @@ for spec in \
   "talaria.test=console|unknown command: 'stauts' — did you mean 'status'|console: a typo -> a hint of the closest command rather than a blank 'unknown'" \
   "talaria.test=vmspace|vmspace: ISOLATION CONFIRMED|vmspace: per-process address spaces (a CR3 switch)" \
   "talaria.test=kstackguard|kstackguard: ALL OK|kstackguard: a forked task kernel stack is guarded in the CHILD space and the kernel one, released with no hole" \
+  "talaria.test=kstackguard|kstackguard: the child, the parent and a later space share the window.s tables: OK|kstackguard: the kernel stacks' window (slot 257): one guard for every space, never mapped (ARM64-PLAN §10.16 stage 3)" \
+  "talaria.test=kstackguard talaria.kwin=0|kstackguard: ALL OK|kstackguard: talaria.kwin=0 — the identity stacks with the per-space guard still pass the old gate (the fallback)" \
   "talaria.test=fork|fork: THE MEMORY WAS CLONED|fork: the clone of the address space (the copy semantics of the memory)" \
   "talaria.test=exec|musl static binary -> Talaria OS|exec: a musl binary in the process's private AS (a CR3 switch)" \
   "talaria.test=procs|sched: all the 2 task.s. have finished|procs: two processes in separate ASes under the scheduler (a per-process CR3)" \

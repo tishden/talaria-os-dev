@@ -411,6 +411,12 @@ extern "C" fn trap(kind: u64, f: &Frame) -> ! {
         crate::println!("[trap]   x{:<2}={:#018x} x{:<2}={:#018x}", i, f.x(i), i + 1, f.x(i + 1));
     }
     crate::println!("[trap]   x30={:#018x}", f.lr);
+    if crate::mem::in_kwin(f.far) && crate::paging::kwin_frame(f.far).is_none() {
+        let slot = (f.far - crate::mem::KWIN_BASE) / (crate::sched::KSTACK_PAGES * 4096);
+        let page = (f.far - crate::mem::KWIN_BASE) / 4096 % crate::sched::KSTACK_PAGES;
+        crate::println!("[trap] {} of the kernel stacks' window, slot {} (stage 3 of the direct map)",
+            if page == 0 { "<-- A KERNEL STACK OVERFLOW: far is the GUARD page" } else { "<-- an unmapped page" }, slot);
+    }
     // Before the per-core block exists there is no task, no scheduler and no FS to ask.
     if depth != 0 || super::percpu::block_ptr().is_null() {
         if depth != 0 { crate::println!("[trap] a fault inside the crash dump — halting on the registers above"); }

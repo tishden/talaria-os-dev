@@ -258,11 +258,15 @@ impl Nvme {
     /// the disk goes earlier than the ring's lock appears, and there are no other owners of the queue
     /// at that moment by construction.
     pub fn read_blocks_boot(&mut self, lba: usize, buf: &mut [u8]) -> bool {
+        if let Some(b) = crate::fs::Bounce::need(buf.as_ptr(), buf.len()) { // a sector on the caller's stack
+            let ok = self.read_blocks_boot(lba, b.slice());
+            buf.copy_from_slice(b.slice());
+            return ok;
+        }
         let maxb = self.max_blocks();
         let mut done = 0usize;
         while done < buf.len() {
             let nb = (((buf.len() - done) / 512).max(1) as u16).min(maxb);
-            // DMAP: `buf` is a sector on the caller's kernel stack (fs.rs) — kpa_of breaks once stacks leave RAM's map (stage 3)
             let Some(cid) = self.push_rw(false, (lba + done / 512) as u64, nb, crate::mem::kpa_of(buf.as_ptr()) + done as u64) else { return false };
             self.kick();
             let hz = crate::tsc::calibrate_cached();

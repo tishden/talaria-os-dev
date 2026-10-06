@@ -873,6 +873,16 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     buffer's virtual address) — the lint cannot see those, which is why the plan keeps a `Pa`
     type for drivers. **A meter the compiler computes cannot drift from the code; a gate the
     compiler enforces cannot be skipped.**
+51. **"A stack buffer is not a DMA buffer."** Stage 3 of the direct map moved the kernel stacks
+    into a window where each page is its own frame. Four persistence gates failed at once —
+    `pwrbtn`/`pwrbtnign` (an unsynced file gone after the power button, the second boot seeing
+    no ext2: `magic=0x0`) and arm64's `ext2v` — while everything else passed. The superblock, the
+    GPT header and a journal commit block are built in arrays on the kernel stack and handed to
+    NVMe as `kpa_of(first byte)`: right while the stack was contiguous identity memory, wrong as
+    soon as it was not, and silent: the device wrote another frame's bytes. Stage 1's agents had
+    marked exactly these three sites `// DMAP:`; the fix is a bounce through contiguous frames
+    at the block layer's doors (`fs::Bounce`). **A mark that says "this breaks at stage N" is a
+    gate for stage N: grep the marks before the stage, not after it fails.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

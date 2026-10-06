@@ -218,6 +218,100 @@ pub fn dmap_init(enabled: bool) -> bool {
     true
 }
 
+// ── THE KERNEL STACKS' WINDOW (docs/ARM64-PLAN.md §10.16, stage 3) ───────────────────
+// Top-level slot 257 (`mem::KWIN_BASE`): the kernel stacks at addresses of their own, each one's
+// pages mapped one by one (4K leaves, supervisor, NX) from any frames, the page under each
+// never mapped. The slot's PDPT exists before the first address space, so every space shares
+// every table under it: a guard is a guard everywhere at once, which retires the per-space
+// guard dance of the identity stacks (item 25: a fork's child ran with its guard in the
+// parent's space only), and a stack no longer needs 64 KB of CONTIGUOUS memory (item 49: the
+// panic on `alloc_kstack().unwrap()` was a contiguous request). A mapped page is never
+// unmapped — a freed stack keeps its frames and its slot goes back to `sched`'s pool — so no
+// shootdown is ever needed for the window, and no leaf of it is ever changed while in use.
+
+/// Build the window's top-level table; true when `sched` may give stacks from it.
+pub fn kwin_init(enabled: bool) -> bool {
+    use core::sync::atomic::Ordering;
+    let k = KERNEL_PML4.load(Ordering::Relaxed);
+    if !enabled || k == 0 {
+        crate::println!("talaria: the kernel stacks' window is OFF ({}) — stacks are identity frames, guarded per space",
+            if !enabled { "talaria.kwin=0" } else { "no own tables" });
+        return false;
+    }
+    let slot = ((crate::mem::KWIN_BASE >> 39) & 0x1FF) as usize;
+    // SAFETY: P1 + P2 — the slot is empty and no address space exists yet; the frame is fresh
+    // and zeroed before the entry points at it.
+    unsafe {
+        let pml4 = kptr::<Pte>(k);
+        if pte_r(pml4.add(slot)) & PTE_P == 0 {
+            let Some(t) = crate::mem::alloc_frame() else { return false; };
+            core::ptr::write_bytes(kptr::<u8>(t), 0, 4096);
+            pte_w(pml4.add(slot), t | PTE_P | PTE_RW);
+        }
+    }
+    KWIN_ON.store(true, Ordering::SeqCst);
+    crate::println!("talaria: the kernel stacks' window is ON at {:#x} (slot {})", crate::mem::KWIN_BASE, slot);
+    true
+}
+pub static KWIN_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The window's leaf slot for `va`, its tables created on the way (a CAS per level: two cores
+/// may build stacks at once). None when a table frame cannot be had.
+///
+/// # Safety
+/// P1 + P2 + P3: `va` is in the window and `kwin_init` succeeded.
+unsafe fn kwin_pte(va: u64) -> Option<*mut Pte> {
+    let pml4 = kptr::<Pte>(KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed));
+    let mut t = kptr::<Pte>(pte_r(pml4.add(((va >> 39) & 0x1FF) as usize)) & ADDR_MASK);
+    for shift in [30u64, 21] {
+        let e = t.add(((va >> shift) & 0x1FF) as usize);
+        let old = pte_r(e);
+        if old & PTE_P == 0 {
+            let f = crate::mem::alloc_frame()?;
+            core::ptr::write_bytes(kptr::<u8>(f), 0, 4096);
+            if !install_table(e, old, f, PTE_P | PTE_RW) { crate::mem::free_contig(f, 1); }
+        }
+        t = kptr::<Pte>(pte_r(e) & ADDR_MASK);
+    }
+    Some(t.add(((va >> 12) & 0x1FF) as usize))
+}
+
+/// Map frame `pa` at window page `va` (never mapped before). False when a table frame is
+/// missing; the page then stays a hole.
+pub fn kwin_map(va: u64, pa: u64) -> bool {
+    // SAFETY: P1 + P2 + P3 + P4 — the page was never mapped, so no TLB holds it and nothing
+    // runs on it; the leaf is written once and published by the barrier of `kwin_publish`.
+    unsafe {
+        let Some(e) = kwin_pte(va) else { return false; };
+        pte_w(e, pa | PTE_P | PTE_RW | PTE_NX | PTE_D);
+    }
+    true
+}
+/// Make the leaves just written visible before another core may run on them (arm64: a store to
+/// a table must be ordered before a walk by `dsb`; x86: a no-op beyond the compiler fence).
+pub fn kwin_publish() { mmu::tables_published(); }
+/// Top-level entry `slot` of the space `pml4_phys` (decoded) — the gates compare a process's
+/// window and map slots with the reference table's.
+pub fn top_entry_in(pml4_phys: u64, slot: usize) -> u64 {
+    // SAFETY: P1 + P2 — one read of a live root the caller owns.
+    unsafe { pte_r(kptr::<Pte>(pml4_phys & ADDR_MASK).add(slot & 0x1FF)) }
+}
+/// The frame behind window page `va`, or None (the guard, a page never mapped).
+pub fn kwin_frame(va: u64) -> Option<u64> {
+    // SAFETY: P1 + P2 — a read-only walk of the window's shared tables.
+    unsafe {
+        let pml4 = kptr::<Pte>(KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed));
+        let mut t = pml4;
+        for shift in [39u64, 30, 21] {
+            let e = pte_r(t.add(((va >> shift) & 0x1FF) as usize));
+            if e & PTE_P == 0 { return None; }
+            t = kptr::<Pte>(e & ADDR_MASK);
+        }
+        let e = pte_r(t.add(((va >> 12) & 0x1FF) as usize));
+        if e & PTE_P == 0 { None } else { Some(e & ADDR_MASK) }
+    }
+}
+
 // ── the per-page / per-segment protection (hardening) ─────────────────────────
 // A walker over the active tables (CR3): it splits 1G→2M→4K on demand and sets
 // the rights on a page. The identity mapping (vaddr==paddr below 4 GB) => the splitting
