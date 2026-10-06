@@ -51,6 +51,8 @@ static NBRIDGE: AtomicUsize = AtomicUsize::new(0);   // §4.8: how many bridges 
 static NLOST: AtomicUsize = AtomicUsize::new(0);     // A9: how many devices did not fit into the table
 
 #[inline] fn ecam() -> u64 { ECAM.load(Ordering::Relaxed) }
+/// The kernel's pointer to the ECAM window (0: the config goes through the ports, or no PCI).
+pub fn ecam_va() -> u64 { ecam() }
 /// §4.8: THE TOP BUS of the ECAM window (from the MCFG). We compute the config's offset from bus 0
 /// rather than from the record's start_bus, although formally the spec says the opposite: the MCFG on a c7i
 /// gives out two records with ONE base (buses 1..35 and 36..42), and it was checked on the spot
@@ -124,7 +126,7 @@ pub fn present() -> bool {
             let id = rd(0, 0, 0, 0);
             if id == 0xFFFF_FFFF || id == 0 {
                 PORTIO.store(false, Ordering::Relaxed);
-                ECAM.store(ECAM_DEFAULT, Ordering::Relaxed);
+                ECAM.store(crate::arch::mmio_va(ECAM_DEFAULT), Ordering::Relaxed); // the kernel's pointer (the devices' window)
                 if rd(0, 0, 0, 0) == 0xFFFF_FFFF || rd(0, 0, 0, 0) == 0 {
                     ECAM.store(0, Ordering::Relaxed);      // and the ECAM is empty -> the legacy ports
                     PORTIO.store(true, Ordering::Relaxed);
@@ -201,7 +203,7 @@ pub fn bar(bus: u8, dev: u8, func: u8, idx: u16) -> (u64, u64) {
         let cmd = rd(bus, dev, func, 4);
         wr(bus, dev, func, 4, cmd | 0x6);
         if crate::paging::map_mmio_1g(cur) == 0 { crate::println!("pci: BAR{} {:#x} was not mapped", idx, cur); return (0, 0); }
-        return (cur, size);
+        return (crate::arch::mmio_va(cur), size); // the kernel's pointer (the devices' window), as below
     }
     let base = if cur != 0 { cur } else {
         // A11: the firmware did NOT assign an address. Under QEMU (a microvm without firmware) one can
@@ -326,6 +328,8 @@ fn probe_func(bus: u8, dev: u8, func: u8) {
         let (b, s) = bar(bus, dev, func, 2);
         if b != 0 {
             let b = crate::arch::mmio_pa(b); // a window handed to ring 3 by its identity (`syscall`'s shm path)
+            let mut g = b & !((1u64 << 30) - 1);
+            while g < b + s { crate::paging::map_mmio_1g_ident(g); g += 1 << 30; }
             IVSHMEM_BASE.store(b, Ordering::SeqCst); IVSHMEM_SIZE.store(s, Ordering::SeqCst);
             crate::println!("pci: ivshmem BAR2 -> {:#x} ({} KB) — the host's shared memory", b, s / 1024);
         }
@@ -416,7 +420,7 @@ pub fn reset_access() {
 pub fn init() {
     if !present() { crate::println!("pci: there is no ECAM (a microvm without pcie=on) — skipped"); return; }
     if ecam() != 0 {
-        crate::println!("pci: ECAM {:#x} ({})", ecam(), if crate::acpi::ecam_base() != 0 { crate::acpi::ecam_source() } else { "microvm" });
+        crate::println!("pci: ECAM {:#x} ({})", crate::arch::mmio_pa(ecam()), if crate::acpi::ecam_base() != 0 { crate::acpi::ecam_source() } else { "microvm" });
     } else {
         crate::println!("pci: the config through the ports 0xCF8/0xCFC (legacy, there is no MCFG)");
     }

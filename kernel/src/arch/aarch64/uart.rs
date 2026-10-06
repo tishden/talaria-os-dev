@@ -77,8 +77,14 @@ const NS_LSR_DR: u32 = 1; const NS_LSR_THRE: u32 = 1 << 5;
 /// Where the UART is (a DTB/SPCR parse calls this before the first line, when it can).
 pub fn set_base(b: u64) { BASE.store(b, Ordering::Relaxed); KIND.store(0, Ordering::Relaxed); }
 /// The MMU is on and the devices' alias exists (`mmu::DEV_SLOT`): the base moves onto it.
-/// Called by the boot core right after `early_enable`; the type and the stride stay.
-pub fn rebase() { BASE.store(super::mmu::mmio_va(BASE.load(Ordering::Relaxed)), Ordering::Relaxed); }
+/// Called by the boot core right after `early_enable` (GB0's window gigabyte) and again after
+/// `paging::mwin_init` (any other gigabyte); the type and the stride stay. Idempotent.
+pub fn rebase() {
+    let b = BASE.load(Ordering::Relaxed);
+    if b != 0 { BASE.store(super::mmu::mmio_va(super::mmu::mmio_pa(b)), Ordering::Relaxed); }
+}
+/// The kernel's pointer to the UART's registers.
+pub fn base_va() -> u64 { BASE.load(Ordering::Relaxed) }
 /// The UART's physical address (what a firmware table or the stub names).
 pub fn base_pa() -> u64 { super::mmu::mmio_pa(BASE.load(Ordering::Relaxed)) }
 /// A 16550 at `b`: registers `1 << shift` bytes apart, `width` (1, 2 or 4) bytes each.

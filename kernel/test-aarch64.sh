@@ -152,6 +152,8 @@ assertnot '\[trap\]|PANIC|BOOT REFUSED'                                  'slice:
 boot 30 "talaria.test=kstackguard"
 assert 'kstackguard: ALL OK'                                              'kstackguard: a stack for another space is guarded there and in the kernel space, inherited by later spaces, released with no hole'
 assert 'kstackguard: the child, the parent and a later space share the window.s tables: OK' 'kstackguard: the kernel stacks'"'"' window (TTBR0 slot 257): one guard for every space, never mapped (ARM64-PLAN §10.16 stage 3)'
+boot 30 "talaria.test=kstackpush"
+assert 'A KERNEL STACK OVERFLOW: sp=0x8080000[0-9a-f]+ is at the GUARD page'  'kstackpush: a window stack overflowed by stores: the EL1 entry sees sp at the guard and dumps on the emergency stack instead of faulting on its own frame forever (ARM64-PLAN §10.16 stage 3'"'"'s leftover)'
 boot 30 "talaria.test=kstackguard talaria.kwin=0"
 assert 'kstackguard: ALL OK'                                              'kstackguard: talaria.kwin=0 — the identity stacks with the per-space guard still pass the old gate (the fallback)'
 boot 30 "talaria.test=ipi"
@@ -309,6 +311,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     run 150 "talaria.test=sigtest" ext2
     assert 'sigtest: MAP_SHARED at 0x6[0-9a-f]{11}, MAP_SHARED\|MAP_FIXED at 0x6f0000000000' 'sigtest: an anonymous MAP_SHARED has an address of its own and a MAP_SHARED|MAP_FIXED is honoured, both shared after a fork (ARM64-PLAN §10.16 stage 4a)'
     assert 'sigtest: SysV shm at 0x70[0-9a-f]{10}, POSIX shm at 0x70[0-9a-f]{10}' 'sigtest: SysV and POSIX shm in the named window, shared after a fork (ARM64-PLAN §10.16 stage 4a)'
+    assert 'sigtest: a low MAP_FIXED at 0xa0000000: (refused|granted)'       'sigtest: a MAP_FIXED below 4 GiB answers (refused while the kernel'"'"'s identity is in the process space; granted under a strict-by-default build)'
     assert 'sigtest: ALL OK'                                                  'sigtest: fd tables, signals (handler, mask, SIGCHLD, sigwait, signalfd), fork/COW, MAP_SHARED, SysV shm, eventfd/timerfd/epoll ET, procfs, fstatat — the arm64 stat, epoll_event and sigcontext layouts under real code'
     assertnot "$BAD|\[fault\]"                                              'sigtest: no trap, no fault, no unknown syscall'
     run 150 "talaria.mode=proc" ext2
@@ -316,6 +319,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     assertnot "$BAD|\[fault\]"                                              'proc-mode: no trap, no fault, no unknown syscall'
     run 150 "talaria.test=sigtest talaria.dmap=strict" ext2
     assert 'sigtest: ALL OK'                                                  'sigtest: the same under talaria.dmap=strict — no identity RAM in the process spaces (ARM64-PLAN §10.16 stage 4b)'
+    assert 'sigtest: a low MAP_FIXED at 0xa0000000: granted'                 'sigtest: under strict a private MAP_FIXED below 4 GiB is granted where the space has no identity (a gigabyte of nothing), stays private after a fork and unmaps (ARM64-PLAN §10.16 stage 5)'
     assertnot "$BAD|\[fault\]|RAM BY ITS IDENTITY"                          'sigtest: under strict no trap, no kernel access missed its kva'
     run 150 "talaria.test=mbench" ext2
     assert 'RESULT mbench syscall [0-9]+ ns'                                  'mbench: the syscall primitive is timed (the number is for the stand)'
@@ -657,6 +661,11 @@ boot 30 "talaria.test=dmapid talaria.dmap=0"
 assert 'dmapid: the direct map OFF at .* outside it: 0 '                     'dmapid: talaria.dmap=0 leaves the identity for everything, and no kva is a miss'
 boot 30 "talaria.test=dmapstrict talaria.dmap=strict"
 assert 'dmapstrict: ALL OK'                                                'dmapstrict: under talaria.dmap=strict a process space and its fork child carry no identity leaf over the map'"'"'s RAM, the kernel writes through the map, the former identity address is the process'"'"'s own (ARM64-PLAN §10.16 stage 4b)'
+boot 30 "talaria.test=mwin talaria.pci=1"
+assert 'mwin: ALL OK'                                                      'mwin: the kernel reaches every device through the devices'"'"' window (slot 384): the GIC, the ITS, the UART and the ECAM at 256 GiB are window addresses that round-trip, a process space reads the same GICD_TYPER, no mmio_va fell back to the identity (ARM64-PLAN §10.16 stage 5)'
+assert 'mwin: ecam at 0xc000[0-9a-f]+ = physical 0x4010000000'             'mwin: the high ECAM (256 GiB) is in the window, not reached by its identity'
+boot 30 "talaria.test=mwin talaria.mwin=0"
+assert 'mwin: the devices'"'"' window OFF .* misses 0 '                       'mwin: talaria.mwin=0 leaves every device but GB0 at its identity (the A/B and the fallback)'
 boot 30 "talaria.test=identhole talaria.dmap=strict"
 assert 'identhole: ALL CHECKS PASSED'                                      'identhole: under strict a munmap leaves no leaf, the kernel writes the frames through the map, no unintended hole'
 boot 60 "talaria.test=wakeprobe"

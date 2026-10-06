@@ -126,6 +126,9 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             let n = crate::paging::strict_count_in(asp);
             println!("dmapstrict: identity 4K pages over the map's RAM: the kernel's space {}, a process space {}", kern, n);
             check("a process space has none, the kernel's space keeps them", n == 0 && kern > 0);
+            let (kd, pd) = (crate::paging::strict_devgb_in(crate::paging::kernel_cr3()), crate::paging::strict_devgb_in(asp));
+            println!("dmapstrict: identity gigabytes with no RAM (devices, holes): the kernel's space {}, a process space {}", kd, pd);
+            check("a process space has no device gigabyte by its identity (the devices' window)", pd == 0);
             let child = crate::paging::fork_cow_space(asp);
             check("a fork child has none", crate::paging::strict_count_in(child) == 0);
             let (hb, _) = crate::mem::high_area();
@@ -157,6 +160,42 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             crate::paging::free_address_space(child);
             crate::paging::free_address_space(asp);
             println!("dmapstrict: {}", if ok { "ALL OK" } else { "FAILED" });
+            crate::suite::park()
+        }
+        "mwin" => {
+            // STAGE 5 OF THE DIRECT MAP (docs/ARM64-PLAN.md §10.16): the kernel reaches every device
+            // register through the devices' window (slot 384), not through the identity. Every
+            // device pointer the machine keeps is a window address whose physical address
+            // round-trips; a process space has the window's slot (the same table as the kernel's)
+            // and a device's ID word reads the same under it; no `mmio_va` fell back to the identity.
+            let mut ok = true;
+            let mut check = |what: &str, c: bool| { println!("mwin: {} — {}", what, if c { "OK" } else { "FAIL" }); ok &= c; };
+            let on = crate::paging::MWIN_ON.load(core::sync::atomic::Ordering::Relaxed);
+            let slot = ((crate::mem::MWIN_BASE >> 39) & 0x1FF) as usize;
+            println!("mwin: the devices' window {} at {:#x}, misses {} (the last {:#x})", if on { "ON" } else { "OFF" },
+                crate::mem::MWIN_BASE, crate::mem::MWIN_MISS.load(core::sync::atomic::Ordering::Relaxed), crate::mem::MWIN_MISS_LAST.load(core::sync::atomic::Ordering::Relaxed));
+            if on {
+                let mut ptrs = [("", 0u64); 5];
+                for (i, p) in crate::arch::mwin_pointers().iter().enumerate() { ptrs[i] = *p; }
+                ptrs[4] = ("ecam", crate::pci::ecam_va());
+                for &(name, va) in ptrs.iter().filter(|p| p.1 != 0) {
+                    let pa = crate::arch::mmio_pa(va);
+                    println!("mwin: {} at {:#x} = physical {:#x}", name, va, pa);
+                    check(name, crate::mem::in_mwin(va) && pa != va && crate::arch::mmio_va(pa) == va);
+                }
+                let w = crate::arch::mwin_witness();
+                let asp = crate::paging::new_process_space();
+                let same = crate::paging::top_entry_in(asp, slot) == crate::paging::top_entry_in(crate::paging::kernel_cr3(), slot);
+                check("a process space shares the window's table", same);
+                let orig = crate::paging::current_cr3();
+                // SAFETY: the window's slot is in `asp` (checked above); the read is an ID register.
+                let w2 = unsafe { crate::paging::switch(asp); let w2 = crate::arch::mwin_witness(); crate::paging::switch(orig); w2 };
+                println!("mwin: a device's ID word {:#x} in the kernel's space, {:#x} in a process space", w, w2);
+                check("a device reads the same in a process space", w != 0 && w == w2);
+                crate::paging::free_address_space(asp);
+                check("no device was reached by its identity", crate::mem::MWIN_MISS.load(core::sync::atomic::Ordering::Relaxed) == 0);
+            }
+            println!("mwin: {}", if ok && on { "ALL OK" } else if !on { "OFF" } else { "FAILED" });
             crate::suite::park()
         }
         "identhole" => {
@@ -248,6 +287,35 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if is_pd && e3p == e3 && intact && !pd_free { println!("sharedpd: ALL CHECKS PASSED"); }
             else { println!("sharedpd: FAILED"); }
             crate::suite::park()
+        }
+        "kstackpush" => {
+            // A KERNEL STACK OVERFLOWED BY A PUSH (x86). The guard under a window stack faults; the
+            // #PF then cannot push its own frame onto the same dead stack, and the double fault
+            // that follows used to need one too — the machine triple-faulted with no word. The #DF
+            // runs on IST1 now (`gdt::setup_gdt_cpu`) and the dump names the guard. The gate dies
+            // by design: it expects the dump.
+            #[cfg(target_arch = "x86_64")]
+            {
+                let top = crate::sched::alloc_kstack().expect("kstackpush: a stack");
+                let base = top - crate::sched::KSTACK_PAGES * 4096;
+                println!("kstackpush: a window stack {:#x}..{:#x} (window {}), its guard page {:#x}; pushing below its bottom",
+                    base, top, crate::mem::in_kwin(base), base);
+                // SAFETY: none intended — the stack is this test's, and the pushes run into its guard.
+                unsafe { core::arch::asm!("mov rsp, {sp}", "2: push rax", "jmp 2b", sp = in(reg) base + 4096 + 64, options(noreturn)); }
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                // arm64 pushes nothing itself, but the vector saves its frame on the same stack:
+                // the overflowing store faults, and the entry's own save faults again
+                let top = crate::sched::alloc_kstack().expect("kstackpush: a stack");
+                let base = top - crate::sched::KSTACK_PAGES * 4096;
+                println!("kstackpush: a window stack {:#x}..{:#x} (window {}), its guard page {:#x}; pushing below its bottom",
+                    base, top, crate::mem::in_kwin(base), base);
+                // SAFETY: none intended — the stack is this test's, and the stores run into its guard.
+                unsafe { core::arch::asm!("mov sp, {sp}", "2: stp xzr, xzr, [sp, #-16]!", "b 2b", sp = in(reg) base + 4096 + 64, options(noreturn)); }
+            }
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            { crate::suite::park() }
         }
         "kstackguard" => {
             // THE GUARD OF A FORKED TASK'S KERNEL STACK. `fork` allocated the child's stack while

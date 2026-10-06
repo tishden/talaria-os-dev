@@ -67,6 +67,10 @@ pub fn set_frames(gicd: u64, gicr: u64, gicr_size: u64) {
     GICR_END.store(gicr + gicr_size, Ordering::Relaxed);
 }
 pub fn present() -> bool { GICD.load(Ordering::Relaxed) != 0 }
+/// The kernel's pointers to the distributor and the first redistributor (the devices' window gate).
+pub fn frames() -> (u64, u64) { (GICD.load(Ordering::Relaxed), GICR.load(Ordering::Relaxed)) }
+/// The distributor's TYPER, read through the kernel's pointer (0: no GIC).
+pub fn typer() -> u32 { let d = GICD.load(Ordering::Relaxed); if d == 0 { 0 } else { unsafe { r32(d + GICD_TYPER) } } }
 
 /// The distributor: affinity routing on, group 1 enabled, every SPI in group 1 at
 /// one priority, disabled. Returns the number of SPIs the controller implements.

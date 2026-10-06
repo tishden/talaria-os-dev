@@ -39,6 +39,47 @@ pub const KWIN_BASE: u64 = DMAP_BASE + DMAP_SPAN;
 pub const KWIN_SPAN: u64 = 1 << 39;
 /// Is `va` in the kernel stacks' window.
 #[inline(always)] pub fn in_kwin(va: u64) -> bool { va.wrapping_sub(KWIN_BASE) < KWIN_SPAN }
+
+/// The devices' window (stage 5): top-level slot 384 on both machines (x86
+/// `0xFFFF_C000_0000_0000`, arm64 TTBR0 `0x0000_C000_0000_0000` — arm64's GB0 alias, generalised).
+/// Window gigabyte i is ONE physical gigabyte of device registers, given out in the order the
+/// devices are met (`paging::mwin_map`); arm64 claims gigabyte 0 for GB0 before the MMU is on.
+pub const MWIN_BASE: u64 = DMAP_BASE + 128 * DMAP_SPAN;
+pub const MWIN_SPAN: u64 = 1 << 39;
+/// Window gigabyte i -> its physical gigabyte + 1 (0: free). Written once per slot, never cleared.
+static MWIN_GB: [AtomicU64; 512] = [const { AtomicU64::new(0) }; 512];
+/// How many window gigabytes are given out (slots 0..n are written or being written).
+static MWIN_N: AtomicU64 = AtomicU64::new(0);
+/// How many `mmio_va` calls found no window for their address (the identity was used) — the
+/// meter of what still reaches a device by its identity; and the last such address.
+pub static MWIN_MISS: AtomicU64 = AtomicU64::new(0);
+pub static MWIN_MISS_LAST: AtomicU64 = AtomicU64::new(0);
+/// The window gigabyte of physical gigabyte `pgb`, if one was given out.
+#[inline]
+pub fn mwin_find(pgb: u64) -> Option<u64> {
+    let n = MWIN_N.load(Ordering::Acquire).min(512);
+    (0..n).find(|&i| MWIN_GB[i as usize].load(Ordering::Acquire) == pgb + 1)
+}
+/// The next free window gigabyte (the caller, `paging::mwin_map`, serialises and
+/// writes the leaves BEFORE `mwin_publish`). None: the window is full.
+pub fn mwin_claim() -> Option<u64> {
+    let i = MWIN_N.load(Ordering::Relaxed);
+    if i >= 512 { None } else { Some(i) }
+}
+/// Make window gigabyte `i` (from `mwin_claim`) the one of `pgb`, once its leaves are visible.
+pub fn mwin_publish(i: u64, pgb: u64) {
+    MWIN_GB[i as usize].store(pgb + 1, Ordering::Release);
+    MWIN_N.fetch_max(i + 1, Ordering::AcqRel);
+}
+/// The physical address behind a window address; anything else is returned as it is (identity).
+#[inline]
+pub fn mwin_pa(va: u64) -> u64 {
+    if va.wrapping_sub(MWIN_BASE) >= MWIN_SPAN { return va; }
+    let i = (va - MWIN_BASE) >> 30;
+    match MWIN_GB[i as usize].load(Ordering::Acquire) { 0 => va, g => ((g - 1) << 30) + (va & 0x3FFF_FFFF) }
+}
+/// Is `va` in the devices' window.
+#[inline(always)] pub fn in_mwin(va: u64) -> bool { va.wrapping_sub(MWIN_BASE) < MWIN_SPAN }
 /// Which 2 MiB pieces of physical memory the map covers (`paging::dmap_init` sets them, never
 /// clears them): a bit per piece, 32 KiB for the slot. Empty -> `kva` is the identity.
 static DMAP_2M: [AtomicU64; (DMAP_SPAN >> 21) as usize / 64] = [const { AtomicU64::new(0) }; (DMAP_SPAN >> 21) as usize / 64];

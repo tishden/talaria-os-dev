@@ -295,6 +295,7 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
     crate::paging::init();
     crate::paging::dmap_init(crate::cmdline::num(cmdline, "talaria.dmap") != Some(0)); // RAM once more at mem::DMAP_BASE (ARM64-PLAN §10.16)
     crate::paging::kwin_init(crate::cmdline::num(cmdline, "talaria.kwin") != Some(0)); // the kernel stacks at addresses of their own, a guard under each in every space
+    if crate::paging::mwin_init(crate::cmdline::num(cmdline, "talaria.mwin") != Some(0)) { uart::rebase(); } // every device gigabyte at an address of its own (stage 5)
     // The tables just built are what the core runs on now: prove it with a page whose rights
     // change under us. A fresh frame is identity-mapped RW for the kernel; `protect_none`
     // must make it absent, `protect` present again — through `enc` on every write.

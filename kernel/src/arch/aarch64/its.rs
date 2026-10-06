@@ -95,6 +95,8 @@ static DEVS: [AtomicU64; MAX_ITS_DEV] = [const { AtomicU64::new(0) }; MAX_ITS_DE
 pub fn present() -> bool { READY.load(Ordering::Acquire) }
 /// Where a device must write its event number.
 /// `BASE` is the kernel's pointer (the devices' alias); the device is told the physical one.
+/// The kernel's pointer to the ITS's registers (0: not up) — the devices' window gate.
+pub fn base() -> u64 { BASE.load(Ordering::Relaxed) }
 pub fn translater() -> u64 { super::mmu::mmio_pa(BASE.load(Ordering::Relaxed)) + GITS_TRANSLATER }
 
 fn lock() { while LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() { core::hint::spin_loop(); } }

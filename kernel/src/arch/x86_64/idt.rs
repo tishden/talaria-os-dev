@@ -21,6 +21,25 @@ impl IdtEntry {
 }
 
 static mut IDT: [IdtEntry; 256] = [IdtEntry::missing(); 256];
+/// The #DF goes to IST1 (`gdt::setup_gdt_cpu` gave this core's TSS that stack): a push overflow
+/// of a kernel stack becomes a dump instead of a triple fault. The IDT is shared; every core's
+/// TSS gets its IST1 in the same function before it takes an interrupt.
+pub fn df_on_ist() {
+    DF_IST.store(true, core::sync::atomic::Ordering::SeqCst);
+    // SAFETY: one byte of the #DF entry; the gate stays valid either way (0: the current stack).
+    unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(IDT[8].ist), 1); }
+}
+/// A fault address in the kernel stacks' window, named: the guard (an overflow) or a hole.
+fn kwin_note(cr2: u64) {
+    if crate::mem::in_kwin(cr2) && crate::paging::kwin_frame(cr2).is_none() {
+        let slot = (cr2 - crate::mem::KWIN_BASE) / (crate::sched::KSTACK_PAGES * 4096);
+        let page = (cr2 - crate::mem::KWIN_BASE) / 4096 % crate::sched::KSTACK_PAGES;
+        crate::println!("║ {} of the kernel stacks' window, slot {} (stage 3 of the direct map)",
+            if page == 0 { "<-- A KERNEL STACK OVERFLOW: CR2 is the GUARD page" } else { "<-- an unmapped page" }, slot);
+    }
+}
+/// `init` run again (an AP's) keeps the #DF on IST1.
+static DF_IST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 pub static IPI_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub const IPI_VECTOR: usize = 0x60;
 pub static TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -70,6 +89,7 @@ pub fn init() {
         for v in 0..32 {
             IDT[v].set(table[v]);
         }
+        if DF_IST.load(core::sync::atomic::Ordering::SeqCst) { IDT[8].ist = 1; }
         IDT[IPI_VECTOR].set(ipi_stub_ptr);
         // The scheduler now spins not only on the BSP, and an AP brought up AFTER
         // `sched::install` would with its own `idt::init` have returned the timer vector to the bare
@@ -352,12 +372,17 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
         if crate::paging::strict_miss(cr2) {
             crate::println!("║ <-- RAM BY ITS IDENTITY in a process space (talaria.dmap=strict): a kernel access that missed its kva");
         }
-        if crate::mem::in_kwin(cr2) && crate::paging::kwin_frame(cr2).is_none() {
-            let slot = (cr2 - crate::mem::KWIN_BASE) / (crate::sched::KSTACK_PAGES * 4096);
-            let page = (cr2 - crate::mem::KWIN_BASE) / 4096 % crate::sched::KSTACK_PAGES;
-            crate::println!("║ {} of the kernel stacks' window, slot {} (stage 3 of the direct map)",
-                if page == 0 { "<-- A KERNEL STACK OVERFLOW: CR2 is the GUARD page" } else { "<-- an unmapped page" }, slot);
+        if crate::paging::strict_dev_miss(cr2) {
+            crate::println!("║ <-- A DEVICE BY ITS IDENTITY in a process space (talaria.dmap=strict): a kernel access that missed its mmio_va");
         }
+        kwin_note(cr2);
+    }
+    if f.vec == 8 {
+        // on IST1 (`df_on_ist`): CR2 still holds the #PF that could not push its frame
+        let cr2: u64;
+        unsafe { core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack)); }
+        crate::println!("║ #DF on its own stack (IST1), rsp={:#018x}; the last #PF's CR2={:#018x}", f.rsp, cr2);
+        kwin_note(cr2);
     }
     // a hex dump of the stack (up to 8 qwords from the rsp), if the address looks valid
     if (f.rsp >= 0x1000 && f.rsp < 0x4000_0000_0000) || crate::mem::in_kwin(f.rsp) {

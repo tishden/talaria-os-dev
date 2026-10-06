@@ -1997,7 +1997,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             // That is how the runtimes (the JVM, jemalloc, glibc) "uncommit" pages; a silent
             // "ok" would leave the old data there — a quiet corruption of the heap instead of zeroes.
             if f.a3 == 4 && f.a2 > 0 && crate::sched::task_cr3(crate::sched::current_id()) != 0
-                && f.a1 >= 0x1_0000_0000 {
+                && (f.a1 >= 0x1_0000_0000 || crate::paging::fixed_low_ok(f.a1 & !0xFFF, f.a2.div_ceil(4096))) {
                 crate::paging::relazy_pages(f.a1 & !0xFFF, f.a2.div_ceil(4096));
             }
             0
@@ -2271,7 +2271,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 // at the first fork; it is shared now too. `talaria.sharedid=1` restores the identity.
                 if pages == 0 { return (-22i64) as u64; }
                 let vaddr = if fixed { f.a1 & !0xFFF } else { crate::proc::mmap_alloc(f.a2) };
-                if fixed && (vaddr < 0x1_0000_0000 || crate::paging::ident_leaf_overlap(vaddr, pages)) { return (-22i64) as u64; }
+                if fixed && ((vaddr < 0x1_0000_0000 && !crate::paging::fixed_low_ok(vaddr, pages)) || crate::paging::ident_leaf_overlap(vaddr, pages)) { return (-22i64) as u64; }
                 if fixed && f.a4 & 0x10_0000 != 0 && crate::paging::any_mapped(vaddr, pages) { return (-17i64) as u64; }
                 let Some(b) = crate::mem::alloc_contig(pages) else { return (-12i64) as u64; };
                 zero_serviced(b, pages * 4096);
@@ -2294,7 +2294,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 // A MAP_SHARED stays identity (shared through the kernel's 2M leaves).
                 if pages == 0 { return (-22i64) as u64; }
                 let vaddr = if fixed { f.a1 & !0xFFF } else { crate::proc::mmap_alloc(f.a2) };
-                if vaddr < 0x1_0000_0000 && fixed { return (-22i64) as u64; } // we do not recut the identity area
+                // we do not recut the identity area (under strict: what is left of it, `fixed_low_ok`)
+                if vaddr < 0x1_0000_0000 && fixed && !crate::paging::fixed_low_ok(vaddr, pages) { return (-22i64) as u64; }
                 // ...nor its gigabytes above 4 GB (the high area, the NUMA areas, the 1G MMIO
                 // windows): the kernel reaches those frames at their identity address in THIS AS too.
                 if fixed && crate::paging::ident_leaf_overlap(vaddr, pages) { return (-22i64) as u64; }

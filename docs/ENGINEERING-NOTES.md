@@ -896,6 +896,17 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     kernel's CR3). arm64's are in the image's `.bss` and were never at risk. **A gate of the
     mechanism proves the mechanism; only the full set over it finds who else leaned on the old one.**
 
+53. **"An early return skips the conversion."** Stage 5 of the direct map (the devices' window)
+    converts a device's physical address to the kernel's pointer where the base is first read —
+    `pci::bar` ends in `(mmio_va(base), size)`. But a BAR the firmware put above 4 GiB left the
+    function earlier, with `return (cur, size)`: the PHYSICAL address, handed to the NVMe and ENA
+    drivers as their register pointer. It worked because `map_mmio_1g` laid an identity leaf for
+    that gigabyte just before; the compiler's census (stage 1) cannot see it — a `u64` returned is
+    no cast. It showed when the window stopped laying identity leaves for devices: reading every
+    caller of the leaf about to disappear, not a gate. **Before retiring a mechanism, list who
+    leans on it by the mechanism's own entry points, then take it away so that a missed one
+    faults loudly** (strict for RAM's identity, no identity leaf for a high BAR).
+
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
 * **The gate's image is part of the gate.** The dev box's `talaria-qemu-aarch64` was

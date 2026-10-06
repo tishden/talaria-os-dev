@@ -32,11 +32,18 @@ pub mod vga;     // the legacy text window at 0xB8000
 /// bytes from 0xFEB0_0000 (`virtnet::scan_mmio_window`).
 pub const VIRTIO_MMIO_SLOTS: usize = 32;
 pub fn virtio_mmio_slot(i: usize) -> Option<(usize, usize)> {
-    if i < VIRTIO_MMIO_SLOTS { Some((0xFEB0_0000 + i * 512, 512)) } else { None }
+    if i < VIRTIO_MMIO_SLOTS { Some((mmio_va(0xFEB0_0000 + i as u64 * 512) as usize, 512)) } else { None }
 }
-/// The kernel's pointer to a device register: x86 reaches every device through its identity.
-#[inline] pub fn mmio_va(pa: u64) -> u64 { pa }
-#[inline] pub fn mmio_pa(va: u64) -> u64 { va }
+/// The kernel's pointer to a device register: the devices' window (`paging::mmio_va`), the
+/// identity before it is built or with `talaria.mwin=0`.
+#[inline] pub fn mmio_va(pa: u64) -> u64 { crate::paging::mmio_va(pa) }
+#[inline] pub fn mmio_pa(va: u64) -> u64 { crate::paging::mmio_pa(va) }
+/// The devices' window gate (`talaria.test=mwin`): the device pointers this machine keeps.
+pub fn mwin_pointers() -> [(&'static str, u64); 2] {
+    [("lapic", smp::LAPIC_VA.load(core::sync::atomic::Ordering::Relaxed)), ("ioapic", ioapic::base(0))]
+}
+/// A device's ID word read through the kernel's pointer (the IOAPIC's line count; 0: none).
+pub fn mwin_witness() -> u32 { ioapic::lines_of(0) }
 /// The GSI of the virtio-mmio window in slot `i`. The microvm puts the virtio lines at the
 /// TOP of the GSI space: the highest occupied slot sits on the highest line and the rest are
 /// counted down from it (measured — see `netsys::netirq_setup`). `None`: not derivable.
