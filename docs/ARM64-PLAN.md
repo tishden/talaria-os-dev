@@ -2312,6 +2312,11 @@ that `KOFF` puts the image's gigabyte at `KIMG_VBASE` (a `KBASE` elsewhere fails
 Gate `talaria.test=kimg` on both: `KIMG_OFF` against the running map, `kpa` of a `.text`/`.rodata`/
 `.data`/`.bss` word against a table walk, the alias reads, writes, executes and is in a process space.
 
+On the machines (`variants.sh`, mdpipe, `smp=4`, the image's alias in the console at the
+stage-7 addresses): a `c7g.xlarge` booted through the UEFI stub gives p99 2.24 us strict / 2.49 with
+`talaria.dmap=1` / Linux 4.77 in the same hour; a `c6i.xlarge` 6.25 / 5.39 / 10.0 — stage 5's
+numbers.
+
 Two lessons on the way. The gate itself took `addr_of!(__kernel_pstart)` — an absolute low symbol
 from high code is a PC-relative `adrp` out of its ±4 GiB, and the link failed: exactly the class the
 stage removes, so the gate reads the load address from the tables instead. And the secondaries
