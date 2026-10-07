@@ -2376,6 +2376,48 @@ the Talaria GENERATOR's client path, the next thing to measure; redis's rare 0.3
 PostgreSQL `pk`'s ceiling; the wfe tier's mdpipe tail (§10.15); the lazy FP save (the svc round
 trip is 130 ns with the save, 113 without — 17 ns, under the noise of any row above).
 
+## 11. After the migration: what is left, in order (2026-10-07)
+
+Phases 0-9 and the direct map's stages 1-7 are closed: both machines boot, run ring 3, the
+devices, the databases, the JVM and ClickHouse, with the kernel image in the higher half, W^X on
+it, no RAM identity in a process space by default, and the kernel's memory from any RAM; each
+step was gated on both regressions and booted on a `c7g.xlarge` and a `c6i.xlarge`. The branch
+`arm64-port` stays a branch until the owner says otherwise. What is left, the order being the
+order of work:
+
+1. **The databases under strict on the EC2 scoreboard.** The A/B of 2026-10-07 (`run-remote-ab.sh
+   <wl> "talaria.dmap=strict"`) gave no judgeable point, and the stand, not the kernel, was why:
+   an AMI built before the worktree had `services/*/build` (fixed: `mk-ami.sh` refuses a tree that
+   did not build); a `mongodb` stand whose Talaria server ran MariaDB and whose generator refused
+   connections in phase A (not explained — the stand's state crossed between consecutive runs in
+   the worktree `my_os-s64`); two queued chains on one terraform state (the lock). First the
+   harness: one stand per state directory, a guard that refuses a second run on the same state, the
+   server's console checked for the workload's own banner before phase A. Then PostgreSQL, MariaDB
+   and MongoDB, A (`talaria.dmap=1`) against B (the default, strict), on `c7g.xlarge` and
+   `c6i.xlarge`. Exit: judgeable points on both sides, B within A's spread or explained.
+2. **Phase 9's performance, as the numbers rank it** (§10.17, `docs/MEASUREMENTS.md` §10.13-10.14):
+   (a) the Talaria generator's client path — the whole redis median/ceiling gap on the board is the
+   generator's (under the Linux generator the Talaria server's ceiling is 14-17 % above Linux's);
+   (b) the wfe tier's mdpipe tail at `smp=2` (oversubscription; only `wakepreempt=0` helps) — a per-tick
+   instrument (who is on the core when a tick is slow); (c) redis's rare 0.3-0.9 ms outliers at low
+   rates; (d) PostgreSQL `pk`'s ceiling, measured under the Linux generator too; (e) the lazy FP save
+   (17 ns of a 130 ns svc — last).
+3. **Stage 6's tails.** The low allocator takes one RAM region (the others below 4 GiB stay
+   unused — on x86 the 640 KB under 1 MB); the workload cannot use RAM beyond the identity ceiling
+   yet (the identity modes need a check of their own first); the `alloc_contig` callers that are not
+   dual (the vDSO, `syscall.rs`'s identity-mode mmaps, shm's identity fallback) keep the low memory.
+4. **The direct map's tails.** The `Pa` newtype for the drivers' entry points (stage 1's unfinished
+   item — a kernel pointer handed to a device should not compile); `user_gb()` renamed for what it
+   is now (the gigabyte of the identity modes' user region); arm64's Image header claims "placement
+   anywhere" (flags bit 3) while `KOFF` assumes the image's gigabyte is 1 GiB (the linker ASSERT
+   holds the build, not a loader that places it elsewhere) — clear the bit or compute the offset at
+   boot; TTBR1 reconsidered only if ASIDs per process or a KPTI-like split are wanted.
+5. **Housekeeping.** A `c6i.large` billed $2.57 a day around the clock from 2026-09-20 to 10-04 (not
+   the port's; gone now) — find what started it; the worktree `my_os-s64` carries symlinked
+   `services/*/build` and its own terraform state — retire it or make it the scoreboard's only home.
+6. **The merge of `arm64-port` into `main`** — the owner's call; before it, both regressions and
+   `validate.sh` on the HEAD to be merged.
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its
