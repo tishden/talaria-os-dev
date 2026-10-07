@@ -96,6 +96,10 @@ printf 'binary=/crashme\nargs=crashme live\nrestart=0\n' > "$T/cell.manifest"
 "$REPO/kernel/mkext2.sh" "$T" "$IMG/disk_gdbsmp.img" 32M >/dev/null 2>&1 || echo "no mkfs.ext2 — disk_gdbsmp.img was not built"
 rm -rf "$T"
 SPIN=$(nm "$REPO/kernel/user/crashme" 2>/dev/null | awk '$3=="spinner"{print $1}'); echo "$SPIN" > "$IMG/spinner.addr"
+# A kernel instruction nothing runs after the boot (the 32-bit multiboot2 entry, at its high
+# address): the gdb-smp gate puts a SOFTWARE breakpoint there — the code is read-only at the alias
+# (W^X), so the stub writes it through the direct map (ARM64-PLAN §10.16 stage 7.4).
+nm "$REPO/$K" 2>/dev/null | awk '$3=="mb2_start"{print $1}' > "$IMG/ktext.addr"
 # The children that live and die on an AP (crashme forkap, mode=proc).
 T=$(mktemp -d); cp "$REPO/kernel/user/crashme" "$T/" 2>/dev/null
 printf 'binary=/crashme\nargs=crashme forkap\n' > "$T/cell.manifest"
@@ -2685,9 +2689,10 @@ if [ -f /img/disk_gdbsmp.img ] && [ -s /img/spinner.addr ]; then
     -serial file:/tmp/o.log -serial tcp:127.0.0.1:1235,server,nowait -no-reboot \
     -drive id=d0,file=/tmp/gdbsmp.img,format=raw,if=none -device nvme,drive=d0,serial=tal0 >/tmp/q.log 2>&1 &
   QG=$!; sleep 6
-  GS=$(python3 - "$(cat /img/spinner.addr)" <<'PYRSP' 2>&1
+  GS=$(python3 - "$(cat /img/spinner.addr)" "$(cat /img/ktext.addr 2>/dev/null)" <<'PYRSP' 2>&1
 import socket, sys, re
 spin = int(sys.argv[1], 16)
+ktext = int(sys.argv[2], 16) if len(sys.argv) > 2 and sys.argv[2] else 0
 s = socket.create_connection(("127.0.0.1", 1235), timeout=15)
 buf = b""
 def pkt():
@@ -2703,17 +2708,25 @@ def cmd(c):
     s.sendall(("$%s#%02x" % (c, sum(c.encode()) % 256)).encode()); return pkt()
 s.sendall(b"+")      # as gdb does: acknowledge what the stub could already have sent,
 first = cmd("?")     # and ask for the reason of the stop anew
+sw = ""
+if ktext:   # a software breakpoint in the kernel's read-only code: written, seen, removed
+    orig = cmd("m%x,1" % ktext); z0 = cmd("Z0,%x,1" % ktext); on = cmd("m%x,1" % ktext)
+    zz = cmd("z0,%x,1" % ktext); off = cmd("m%x,1" % ktext)
+    sw = " Z0=%s m=%s z0=%s back=%s" % (z0, on, zz, "yes" if off == orig else "NO(%s/%s)" % (off, orig))
 ok1 = cmd("Z1,%x,1" % spin)
 stop = cmd("c")
 ok2 = cmd("z1,%x,1" % spin)
 det = cmd("D")
-print("first=%s Z1=%s stop=%s z1=%s D=%s" % (first, ok1, stop, ok2, det))
+print("first=%s Z1=%s stop=%s z1=%s D=%s%s" % (first, ok1, stop, ok2, det, sw))
 PYRSP
 )
   echo "  | $GS"
   case "$GS" in *"first=T05thread:1;core:0;"*"Z1=OK stop=T05thread:"*"core:"[123]";"*"z1=OK D=OK"*)
     echo "  PASS  gdb-smp: a stop before the first instruction, an hbreak on the spinning thread catches it on an AP, a detach"; PASS=$((PASS+1));;
     *) echo "  FAIL  gdb-smp: $GS"; FAIL=$((FAIL+1));; esac
+  case "$GS" in *"Z0=OK m=cc z0=OK back=yes"*)
+    echo "  PASS  gdb-smp: a software breakpoint in the kernel's read-only code (W^X) — 0xCC written through the direct map, read back, removed, the byte restored"; PASS=$((PASS+1));;
+    *) echo "  FAIL  gdb-smp: the software breakpoint in the kernel's code: $GS"; FAIL=$((FAIL+1));; esac
   sleep 1
   assert "crashme: a live instance" "gdb-smp: after the detach the workload goes on working (the cores have been released from the parking)"
   kill $QG 2>/dev/null; wait $QG 2>/dev/null
