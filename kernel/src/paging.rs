@@ -400,13 +400,19 @@ fn mwin_map(pa: u64) -> Option<u64> {
 static STRICT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// The kernel's image's end rounded up to 2 MiB: below it (in the kernel's gigabyte) the identity stays.
 static STRICT_KEEP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-/// Turn strict on (`talaria.dmap=strict`, or by default in a build with `TALARIA_STRICT` set —
-/// the whole regression over strict); true when it is on.
-pub fn strict_init(want: bool) -> bool {
+/// Turn strict on — the DEFAULT since 2026-10-07 (both regressions, `validate.sh`, the arm64 KVM
+/// stand's gate and databases, mdpipe on both EC2 machines ran over it); `talaria.dmap=1` keeps
+/// the map without it, `talaria.dmap=0` has neither. `asked`: `talaria.dmap=strict` was given,
+/// so a refusal is an error worth a loud line. True when it is on.
+pub fn strict_init(want: bool, asked: bool) -> bool {
     use core::sync::atomic::Ordering;
-    if !want && option_env!("TALARIA_STRICT").is_none() { return false; }
+    if !want { return false; }
     if !crate::mem::DMAP_ON.load(Ordering::Relaxed) || !KWIN_ON.load(Ordering::Relaxed) {
-        crate::println!("talaria: talaria.dmap=strict REFUSED — it needs the direct map and the stacks' window (talaria.kwin=0?)");
+        if asked {
+            crate::println!("talaria: talaria.dmap=strict REFUSED — it needs the direct map and the stacks' window (talaria.kwin=0?)");
+        } else {
+            crate::println!("talaria: the direct map is not strict — it needs the map and the stacks' window");
+        }
         return false;
     }
     // the process spaces made before would keep the identity: refuse rather than half-apply

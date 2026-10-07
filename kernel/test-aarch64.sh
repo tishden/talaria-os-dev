@@ -313,16 +313,18 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     run 150 "talaria.test=sigtest" ext2
     assert 'sigtest: MAP_SHARED at 0x6[0-9a-f]{11}, MAP_SHARED\|MAP_FIXED at 0x6f0000000000' 'sigtest: an anonymous MAP_SHARED has an address of its own and a MAP_SHARED|MAP_FIXED is honoured, both shared after a fork (ARM64-PLAN §10.16 stage 4a)'
     assert 'sigtest: SysV shm at 0x70[0-9a-f]{10}, POSIX shm at 0x70[0-9a-f]{10}' 'sigtest: SysV and POSIX shm in the named window, shared after a fork (ARM64-PLAN §10.16 stage 4a)'
-    assert 'sigtest: a low MAP_FIXED at 0xa0000000: (refused|granted)'       'sigtest: a MAP_FIXED below 4 GiB answers (refused while the kernel'"'"'s identity is in the process space; granted under a strict-by-default build)'
+    assert 'the direct map is STRICT'                                         'sigtest: strict is the default (no identity leaf over the map'"'"'s RAM in a process space; ARM64-PLAN §10.16 stage 4b)'
+    assert 'sigtest: a low MAP_FIXED at 0xa0000000: granted'                 'sigtest: a MAP_FIXED below 4 GiB is granted by default (strict: no identity there)'
     assert 'sigtest: ALL OK'                                                  'sigtest: fd tables, signals (handler, mask, SIGCHLD, sigwait, signalfd), fork/COW, MAP_SHARED, SysV shm, eventfd/timerfd/epoll ET, procfs, fstatat — the arm64 stat, epoll_event and sigcontext layouts under real code'
     assertnot "$BAD|\[fault\]"                                              'sigtest: no trap, no fault, no unknown syscall'
     run 150 "talaria.mode=proc" ext2
     assert 'sigtest: ALL OK'                                                  'proc-mode: a process by /cell.manifest (the launch path of the databases)'
     assertnot "$BAD|\[fault\]"                                              'proc-mode: no trap, no fault, no unknown syscall'
-    run 150 "talaria.test=sigtest talaria.dmap=strict" ext2
-    assert 'sigtest: ALL OK'                                                  'sigtest: the same under talaria.dmap=strict — no identity RAM in the process spaces (ARM64-PLAN §10.16 stage 4b)'
-    assert 'sigtest: a low MAP_FIXED at 0xa0000000: granted'                 'sigtest: under strict a private MAP_FIXED below 4 GiB is granted where the space has no identity (a gigabyte of nothing), stays private after a fork and unmaps (ARM64-PLAN §10.16 stage 5)'
-    assertnot "$BAD|\[fault\]|RAM BY ITS IDENTITY"                          'sigtest: under strict no trap, no kernel access missed its kva'
+    assertnot "RAM BY ITS IDENTITY"                                          'sigtest: under strict (the default) no kernel access missed its kva'
+    run 150 "talaria.test=sigtest talaria.dmap=1" ext2
+    assert 'sigtest: ALL OK'                                                  'sigtest: the same with talaria.dmap=1 — the map with RAM'"'"'s identity kept in the process spaces (the A/B of strict)'
+    assert 'sigtest: a low MAP_FIXED at 0xa0000000: refused'                 'sigtest: with talaria.dmap=1 a MAP_FIXED below 4 GiB is refused (the kernel'"'"'s identity is in the process space)'
+    assertnot "$BAD|\[fault\]|the direct map is STRICT"                     'sigtest: talaria.dmap=1 turns strict off, no trap'
     run 150 "talaria.test=mbench" ext2
     assert 'RESULT mbench syscall [0-9]+ ns'                                  'mbench: the syscall primitive is timed (the number is for the stand)'
     assert 'mbench: ALL OK'                                                   'mbench: the primitives of the hot loop with the binary that goes to Linux'

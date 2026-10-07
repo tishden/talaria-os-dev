@@ -2232,6 +2232,19 @@ address). `anyram` on a 200 GB guest (`memory-backend-ram,reserve=off`, so the h
 it), on both machines: `0x30_0000_0000..0x32_4000_0000` (9 GB) is seen, `alloc_any` takes it
 first, the workload's frames stay below; PostgreSQL boots and answers on that guest.
 
+**Strict is the default (2026-10-07).** The last evidence it waited for came from real arm64
+hardware: the KVM stand (`c7g.metal`, `CUSTOM=` with a strict-by-default build of `4801645`) ran the
+gate 348/0 (its open-source and dynamic-ELF blocks have no images there) and the databases 15/0 —
+PostgreSQL, MariaDB, MongoDB, the JVM, ClickHouse — with real cache maintenance, which TCG skips.
+x86's evidence is local KVM on the dev box's own hardware (`validate.sh` over strict since stage
+4b) and mdpipe under strict on a `c6i.xlarge`. The EC2 scoreboard A/B of the databases did not
+give judgeable points this time (the stand's own seams, not the kernel: an image without its
+server, two queued runs on one terraform state); it is the next scoreboard's to repeat.
+`talaria.dmap=1` is the map with RAM's identity kept in process spaces (the A/B), `talaria.dmap=0`
+no map at all; the `TALARIA_STRICT` build switch is gone. The regressions assert that a default boot
+is strict and keep the `dmap=1` path: x86 535/0 + host 22/0, `validate.sh` 14/0; arm64 369/0, its
+databases 14/0.
+
 Left of stage 6: the low pieces other than the largest one are still unused (the low allocator
 takes one region; on x86 the other one is the 640 KB below 1 MB); the workload cannot use RAM
 beyond the identity yet (the identity modes would need a check of their own); and the remaining

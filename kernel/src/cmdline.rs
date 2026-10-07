@@ -277,7 +277,7 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.dirtychunk", Kind::Num, "blocks per portion of the pre-emptive dirty-data flush (default 64)"),
     once("talaria.dirtyfrac", Kind::Num, "a pre-emptive flush when the dirty set exceeds 1/N of the cache (a larger N — earlier; default 4)"),
     once("talaria.dirtykick", Kind::Num, "the age-flush kick's period, ms (0 — auto: an eighth of talaria.dirtyage)"),
-    once("talaria.dmap", Kind::Word(&["0", "1", "strict"]), "0 — no direct map: the kernel reaches RAM by its identity (ARM64-PLAN §10.16; the A/B and the fallback); strict — and no identity leaf over the map's RAM in a process space (stage 4b)"),
+    once("talaria.dmap", Kind::Word(&["0", "1", "strict"]), "strict (the default) — the direct map, and no identity leaf over the map's RAM in a process space (ARM64-PLAN §10.16 stage 4b); 1 — the map, the identity kept in process spaces (the A/B); 0 — no direct map: the kernel reaches RAM by its identity (the fallback)"),
     once("talaria.dns", Kind::Check(ipaddr_ok), "the DNS address"),
     many("talaria.ena", Kind::Check(ena_ok), "the ENA driver's options"),
     once("talaria.epoch", Kind::Num, "CLOCK_REALTIME at startup, UNIX seconds"),

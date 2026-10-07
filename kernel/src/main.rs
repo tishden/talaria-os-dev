@@ -442,7 +442,9 @@ pub fn boot_shared(start_info: u64, mut cmdline: &'static str, tsc_hz: u64, earl
     trace::mark("the cmdline is ready (the network/user-data are done)");
     // Stage 4b of the direct map, by the FINAL cmdline: strict builds nothing at boot, it only
     // shapes the process spaces made from here on — so EC2's user-data can turn it on.
-    paging::strict_init(cmdline::has(cmdline, "talaria.dmap", "strict"));
+    // Strict is the default; `talaria.dmap=1` (the map, the identity kept) or `=0` turn it off.
+    paging::strict_init(!cmdline::has(cmdline, "talaria.dmap", "1") && !cmdline::has(cmdline, "talaria.dmap", "0"),
+        cmdline::has(cmdline, "talaria.dmap", "strict"));
     // The other three are built at boot from the image's own command line; a `=0` that only the
     // final one carries (EC2 user-data) came too late — say so instead of silently not applying it.
     for (knob, on) in [("talaria.dmap", mem::DMAP_ON.load(core::sync::atomic::Ordering::Relaxed)),
