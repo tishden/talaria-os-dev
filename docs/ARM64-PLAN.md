@@ -2251,6 +2251,43 @@ beyond the identity yet (the identity modes would need a check of their own); an
 `alloc_contig` callers that are not dual (the vDSO, `syscall.rs`'s identity-mode mmaps and shm)
 keep the low.
 
+**Stage 7, the plan (2026-10-07).** The image in the higher half: x86 at −2 GiB (PML4[511]/PDPT[510];
+`code-model: kernel` is already the target's, so the Rust side links there as it is), arm64 at
+`0x0000_FFFF_8000_0000` — TTBR0's L0[511]/L1[510], the SAME indices, above `USER_TOP`, so §4.3's one
+table and the shared paging code stay and `copy_kernel_pml4` (slots 1..511) hands the image to every
+space; TTBR1 would buy a kernel half never copied and later ASID/KPTI options, and is left for then.
+What stage 1 already did: every image-address-to-physical conversion goes through `kaddr::kpa`
+(37 `kpa_of`, 4 `kpa`) — the image's bounds (`kernel_lo/hi`), the boot records, kvmclock, PV-EOI,
+steal time, the virtio arena and the ENA/NVMe buffers in `.bss` — so one branch there (the image's
+range minus its offset) keeps them all. The work is where code runs at the physical address:
+
+1. **7.0, the vocabulary, no behaviour change.** `AT()` in both linker scripts with an offset `KOFF`
+   (0 for now) and physical entry symbols for `ENTRY`, the PVH note, the mb2 tag and `tools/mk-tboot.sh`;
+   the stubs check "the entry lies in the PT_LOAD by its physical address", not `entry == paddr`;
+   `kpa`'s image branch; the four Rust sites that use an image address as physical without it
+   (arm64's AP stack as its MMU-off `sp`, the unwinder's probe at `kernel_lo() + 0x1000`, `early_enable`'s
+   assumption). Gate `kimg`: `.text`/`.data`/`.bss` and the PV/DMA words round-trip.
+2. **7.1, a high alias while linked low**: the image mapped a second time at slot 511 (x86's boot
+   tables, arm64's `early_enable`, `paging::init` on both — before the root switch and before any
+   space). Gate: a word read through both; a process space and a fork child have it.
+3. **7.2, x86 linked at −2 GiB**: the 32-bit entry with `sym - KOFF` (its absolutes are R_X86_64_32 and
+   fail to link — loud), a `movabs`+`jmp` into the high half, the AP trampoline handed `kernel_cr3()`
+   explicitly (it must map 0x8000 and the image, below 4 GiB — ENGINEERING-NOTES 52's class); all four
+   loaders (PVH, the UEFI stub, tboot, GRUB).
+4. **7.3, arm64 linked high**: today Rust runs with the MMU off up to `early_enable` (the DTB, the
+   console, `println!`) and on every secondary up to `enable_here` — an absolute pointer there (a
+   format string's pieces, a vtable) is a high address with no MMU. Linux's way: an asm early map in
+   `_start` (the image's identity and its alias, MAIR/TCR/SCTLR, a branch high), the DTB parsed after
+   it; `ap_start` turns the MMU on in asm from the root's and the stack's physical addresses; VBAR
+   set once high. The riskiest step: a fault there is silent.
+5. **7.4, the low image identity retired**: `STRICT_KEEP` shrinks to leaf 0 (the trampoline, the
+   BIOS area), the image's leaves leave process spaces, `fixed_low_ok` and `mprotect` stop refusing
+   its range, `user_gb()` is renamed for what it is, W^X on the image (`.text` RX, `.rodata` R,
+   `.data`/`.bss` RW+NX). Gate: an x86 ET_EXEC at 0x200000 in a process space.
+6. **7.5, ClickHouse's high-base kernel retires** (`services/clickhouse/build-kernel.sh`, `target-hi`,
+   `validate.sh` B12 on the default kernel); the identity modes keep the limit (the image is still
+   there physically) and say so.
+
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
 check on every queued address); arm64 attribute aliasing (map RAM only, never split a leaf);
