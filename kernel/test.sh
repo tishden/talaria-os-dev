@@ -560,14 +560,16 @@ assert "symlink-test: ALL OK" "symlink: the ext2 links (a read through a link, a
 q=$(bootd "talaria.test=sigtest" /img/disk_ext2.img); sleep 2
 assert "sigtest: MAP_SHARED at 0x6[0-9a-f]{11}, MAP_SHARED\|MAP_FIXED at 0x6f0000000000" "proc: an anonymous MAP_SHARED has an address of its own (the mmap region, not the frames' identity) and a MAP_SHARED|MAP_FIXED is honoured — both stay shared after a fork (ARM64-PLAN §10.16 stage 4a)"
 assert "sigtest: SysV shm at 0x70[0-9a-f]{10}, POSIX shm at 0x70[0-9a-f]{10}" "proc: SysV and POSIX shm in the named window (one non-identity address in every process, so a futex in it still wakes across processes), shared after a fork (ARM64-PLAN §10.16 stage 4a)"
-assert "sigtest: a low MAP_FIXED at 0xa0000000: (refused|granted)" "proc: a MAP_FIXED below 4 GiB answers (refused while the kernel's identity is in the process space; granted under a strict-by-default build)"
+assert "the direct map is STRICT" "proc: strict is the default (no identity leaf over the map's RAM in a process space; ARM64-PLAN §10.16 stage 4b)"
+assert "sigtest: a low MAP_FIXED at 0xa0000000: granted" "proc: a MAP_FIXED below 4 GiB is granted by default (strict: no identity there)"
 assert "sigtest: ALL OK" "proc: the fd tables/dup2/pipe/cwd/readdir + the signals(handler,mask,kill,SIGCHLD,SIGTERM,a sigwait thread,signalfd) + fork(COW,mprotect-RO,MAP_SHARED,SysV shm,the memory at exit) + eventfd/timerfd/procfs/openat(dirfd)/a file mmap"; stopq $q
 q=$(bootd "talaria.test=sigtesthi talaria.dmap=strict" /img/disk_ext2.img); sleep 2
 assert "sigtest: ALL OK" "proc: sigtest LINKED AT 0x40000000 (RAM's former identity, GB1) under strict — the image, its forks (COW) and its shared memory where the kernel's identity used to be (ARM64-PLAN §10.16 stage 4b)"
 refute "RAM BY ITS IDENTITY|DEVICE BY ITS IDENTITY|CRASH DUMP" "proc: the image at 1 GiB under strict — no kernel access missed its kva, no crash"; stopq $q
-q=$(bootd "talaria.test=sigtest talaria.dmap=strict" /img/disk_ext2.img); sleep 2
-assert "sigtest: ALL OK" "proc: the same under talaria.dmap=strict — no identity RAM in the process spaces, fork/COW/MAP_SHARED/shm/signals intact (ARM64-PLAN §10.16 stage 4b)"
-assert "sigtest: a low MAP_FIXED at 0xa0000000: granted" "proc: under strict a private MAP_FIXED below 4 GiB is granted where the space has no identity (RAM in the map, a gigabyte of nothing), stays private after a fork and unmaps (ARM64-PLAN §10.16 stage 5)"
+q=$(bootd "talaria.test=sigtest talaria.dmap=1" /img/disk_ext2.img); sleep 2
+assert "sigtest: ALL OK" "proc: the same with talaria.dmap=1 — the map with RAM's identity kept in the process spaces (the A/B of strict), fork/COW/MAP_SHARED/shm/signals intact"
+assert "sigtest: a low MAP_FIXED at 0xa0000000: refused" "proc: with talaria.dmap=1 a MAP_FIXED below 4 GiB is refused (the kernel's identity is in the process space)"
+refute "the direct map is STRICT" "proc: talaria.dmap=1 turns strict off"
 refute "RAM BY ITS IDENTITY|DEVICE BY ITS IDENTITY|CRASH DUMP" "proc: under strict no kernel access missed its kva, no crash"; stopq $q
 q=$(bootd "talaria.test=ext2v" /img/disk_ext2.img); sleep 1
 assert "ext2v: .*PERSISTED OK" "ext2v: the data survived a reboot (the write-back cache was flushed at the fsync/exit_group)"; stopq $q
