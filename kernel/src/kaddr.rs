@@ -121,9 +121,28 @@ fn kva_miss(pa: u64) -> u64 {
 pub static DMAP_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// The kernel's pointer to physical RAM address `pa`.
 #[inline(always)] pub fn kptr<T>(pa: u64) -> *mut T { core::ptr::with_exposed_provenance_mut(kva(pa) as usize) }
+/// The kernel image's virtual address minus its physical one (stage 7; `KOFF` in both linker
+/// scripts, which ASSERT it against `KIMG_VBASE`; gate `kimg` checks the running map). 0: the image runs where it
+/// is loaded. When it is not 0, every image address at or above `KIMG_VBASE` is the image.
+#[cfg(target_arch = "x86_64")]
+pub const KIMG_OFF: u64 = 0xFFFF_FFFF_8000_0000;
+#[cfg(not(target_arch = "x86_64"))]
+pub const KIMG_OFF: u64 = 0x0000_FFFF_4000_0000; // the image's gigabyte (0x4000_0000) at KIMG_VBASE
+/// Where an image linked high starts: x86's −2 GiB, arm64's TTBR0 L0[511]/L1[510] — the same
+/// table indices (ARM64-PLAN §10.16 stage 7).
+#[cfg(target_arch = "x86_64")]
+pub const KIMG_VBASE: u64 = 0xFFFF_FFFF_8000_0000;
+#[cfg(not(target_arch = "x86_64"))]
+pub const KIMG_VBASE: u64 = 0x0000_FFFF_8000_0000;
 /// The physical address of kernel virtual address `va` of RAM (the inverse of `kva`): the map's
-/// range is translated, anything else is the identity (the image, a kernel stack, a miss).
-#[inline(always)] pub fn kpa(va: u64) -> u64 { if va.wrapping_sub(DMAP_BASE) < DMAP_SPAN { va - DMAP_BASE } else { va } }
+/// range and the image's are translated, anything else is the identity (a kernel stack in the
+/// identity, a miss).
+#[inline(always)]
+pub fn kpa(va: u64) -> u64 {
+    if va.wrapping_sub(DMAP_BASE) < DMAP_SPAN { va - DMAP_BASE }
+    else if KIMG_OFF != 0 && va >= KIMG_VBASE { va - KIMG_OFF }
+    else { va }
+}
 /// The physical address of what a kernel pointer to RAM points at.
 #[inline(always)] pub fn kpa_of<T: ?Sized>(p: *const T) -> u64 { kpa(vaddr(p)) }
 /// A pointer from an integer that already is a kernel virtual address.

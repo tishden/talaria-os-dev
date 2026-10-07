@@ -7,6 +7,14 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // The linker scripts are inputs of the kernel, not of this script, but cargo does not know
+    // that (they come in through `-T` in .cargo/config.toml): an edit to one relinked NOTHING —
+    // stage 7 moved the ELF entry in linker.ld and the build "finished in 0.44 s" with the old
+    // one. A changed script reruns this script, and that rebuilds the crate.
+    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    for f in ["linker.ld", "linker-aarch64.ld"] {
+        println!("cargo:rerun-if-changed={}", root.join(f).display());
+    }
     let dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("user/vdso");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("vdso.so");
     for f in ["vdso.S", "vdso.lds", "vdso-aarch64.S", "vdso-aarch64.lds", "layout.lds"] {

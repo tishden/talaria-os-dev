@@ -2288,6 +2288,37 @@ range minus its offset) keeps them all. The work is where code runs at the physi
    `validate.sh` B12 on the default kernel); the identity modes keep the limit (the image is still
    there physically) and say so.
 
+**Stage 7.0-7.3 are done (2026-10-07): the image runs in the higher half on both machines.**
+7.0: both linker scripts give every section `AT(ADDR - KOFF)` and the loaders physical symbols
+(`pvh_start_pa`, `mb2_start_pa`, `_head_pa` — the PVH note, the mb2 tag, `mk-tboot.sh`'s `nm`, arm64's
+ELF entry). x86's ELF entry stays VIRTUAL: GRUB 2.06's multiboot2 ELF loader refuses an entry
+outside the segment's `p_vaddr` range ("entry point isn't in a segment") even with the mb2 entry tag
+— the full regression's BIOS block found it — so the x86 UEFI stub translates `entry - p_vaddr +
+p_paddr`. And cargo did not know the linker scripts are inputs: an edit to one relinked nothing (a
+build "finished in 0.44 s" with the old entry); `build.rs` names them now; `kaddr::KIMG_OFF`/`KIMG_VBASE` and `kpa`'s image branch; arm64's CPU_ON context is the stack's
+`kpa`; `mem::kernel_va_lo` for the unwinder's probe. 7.1: `paging::init` maps the image's 2M leaves a
+second time at slot 511 before the root switch (`paging::kimg_alias`). 7.2: x86 links at −2 GiB
+(`KOFF = 0xFFFF_FFFF_8000_0000`, the image at `0xffffffff80200000`): the 32-bit entry writes every
+absolute as `(sym - KOFF_A)` (a `const` operand), the boot tables carry PML4[511]/PDPT[510] → GB0's
+directory, and long mode jumps high by `movabs`; `code-model: kernel` was already the target's, and no
+relocation overflowed. 7.3: arm64 links at `0xffff_8008_0000` (`KOFF = 0xFFFF_4000_0000`), and Rust
+no longer runs with the MMU off: `_start` builds a boot map in asm (every gigabyte of the first
+512 GiB by its identity as Device — what the MMU-off code saw — except the image's, Normal, plus the
+same block at L0[511]/L1[510]), invalidates its lines, turns the MMU on and branches high;
+`early_enable` became a root switch with the MMU on (`dsb ishst` before, `isb` before the TLB
+invalidate) and keeps L0[511]; a secondary turns its MMU on in `ap_start` from `AP_ROOT`/`AP_TCR`,
+which `start_secondary` publishes and cleans to the point of coherency. The linker scripts ASSERT
+that `KOFF` puts the image's gigabyte at `KIMG_VBASE` (a `KBASE` elsewhere fails at link time).
+Gate `talaria.test=kimg` on both: `KIMG_OFF` against the running map, `kpa` of a `.text`/`.rodata`/
+`.data`/`.bss` word against a table walk, the alias reads, writes, executes and is in a process space.
+
+Two lessons on the way. The gate itself took `addr_of!(__kernel_pstart)` — an absolute low symbol
+from high code is a PC-relative `adrp` out of its ±4 GiB, and the link failed: exactly the class the
+stage removes, so the gate reads the load address from the tables instead. And the secondaries
+came up silent with the boot map's TCR: the kernel's leaves leave the access flag to the hardware
+(TCR.HA), a core without HA faults on its first access — before it has vectors. They take the boot
+core's own TCR now (ENGINEERING-NOTES 55).
+
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
 check on every queued address); arm64 attribute aliasing (map RAM only, never split a leaf);

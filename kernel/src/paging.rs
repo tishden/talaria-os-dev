@@ -113,13 +113,34 @@ pub fn init() {
             pte_w(kptr::<Pte>(dl1), PTE_P | PTE_RW | PTE_PS | PTE_UC);
             pte_w(kptr::<Pte>(pml4).add(mmu::DEV_SLOT), dl1 | PTE_P | PTE_RW);
         }
+        // STAGE 7.1: the image's high alias — its 2M leaves once more at top-level slot 511
+        // (x86 −2 GiB, arm64 TTBR0 L0[511]/L1[510]), supervisor, BEFORE the first address space
+        // copies the root (slots 1..511) and before the root switch, so that an image linked
+        // there (7.2/7.3) never runs on a root without it.
+        let img_gb = crate::mem::kernel_lo() & !((1u64 << 30) - 1);
+        // One PD: the image must lie in one gigabyte (2 MB..~60 MB today; KBASE moves it).
+        assert!(sup_hi <= (img_gb >> 21) + 512, "the kernel's image crosses a gigabyte");
+        let hpdpt = crate::mem::alloc_frame().expect("frame: the image's alias (pdpt)");
+        let hpd = crate::mem::alloc_frame().expect("frame: the image's alias (pd)");
+        core::ptr::write_bytes(kptr::<u8>(hpdpt), 0, 4096);
+        core::ptr::write_bytes(kptr::<u8>(hpd), 0, 4096);
+        for abs in sup_lo..sup_hi {
+            let j = (abs - (img_gb >> 21)) as usize;
+            pte_w(kptr::<Pte>(hpd).add(j), (abs << 21) | PTE_P | PTE_RW | PTE_PS);
+        }
+        let s4 = ((crate::mem::KIMG_VBASE >> 39) & 0x1FF) as usize;
+        let s3 = ((crate::mem::KIMG_VBASE >> 30) & 0x1FF) as usize;
+        pte_w(kptr::<Pte>(hpdpt).add(s3), hpd | PTE_P | PTE_RW);
+        pte_w(kptr::<Pte>(pml4).add(s4), hpdpt | PTE_P | PTE_RW);
+        KIMG_ALIAS_OFF.store(crate::mem::KIMG_VBASE - img_gb, core::sync::atomic::Ordering::Relaxed);
         mmu::set_root(pml4);
     }
     #[cfg(target_arch = "x86_64")]
     mmu::pat_init(); // the PAT4 slot = write-combining (the ENA's LLQ window, §A1); arm64 types memory by MAIR index
     KERNEL_PML4.store(pml4, core::sync::atomic::Ordering::Relaxed); // the reference kernel AS for fork/new_address_space
-    crate::println!("talaria: our own page tables are active (GB{} on 2M: the kernel {:#x}..{:#x} is supervisor, the rest is user; the other GBs on 1G)",
-        kgb, crate::mem::kernel_lo(), crate::mem::kernel_hi());
+    crate::println!("talaria: our own page tables are active (GB{} on 2M: the kernel {:#x}..{:#x} is supervisor, the rest is user; the other GBs on 1G; \
+        the image's high alias at {:#x})",
+        kgb, crate::mem::kernel_lo(), crate::mem::kernel_hi(), kimg_alias(crate::mem::kernel_va_lo()).unwrap_or(0));
     // AN INVARIANT THAT BREAKS BY ITSELF. The protection in GB0 is set by 2 MB leaves,
     // so the leaf with the kernel's tail is supervisor ENTIRELY. The allocator must start
     // above it — otherwise the frames from that leaf will go into ring 3 and the very first write
@@ -2535,6 +2556,13 @@ pub fn nx_range(vaddr: u64, len: u64) {
 /// The reference kernel PML4 (without the private user entries) — the source of
 /// the shared kernel part when new ASes are built. It is set in init().
 static KERNEL_PML4: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The image's high alias (stage 7.1): its virtual address minus the physical one, 0 before
+/// `paging::init` built it (or on a machine without 1G pages, which keeps the boot tables).
+static KIMG_ALIAS_OFF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The image's high alias of image address `va`; None when there is no alias.
+pub fn kimg_alias(va: u64) -> Option<u64> {
+    match KIMG_ALIAS_OFF.load(core::sync::atomic::Ordering::Relaxed) { 0 => None, off => Some(crate::mem::kpa(va) + off) }
+}
 
 /// Build a new address space: a fresh PML4 with its own PDPT into which
 /// the kernel entries are copied (GB0-3 are shared). It returns the PML4's physical address.
@@ -2867,10 +2895,6 @@ fn user_gb() -> usize { (crate::mem::kernel_lo() >> 30) as usize }
 
 /// The current CR3 (the active PML4's physical address + the flags).
 pub fn kernel_cr3() -> u64 { KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed) }
-/// Where the kernel's root is kept: a secondary arm64 core reads it with its MMU (and so its
-/// caches) off, and the boot core cleans the word to the point of coherency first.
-#[cfg(target_arch = "aarch64")]
-pub fn kernel_cr3_word() -> u64 { crate::mem::vaddr(core::ptr::addr_of!(KERNEL_PML4)) }
 
 pub fn current_cr3() -> u64 { mmu::root() }
 

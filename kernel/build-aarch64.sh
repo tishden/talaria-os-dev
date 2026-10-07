@@ -8,7 +8,7 @@
 set -eu
 cd "$(dirname "$0")"
 cargo -Z json-target-spec build --release --target aarch64-talaria.json
-ELF=target/aarch64-talaria/release/talaria
+ELF=${CARGO_TARGET_DIR:-target}/aarch64-talaria/release/talaria
 OBJCOPY=${AARCH64_OBJCOPY:-}
 for c in aarch64-linux-gnu-objcopy llvm-objcopy rust-objcopy; do
   [ -n "$OBJCOPY" ] && break

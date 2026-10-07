@@ -666,6 +666,8 @@ echo "== observability on arm64: PMUv3, the profile with stacks, the gdb stub ==
 A0=$ACCEL; IC=0; [ "$ACCEL" = "-cpu max" ] && { ACCEL="$ACCEL -icount shift=0"; IC=1; }
 boot 30 "talaria.test=allocfail"
 assert 'allocfail: ALL OK'                                                 'allocfail: a refused contiguous request leaves the bump whole (a Graviton'"'"'s refused fscache=512 took it and the next kernel stack panicked)'
+boot 30 "talaria.test=kimg"
+assert 'kimg: ALL OK' 'kimg: the image'"'"'s virtual and physical addresses — KIMG_OFF is the linker'"'"'s KOFF, kpa of a .text/.rodata/.data/.bss word is what the tables say (ARM64-PLAN §10.16 stage 7)'
 boot 30 "talaria.test=dmapid"
 assert 'dmapid: ALL OK'                                                    'dmapid: the address kinds round-trip (a low and a high frame, a .bss and a stack word) — the contract the direct map keeps (ARM64-PLAN §10.16)'
 assert 'dmapid: the direct map ON at 0x800000000000'                       'dmapid: the direct map is on by default (TTBR0 slot 256, above USER_TOP): kptr goes through it, the identity reads the same word'

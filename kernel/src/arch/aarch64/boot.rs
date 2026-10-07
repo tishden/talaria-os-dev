@@ -77,6 +77,27 @@ _start:
     mov     x9, #(3 << 20)
     msr     cpacr_el1, x9
     isb
+    /* STAGE 7.3 (ARM64-PLAN §10.16): the MMU on BEFORE any Rust. The image is linked KOFF above
+       where it is loaded, so Rust may not run with the MMU off: an absolute pointer (a format
+       string's pieces, a vtable) would be a high address. The early map: every gigabyte of the
+       first 512 GiB by its identity as a Device block — what the MMU-off code saw, so the
+       tree, the UEFI block and the console are reached as before — except the image's, a
+       Normal block; and the image's gigabyte once more at its high alias (L0[511]/L1[510]).
+       `mmu::early_enable` replaces it with the real map. */
+    bl      boot_map
+    /* TCR: the boot value with the core's PARange as IPS (at most 48 bits) */
+    mrs     x10, id_aa64mmfr0_el1
+    and     x10, x10, #0xf
+    mov     x11, #5
+    cmp     x10, x11
+    csel    x10, x11, x10, hi
+    ldr     x1, ={tcr}
+    orr     x1, x1, x10, lsl #32
+    adrp    x0, boot_l0
+    bl      mmu_on
+    ldr     x9, =7f
+    br      x9                          /* into the high half */
+7:
     adrp    x9, boot_stack_top
     add     x9, x9, :lo12:boot_stack_top
     mov     sp, x9
@@ -122,6 +143,18 @@ ap_start:
     mov     x9, #(3 << 20)
     msr     cpacr_el1, x9
     isb
+    /* the MMU on with the kernel's root (`AP_ROOT`, set and cleaned to the point of coherency
+       by `kmain::start_secondary`), then into the high half; x19 = the stack's physical top */
+    adrp    x9, AP_ROOT
+    ldr     x0, [x9, :lo12:AP_ROOT]
+    adrp    x9, AP_TCR
+    ldr     x1, [x9, :lo12:AP_TCR]      /* the boot core's own TCR: HA/HD as its tables expect */
+    bl      mmu_on
+    ldr     x9, =8f
+    br      x9
+8:
+    ldr     x10, ={koff}
+    add     x19, x19, x10               /* the stack is in the image: its alias */
     mov     sp, x19
     mov     x29, xzr
     mov     x0, x19
@@ -129,10 +162,78 @@ ap_start:
 6:  wfi
     b       6b
 
+/* boot_map: fill boot_l0/boot_l1/boot_l1h (the MMU is off: adrp gives physical addresses). */
+boot_map:
+    adrp    x9, boot_l1
+    ldr     x11, ={devblk}
+    mov     x10, #0
+1:  orr     x12, x11, x10, lsl #30
+    str     x12, [x9, x10, lsl #3]
+    add     x10, x10, #1
+    cmp     x10, #512
+    b.lo    1b
+    adrp    x13, _head
+    lsr     x14, x13, #30
+    lsl     x15, x14, #30
+    ldr     x16, ={normblk}
+    orr     x15, x15, x16
+    str     x15, [x9, x14, lsl #3]      /* the image's gigabyte by its identity */
+    adrp    x17, boot_l1h
+    str     x15, [x17, #(510 * 8)]      /* ... and at its high alias */
+    adrp    x16, boot_l0
+    orr     x12, x9, #3
+    str     x12, [x16]
+    orr     x12, x17, #3
+    str     x12, [x16, #(511 * 8)]
+    /* written with the MMU off: no stale line of these tables may shadow them once the
+       walks are cacheable */
+    mrs     x10, ctr_el0
+    ubfx    x10, x10, #16, #4
+    mov     x11, #4
+    lsl     x10, x11, x10               /* the D-cache line */
+    adrp    x9, boot_l0
+    add     x12, x9, #(3 * 4096)
+2:  dc      ivac, x9
+    add     x9, x9, x10
+    cmp     x9, x12
+    b.lo    2b
+    dsb     sy
+    ret
+
+/* mmu_on(x0 = the root's physical address, x1 = TCR): MAIR, TCR, TTBR0, then SCTLR.M/C/I.
+   The same values `mmu.rs` writes. */
+mmu_on:
+    ldr     x9, ={mair}
+    msr     mair_el1, x9
+    msr     tcr_el1, x1
+    msr     ttbr0_el1, x0
+    isb
+    tlbi    vmalle1
+    dsb     ish
+    isb
+    mrs     x9, sctlr_el1
+    orr     x9, x9, #(1 << 0)
+    orr     x9, x9, #(1 << 2)
+    orr     x9, x9, #(1 << 12)
+    msr     sctlr_el1, x9
+    isb
+    ret
+.ltorg
+
 .section .bss
+.balign 4096
+boot_l0:  .skip 4096
+boot_l1:  .skip 4096
+boot_l1h: .skip 4096
 .balign 16
 boot_stack_bottom:
     .skip 65536
 .global boot_stack_top
 boot_stack_top:
-"#);
+"#,
+    koff = const crate::mem::KIMG_OFF,
+    devblk = const super::mmu::BOOT_DEVICE_BLOCK,
+    normblk = const super::mmu::BOOT_NORMAL_BLOCK,
+    mair = const super::mmu::BOOT_MAIR,
+    tcr = const super::mmu::BOOT_TCR,
+);

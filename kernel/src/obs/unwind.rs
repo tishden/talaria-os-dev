@@ -224,7 +224,7 @@ pub fn selftest() -> bool {
     // supervisor page — the kernel's image is one, while the allocator's frames
     // lie in the identity area, which is OPEN to the user (that is how
     // `talaria.cell=identity` works), and on them the check would mean nothing.
-    let kaddr = crate::mem::kernel_lo() + 0x1000;
+    let kaddr = crate::mem::kernel_va_lo() + 0x1000;
     check(try_read(kaddr, false).is_some(), "a kernel page is read as a ring 0 frame");
     check(try_read(kaddr, true).is_none(), "a kernel page is NOT accepted as a ring 3 frame");
     let n = walk(1, kaddr, true, &mut out);

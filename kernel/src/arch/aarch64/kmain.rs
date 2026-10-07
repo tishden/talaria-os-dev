@@ -406,6 +406,16 @@ pub static VIRTIO_WINDOWS: [core::sync::atomic::AtomicU64; dtb::MAX_VIRTIO] = [c
 /// The INTID of each window's line, by the same index (0 = none): `arch::virtio_mmio_gsi`.
 pub static VIRTIO_INTIDS: [core::sync::atomic::AtomicU64; dtb::MAX_VIRTIO] = [const { core::sync::atomic::AtomicU64::new(0) }; dtb::MAX_VIRTIO];
 
+/// The root a secondary turns its MMU on with, in `ap_start`'s asm (stage 7.3: before any
+/// Rust) — read there with the MMU and the caches off, so `start_secondary` cleans it to PoC.
+#[unsafe(no_mangle)]
+pub static AP_ROOT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// ... and the TCR it uses: the boot core's own (`mmu::tcr_value`), HA/HD included — the
+/// kernel's leaves leave the access flag to the hardware, and a core without HA would fault
+/// on its first access, before it has vectors.
+#[unsafe(no_mangle)]
+pub static AP_TCR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// PSCI `CPU_ON` for the core with `mpidr`, with the stack of slot `i`; the PSCI result.
 pub fn start_secondary(i: usize, mpidr: u64) -> i64 {
     if i >= MAX_AP { return psci::INVALID_PARAMS; }
@@ -416,14 +426,19 @@ pub fn start_secondary(i: usize, mpidr: u64) -> i64 {
     // the stack cached here would later shadow what the secondary wrote past it. Under KVM
     // on a Graviton (S2FWB forces the guest cacheable) neither shows; on bare metal both
     // can — Linux cleans its `secondary_data` the same way.
-    super::icache::clean_inval_poc(crate::paging::kernel_cr3_word(), 8);
+    AP_ROOT.store(super::mmu::root_for_new_core(), Ordering::SeqCst);
+    AP_TCR.store(super::mmu::tcr_for_new_core(), Ordering::SeqCst);
+    super::icache::clean_inval_poc(crate::mem::vaddr(core::ptr::addr_of!(AP_ROOT)), 8);
+    super::icache::clean_inval_poc(crate::mem::vaddr(core::ptr::addr_of!(AP_TCR)), 8);
     super::icache::clean_inval_poc(ap_stack_top(i) - 16384, 16384);
-    psci::cpu_on(mpidr, crate::mem::kpa_of(ap_start as *const ()), ap_stack_top(i))
+    // The context is the secondary's sp with its MMU off: the stack's PHYSICAL address
+    // (stage 7: the image may be linked above where it is loaded).
+    psci::cpu_on(mpidr, crate::mem::kpa_of(ap_start as *const ()), crate::mem::kpa(ap_stack_top(i)))
 }
 /// The top of the boot stack of the secondary in slot `i` — also the stack its pickup loop
 /// returns to when a task exits on it (`sched::set_ap_stack`).
 pub fn ap_stack_top(i: usize) -> u64 {
-    // DMAP: kept as a virtual address; the secondary also takes it as its sp with the MMU off (the image is identity)
+    // A virtual address (the pickup loop's stack); `start_secondary` hands CPU_ON its `kpa`.
     crate::mem::vaddr(core::ptr::addr_of!(AP_STACKS)) + (i.min(MAX_AP - 1) as u64 + 1) * AP_STACK as u64
 }
 

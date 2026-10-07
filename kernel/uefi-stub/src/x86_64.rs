@@ -160,17 +160,22 @@ pub extern "efiapi" fn efi_main(image: *mut c_void, st: *mut SystemTable) -> Sta
     let phoff = le64(KERNEL, 32) as usize;
     let phentsize = le16(KERNEL, 54) as usize;
     let phnum = le16(KERNEL, 56) as usize;
-    let (mut off, mut paddr, mut filesz, mut memsz, mut nload) = (0usize, 0u64, 0u64, 0u64, 0);
+    let (mut off, mut vaddr, mut paddr, mut filesz, mut memsz, mut nload) = (0usize, 0u64, 0u64, 0u64, 0u64, 0);
     for i in 0..phnum {
         let p = phoff + i * phentsize;
         if le32(KERNEL, p) != 1 || le64(KERNEL, p + 40) == 0 { continue; } // PT_LOAD
         off = le64(KERNEL, p + 8) as usize;
+        vaddr = le64(KERNEL, p + 16);
         paddr = le64(KERNEL, p + 24);
         filesz = le64(KERNEL, p + 32);
         memsz = le64(KERNEL, p + 40);
         nload += 1;
     }
     if nload != 1 { fatal("expected a single PT_LOAD (see linker.ld PHDRS)", nload); }
+    // The ELF entry is virtual (linker.ld: the image may run KOFF above where it is loaded);
+    // the 32-bit PVH entry is its physical twin, the segment's first byte.
+    if entry < vaddr || entry >= vaddr + memsz { fatal("the kernel entry is not in its segment", 0); }
+    let entry = entry - vaddr + paddr;
     if entry != paddr || paddr + memsz >= 0x1_0000_0000 { fatal("kernel entry/range", 0); }
     sputs("uefi-stub: kernel phys "); sputhex(paddr); sputs(".."); sputhex(paddr + memsz);
     sputs(" entry="); sputhex(entry); sputs("\n");

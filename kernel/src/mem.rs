@@ -9,6 +9,9 @@ unsafe extern "C" { static __kernel_start: u8; } // the start of the image (link
 /// The start of the kernel's image. Not a constant: the base is set at link time (`--defsym KBASE=`),
 /// and a build for a non-relocatable binary moves the kernel above its segments.
 pub fn kernel_lo() -> u64 { kpa_of(core::ptr::addr_of!(__kernel_start)) }
+/// The start of the kernel's image as the kernel sees it (its virtual address; `kernel_lo` is
+/// the physical one — the same today, apart once the image is linked high, stage 7).
+pub fn kernel_va_lo() -> u64 { vaddr(core::ptr::addr_of!(__kernel_start)) }
 /// The first address BEYOND the kernel's image (rounded up): free memory starts there.
 pub fn kernel_hi() -> u64 { kernel_top() }
 /// The start of free physical memory: max(32 MB, the end of the kernel's image). An image with the regression's
