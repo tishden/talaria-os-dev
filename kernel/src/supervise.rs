@@ -85,9 +85,10 @@ pub fn sched_tick() {
     if st > 0 && now.wrapping_sub(LAST_STATUS.load(Ordering::Relaxed)) >= st * hz {
         LAST_STATUS.store(now, Ordering::Relaxed);
         let up = now.wrapping_sub(START_TSC.load(Ordering::Relaxed)) / hz;
-        println!("cell: uptime={}s conns={} rx={} tx={} syscalls={} faults={} free={}MB restarts={} threads={}",
+        println!("cell: uptime={}s conns={} rx={} tx={} syscalls={} faults={} free={}MB low={}MB khigh={} restarts={} threads={}",
             up, live, rx, tx, crate::metrics::syscalls(), crate::metrics::page_faults(),
-            crate::mem::free_total_frames() * 4 / 1024, crate::telemetry::restarts(), crate::sched::task_count());
+            crate::mem::free_total_frames() * 4 / 1024, crate::mem::free_low_frames() * 4 / 1024,
+            crate::mem::ANY_FROM_HIGH.load(Ordering::Relaxed), crate::telemetry::restarts(), crate::sched::task_count());
     }
     let wd = WATCHDOG_SECS.load(Ordering::Relaxed);
     let stalled = wd > 0 && LAST_RX_TSC.load(Ordering::Relaxed) != 0 && now.wrapping_sub(LAST_RX_TSC.load(Ordering::Relaxed)) >= wd * hz;

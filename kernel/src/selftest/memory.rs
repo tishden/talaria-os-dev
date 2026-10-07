@@ -111,6 +111,64 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if low.is_some() && bad == 0 { println!("dmapid: ALL OK"); } else { println!("dmapid: FAIL ({} bad)", bad); }
             crate::suite::park()
         }
+        "anyram" => {
+            // STAGE 6 OF THE DIRECT MAP (docs/ARM64-PLAN.md §10.16): the kernel's own memory —
+            // page tables, the window's stacks, the FS and the drivers' buffers — comes from any
+            // RAM (`mem::alloc_any`: the high areas first), not only from below 4 GB. The gate
+            // checks that the boot already put kernel structures above 4 GB, that such a block
+            // is reached through the map and goes back to the areas' free list, and that a process
+            // space whose own tables lie up there is walked by the hardware. With
+            // `talaria.dmap=0` everything stays below 4 GB (the identity reaches it).
+            use core::sync::atomic::Ordering::Relaxed;
+            println!("talaria: anyram — the kernel's memory from any RAM (§10.16 stage 6)");
+            let (hb, _) = crate::mem::high_area();
+            if hb == 0 { println!("anyram: there is no high area (the RAM ends below 4 GB)"); crate::suite::park() }
+            let on = crate::mem::DMAP_ON.load(Relaxed);
+            let mut ok = true;
+            let mut check = |what: &str, good: bool| { println!("anyram: {}: {}", what, if good { "OK" } else { "FAILED" }); ok &= good; };
+            let hi = |pa: u64| pa >= 1u64 << 32;
+            let boot = crate::mem::ANY_FROM_HIGH.load(Relaxed);
+            println!("anyram: the direct map {}, kernel frames from above 4 GB at the boot: {}", if on { "ON" } else { "OFF" }, boot);
+            let a = crate::mem::alloc_any(4).unwrap_or(0);
+            check(if on { "alloc_any gives a block above 4 GB" } else { "alloc_any gives a block below 4 GB" }, a != 0 && hi(a) == on);
+            if a != 0 {
+                let mut same = true;
+                // SAFETY: P1 — four frames straight from the allocator, nobody else holds them.
+                unsafe {
+                    for i in 0..4 * 512u64 { core::ptr::write_volatile(crate::mem::kptr::<u64>(a + i * 8), a ^ i); }
+                    for i in 0..4 * 512u64 { same &= core::ptr::read_volatile(crate::mem::kptr::<u64>(a + i * 8)) == a ^ i; }
+                }
+                check("a pattern written through kptr reads back", same);
+                check(if on { "kptr reaches it through the map" } else { "kptr reaches it by its identity" },
+                    (crate::mem::kva(a) != a) == on);
+                crate::mem::free_contig(a, 4);
+                check("the block goes back to a free list", crate::mem::frame_is_free(a));
+            }
+            // A process space: its PML4/PDPT/PD come from `alloc_any`; the hardware walks them.
+            let w = crate::mem::alloc_any_frame().unwrap_or(0);
+            let asp = crate::paging::new_process_space();
+            check(if on { "a process space's root is above 4 GB" } else { "a process space's root is below 4 GB" }, hi(asp) == on);
+            let mut seen = 0u64;
+            if w != 0 {
+                // SAFETY: P1 — a fresh frame; the switch goes into a space that shares the
+                // kernel's slots (the map among them) and back at once, with nothing else run.
+                unsafe {
+                    core::ptr::write_volatile(crate::mem::kptr::<u64>(w), 0x5a5a_a5a5);
+                    let orig = crate::paging::current_cr3();
+                    crate::paging::switch(asp);
+                    seen = core::ptr::read_volatile(crate::mem::kptr::<u64>(w));
+                    crate::paging::switch(orig);
+                }
+                crate::mem::free_contig(w, 1);
+            }
+            check("that space reads a kernel frame through the map", seen == 0x5a5a_a5a5);
+            crate::paging::free_address_space(asp);
+            check("its root goes back to a free list", crate::mem::frame_is_free(asp));
+            let now = crate::mem::ANY_FROM_HIGH.load(Relaxed);
+            check(if on { "the counter of kernel frames from above 4 GB moved" } else { "without the map it stays at 0" }, (now > boot) == on && (on || now == 0));
+            println!("anyram: {}", if ok { "ALL OK" } else { "FAILED" });
+            crate::suite::park()
+        }
         "dmapstrict" => {
             // STAGE 4b OF THE DIRECT MAP (docs/ARM64-PLAN.md §10.16): under `talaria.dmap=strict` a
             // process space carries no identity leaf over the map's RAM (its fork child neither),

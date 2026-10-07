@@ -2004,7 +2004,7 @@ pub fn cache_relocate(node: u8) -> bool {
 /// is identity-mapped by 1 GB leaves in every space, so the kernel reaches the cache the same way,
 /// and the devices take 64-bit addresses. `free_contig` returns such frames to the area's list.
 fn cache_alloc(pages: u64) -> Option<u64> {
-    crate::mem::alloc_high(pages, 4096).or_else(|| crate::mem::alloc_contig(pages))
+    crate::mem::alloc_high(pages, 4096).or_else(|| crate::mem::alloc_any(pages))
 }
 
 pub fn cache_resize(mb: usize) -> bool {
@@ -2115,16 +2115,16 @@ pub fn mount() -> bool {
         // The readahead window (see `prefetch_run`). Without it the FS works, just
         // block by block: the absence of the window is not a mount error.
         if RA_BUF == 0 {
-            if let Some(b) = crate::mem::alloc_contig((RA_MAX * BSZ / 4096) as u64) { RA_BUF = b; }
+            if let Some(b) = crate::mem::alloc_any((RA_MAX * BSZ / 4096) as u64) { RA_BUF = b; }
         }
         // The flush's substitute buffer (§8.6). Without it the FS works — the flush goes under
         // the lock, as before.
         if WB_BUF == 0 {
-            if let Some(b) = crate::mem::alloc_contig((WB_BLOCKS * BSZ / 4096) as u64) { WB_BUF = b; }
+            if let Some(b) = crate::mem::alloc_any((WB_BLOCKS * BSZ / 4096) as u64) { WB_BUF = b; }
         }
         // §8.13: the deferred portion's buffer — without it an fsync goes in three round trips.
         if DEFER_BUF == 0 && WB_BUF != 0 {
-            if let Some(b) = crate::mem::alloc_contig((WB_BLOCKS * BSZ / 4096) as u64) { DEFER_BUF = b; }
+            if let Some(b) = crate::mem::alloc_any((WB_BLOCKS * BSZ / 4096) as u64) { DEFER_BUF = b; }
         }
         for i in 0..ncache() { CTAG[i] = 0; CDIRTY[i] = false; }
         for h in 0..MAXOPEN { OF_INO[h] = 0; }
@@ -4371,10 +4371,10 @@ unsafe fn jrn_mount() {
         return;
     }
     if JSTAGE == 0 {
-        match crate::mem::alloc_contig(2) { Some(b) => JSTAGE = b, None => { crate::println!("ext2: there is no memory for the journal"); return; } }
+        match crate::mem::alloc_any(2) { Some(b) => JSTAGE = b, None => { crate::println!("ext2: there is no memory for the journal"); return; } }
     }
     if JCOPY == 0 {
-        match crate::mem::alloc_contig((JREQS - 1) as u64) { Some(b) => JCOPY = b, None => { crate::println!("ext2: there is no memory for the journal's \
+        match crate::mem::alloc_any((JREQS - 1) as u64) { Some(b) => JCOPY = b, None => { crate::println!("ext2: there is no memory for the journal's \
             snapshots"); return; } }
     }
     // the map of the journal's blocks (the journal itself is an ordinary file of the FS)

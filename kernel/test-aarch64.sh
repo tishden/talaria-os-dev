@@ -359,6 +359,10 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     assert 'mem: the COW refcount table: [0-9]+ KB at 0x[0-9a-f]+, it covers up to 0x480000000' 'highmem: RAM past 16 GB grows the refcount table to the top'
     assert 'highmem: ALL OK'                                                  'highmem: the same on 17 GB (the area 14 GB, the grown table)'
     assertnot "$BAD|\[fault\]"                                              'highmem: no trap'
+    run 60 "talaria.test=anyram" ext2 4096
+    assert 'anyram: ALL OK'                                                   'anyram: the kernel'"'"'s memory from any RAM — a block and a process space'"'"'s tables above 4 GB (§10.16 stage 6)'
+    run 60 "talaria.test=anyram talaria.dmap=0" ext2 4096
+    assert 'anyram: ALL OK'                                                   'anyram: with talaria.dmap=0 the kernel'"'"'s memory stays below 4 GB'
     # A c7g.large's shape: 850 MB below 4 GB, the rest above. forktls's 1.5 GB went into
     # 2 MB pages from the LOW memory and the next page table found no frame — a panic one
     # syscall in, on the real machine; reproduced here by cutting the low allocator.

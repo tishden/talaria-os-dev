@@ -907,6 +907,19 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     leans on it by the mechanism's own entry points, then take it away so that a missed one
     faults loudly** (strict for RAM's identity, no identity leaf for a high BAR).
 
+54. **"An address the emulator never translates."** arm64 makes freshly written code visible to
+    instruction fetch by cleaning the data cache BY VIRTUAL ADDRESS (`dc cvau`, `ic ivau`,
+    `arch::icache::sync`). Five callers passed a frame's PHYSICAL address — the ELF loader's
+    chunks and pages, the embedded loader, a COW copy of an executable page, a 2 MiB
+    `mprotect(PROT_EXEC)` — i.e. its identity, which stage 1's census could not see (a `u64` is
+    no cast). Under strict a process space has no RAM identity, so on hardware the first COW of
+    a JIT's code page in a forked process would take a translation fault inside the kernel.
+    Neither regression could show it: TCG implements the cache maintenance as a no-op without a
+    translation, and the KVM stand's strict runs never wrote code into a forked child. Found
+    while moving the loader's frames above 4 GiB (stage 6), by listing every user of a frame's
+    address as a virtual one. They pass `kva(frame)` now. **An instruction that takes an address
+    but that the emulator does not execute is not tested by the emulator — read its callers.**
+
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
 * **The gate's image is part of the gate.** The dev box's `talaria-qemu-aarch64` was

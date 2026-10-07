@@ -151,7 +151,7 @@ pub fn selftest() -> bool {
 
     // The frames go into a fresh piece of memory: it is mapped and belongs to the kernel.
     // The chain holds VIRTUAL frame pointers (what `walk` follows), so the frame is taken by its kernel address.
-    let Some(base) = crate::mem::alloc_contig(2).map(crate::mem::kva) else {
+    let Some(base) = crate::mem::alloc_any(2).map(crate::mem::kva) else {
         crate::println!("unwind: FAIL there is no memory for the synthetic stack");
         return false;
     };

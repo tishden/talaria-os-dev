@@ -494,7 +494,7 @@ pub fn selftest_events() {
     if lent { crate::println!("pmu-ev: no spare counter — counter {} is borrowed from {:?} and given back", spare,
         owner.map(|l| ["instructions", "LLC-miss", "predictor-miss", "LLC-ref", "branches"][l])); }
     const PAGES: u64 = 16384; // 64 MB
-    let Some(buf) = crate::mem::alloc_contig(PAGES) else { crate::println!("pmu-ev: no 64 MB to walk"); return; };
+    let Some(buf) = crate::mem::alloc_any(PAGES) else { crate::println!("pmu-ev: no 64 MB to walk"); return; };
     let p = crate::mem::kptr::<u8>(buf).cast_const();
     let lines = PAGES * 4096 / 64;
     // the first touch maps nothing (the direct map), but it fills the TLB walk caches: one pass first

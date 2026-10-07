@@ -425,27 +425,15 @@ fn low_for_workload(n: u64) -> bool {
 #[track_caller]
 fn alloc_main(n: u64) -> Option<u64> {
     if n == 0 { return None; }
-    for (i, hb, he) in high_areas() {
-        if let Some(a) = fl_node_take(n, hb, he) { crate::metrics::add_frames(n); fc_alloc(a, n); return Some(a); }
-        loop {
-            let base = HIGH_NEXT[i].load(Ordering::Relaxed);
-            let end = base + n * FRAME;
-            if end > he { break; }
-            if HIGH_NEXT[i].compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
-            crate::metrics::add_frames(n); fc_alloc(base, n);
-            return Some(base);
-        }
-    }
+    if let Some(a) = high_take(n, FRAME) { return Some(a); }
     if !low_for_workload(n) { return None; }
     alloc_contig(n)
 }
 
-/// The workload's ALIGNED frames (a 2 MB page): the high area, then the low allocator above
-/// its reserve. `paging::lazy_fault` takes its huge pages here — `alloc_contig_aligned`
-/// alone took them from the low memory only.
+/// `n` frames aligned to `align` from the main node's high areas (their free list, then their
+/// bumps), not zeroed. None: no area or none has room.
 #[track_caller]
-pub fn alloc_workload_aligned(n: u64, align: u64) -> Option<u64> {
-    if n == 0 { return None; }
+fn high_take(n: u64, align: u64) -> Option<u64> {
     for (i, hb, he) in high_areas() {
         if let Some(a) = fl_node_take_aligned(n, align, hb, he) { crate::metrics::add_frames(n); fc_alloc(a, n); return Some(a); }
         loop {
@@ -460,8 +448,51 @@ pub fn alloc_workload_aligned(n: u64, align: u64) -> Option<u64> {
             return Some(a);
         }
     }
+    None
+}
+
+/// The workload's ALIGNED frames (a 2 MB page): the high area, then the low allocator above
+/// its reserve. `paging::lazy_fault` takes its huge pages here — `alloc_contig_aligned`
+/// alone took them from the low memory only.
+#[track_caller]
+pub fn alloc_workload_aligned(n: u64, align: u64) -> Option<u64> {
+    if n == 0 { return None; }
+    if let Some(a) = high_take(n, align) { return Some(a); }
     if !low_for_workload(n) { return None; }
     alloc_contig_aligned(n, align)
+}
+
+// ── THE KERNEL'S MEMORY FROM ANY RAM (§10.16 stage 6) ─────────────────────────
+//
+// The low allocator stops at 4 GB because everything it hands out used to be touched at its
+// identity address, and the identity was 0..4 GB. With the direct map every such touch goes
+// through `kptr`, so the kernel's own structures — page tables, the window's stacks, the FS
+// buffers, the drivers' rings — can live anywhere in RAM. `alloc_any` is that: the high areas
+// first, the low allocator after them (all of it: the reserve below is the workload's limit,
+// not the kernel's). What still needs the low memory keeps `alloc_contig`: a frame ring 3 uses
+// at its identity address (the identity modes, `// DMAP: dual`), x86's AP boot (a 32-bit CR3,
+// the trampoline), a stack the MMU-off secondary takes, and everything with `talaria.dmap=0`.
+// Before `numa_init` there is no high area, so the early structures are low as before.
+// `ANY_FROM_HIGH` counts what came from above 4 GB (`talaria.test=anyram`).
+pub static ANY_FROM_HIGH: AtomicU64 = AtomicU64::new(0);
+
+/// `n` contiguous frames of kernel memory from any RAM the direct map covers (not zeroed);
+/// the caller reaches them through `kptr` only.
+#[track_caller]
+pub fn alloc_any(n: u64) -> Option<u64> { alloc_any_aligned(n, FRAME) }
+
+/// One frame of kernel memory from any RAM (`alloc_any`).
+#[track_caller]
+pub fn alloc_any_frame() -> Option<u64> { alloc_any_aligned(1, FRAME) }
+
+/// As `alloc_any`, aligned to `align` bytes (a power of two).
+#[track_caller]
+pub fn alloc_any_aligned(n: u64, align: u64) -> Option<u64> {
+    if n == 0 { return None; }
+    if DMAP_ON.load(Ordering::Relaxed) {
+        if let Some(a) = high_take(n, align.max(FRAME)) { ANY_FROM_HIGH.fetch_add(n, Ordering::Relaxed); return Some(a); }
+    }
+    if align <= FRAME { alloc_contig(n) } else { alloc_contig_aligned(n, align) }
 }
 
 // ── the free list of released contiguous blocks (real reclaim, not only a bump) ──
@@ -755,6 +786,10 @@ pub fn frame_is_free(phys: u64) -> bool {
     unsafe {
         for i in 0..FL_N {
             if phys >= FL_ADDR[i] && phys < FL_ADDR[i] + FL_PAGES[i] * FRAME { hit = true; break; }
+        }
+        // the areas' list too: a page table may come from a high area (`alloc_any`)
+        for i in 0..FLN_N {
+            if phys >= FLN_ADDR[i] && phys < FLN_ADDR[i] + FLN_PAGES[i] * FRAME { hit = true; break; }
         }
     }
     fl_unlock();

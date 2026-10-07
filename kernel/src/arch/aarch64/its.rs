@@ -105,7 +105,7 @@ fn unlock() { LOCK.store(false, Ordering::Release); }
 /// Zeroed, contiguous, aligned frames (the ITS and the redistributors take 64 KiB alignment).
 fn table(bytes: u64, align: u64) -> Option<u64> {
     let pages = bytes.div_ceil(4096);
-    let p = crate::mem::alloc_contig_aligned(pages, align)?;
+    let p = crate::mem::alloc_any_aligned(pages, align)?;
     // SAFETY: the frames were just allocated and are identity-mapped RAM.
     unsafe { core::ptr::write_bytes(crate::mem::kptr::<u8>(p), 0, (pages * 4096) as usize); }
     Some(p)

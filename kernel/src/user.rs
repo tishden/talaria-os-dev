@@ -325,7 +325,9 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
                 let mut free = true;
                 for k in 0..CHUNK { if crate::paging::phys_of_in(pml4, va + k * 4096).is_some() { free = false; break; } }
                 if !free { break; }
-                let fr = match crate::mem::alloc_contig(CHUNK) { Some(f) => f, None => break };
+                // The image is the workload's memory: the high area first (§10.16 stage 6) —
+                // ClickHouse's 525 MB took them from below 4 GB, where the kernel lives.
+                let fr = match crate::mem::alloc_contig_node(CHUNK, crate::affinity::launch_node()) { Some(f) => f, None => break };
                 if crate::paging::virt_to_phys(fr) != fr && fr < 0x1_0000_0000 { crate::mem::free_contig(fr, CHUNK); break; }
                 core::ptr::write_bytes(crate::mem::kptr::<u8>(fr), 0, (CHUNK * 4096) as usize);
                 // the part of the piece covered by the file (the segment's tail is .bss, it stays zeroes)
@@ -343,7 +345,7 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
                         while done < n { let got = readat(foff + done as u64, dst.add(done), n - done); if got == 0 { break; } done += got; }
                     }
                 }
-                if exec_ { crate::arch::icache::sync(fr, CHUNK * 4096); }
+                if exec_ { crate::arch::icache::sync(crate::mem::kva(fr), CHUNK * 4096); }
                 for k in 0..CHUNK { crate::paging::map_leaf(pml4, va + k * 4096, fr + k * 4096, writable, true, exec_); }
                 q += CHUNK;
             }
@@ -355,7 +357,7 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
             let existing = crate::paging::phys_of_in(pml4, va);
             let (writable, exec) = (writable, exec_);
             let frame = match existing { Some(ph) => ph, None => {
-                let fr = match crate::mem::alloc_frame() { Some(f) => f, None => { crate::println!("talaria: proc: no memory for a segment"); return None; } };
+                let fr = match crate::mem::alloc_contig_node(1, crate::affinity::launch_node()) { Some(f) => f, None => { crate::println!("talaria: proc: no memory for a segment"); return None; } };
                 core::ptr::write_bytes(crate::mem::kptr::<u8>(fr), 0, 4096);
                 crate::paging::map_leaf(pml4, va, fr, writable, true, exec);
                 fr } };
@@ -370,7 +372,7 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
             }
             // The page was mapped before it was filled (a segment may share it with the
             // previous one): the instruction cache is told AFTER the bytes are in.
-            if exec { crate::arch::icache::sync(frame, 4096); }
+            if exec { crate::arch::icache::sync(crate::mem::kva(frame), 4096); }
             q += 1;
         }
     }
@@ -907,7 +909,7 @@ unsafe fn load_elf_into_space(pml4: u64, elf: &[u8]) -> u64 {
         let frames = crate::mem::alloc_contig(npages).expect("exec: frames");
         core::ptr::write_bytes(crate::mem::kptr::<u8>(frames), 0, (npages * 4096) as usize); // zero (bss)
         core::ptr::copy_nonoverlapping(elf.as_ptr().add(off), crate::mem::kptr::<u8>(frames + (vaddr - start)), filesz);
-        if x { crate::arch::icache::sync(frames, npages * 4096); }
+        if x { crate::arch::icache::sync(crate::mem::kva(frames), npages * 4096); }
         for k in 0..npages {
             crate::paging::map_leaf(pml4, start + k * 4096, frames + k * 4096, w, true, x);
         }
