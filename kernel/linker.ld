@@ -32,7 +32,13 @@ SECTIONS
      header (§3.1) goes right after it: GRUB only requires it to be within the
      first 32 KB of the file and 8-byte aligned. */
   .text : AT(ADDR(.text) - KOFF) { *(.text.boot) . = ALIGN(8); KEEP(*(.mb2)) *(.text .text.*) } :text
+  /* W^X at the high alias (stage 7.4): the code, the constants and the data each start on a 2 MiB
+     boundary, so the alias's 2M leaves carry one section's rights each (paging::init). */
+  . = ALIGN(0x200000);
+  __text_end = .;
   .rodata : AT(ADDR(.rodata) - KOFF) { *(.rodata .rodata.*) } :text
+  . = ALIGN(0x200000);
+  __rodata_end = .;
   .data : AT(ADDR(.data) - KOFF) { *(.data .data.*) } :text
   /* A9: the kernel ITSELF needs the .bss bounds — the entry zeroes it first thing.
      A loader (our tboot, GRUB, uefi-stub) may leave NOBITS unfilled, and on real

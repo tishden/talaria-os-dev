@@ -2333,9 +2333,15 @@ kernel image's own load address — passes (its image, forks, shared memory); th
 (9220575) hangs silently on the same binary, its process overlaying the kernel's code. 7.5: the official
 ClickHouse ET_EXEC (2 MB..528 MB) runs on the normal kernel — `validate.sh` B12 passed on it — and
 `services/clickhouse/build-kernel.sh` (KBASE 528 MB, `target-hi`) is gone. x86 538/0 + 22/0,
-`validate.sh` 14/0, arm64 370/0, arm64 databases 14/0. Not done: W^X on the image (`.text` RX,
-`.rodata` R, `.data`/`.bss` NX — the alias is 2M leaves over one RWX segment today); `user_gb()` keeps
-its name. The identity modes (`talaria.cell=identity`, `run_disk`) still share the kernel's space and
+`validate.sh` 14/0, arm64 370/0, arm64 databases 14/0. Then W^X on the image: the linker scripts start `.rodata` and `.data` on
+2 MiB (`__text_end`, `__rodata_end`), so the alias's 2M leaves carry one section's rights each — the
+code read-only and executable, the constants read-only, the data and `.bss` writable and never
+executable; `kimg` checks all four. The one writer of the kernel's code, a gdb breakpoint (x86's
+`0xCC`, arm64's `brk`), writes through the direct map (`kaddr::kimg_write_va`: the same RAM, writable,
+not executable) and arm64 syncs both addresses. The ELF loader no longer reserves an image's identity
+range from the frame allocator under strict (nothing can collide there; ClickHouse's would have
+fenced off half a gigabyte of the low memory). `user_gb()` keeps its name; the image's LOW identity
+in the kernel's own space stays RWX (the identity modes run there). The identity modes (`talaria.cell=identity`, `run_disk`) still share the kernel's space and
 cannot take an ET_EXEC at 2 MB.
 
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,

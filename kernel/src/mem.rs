@@ -9,6 +9,11 @@ unsafe extern "C" { static __kernel_start: u8; } // the start of the image (link
 /// The start of the kernel's image. Not a constant: the base is set at link time (`--defsym KBASE=`),
 /// and a build for a non-relocatable binary moves the kernel above its segments.
 pub fn kernel_lo() -> u64 { kpa_of(core::ptr::addr_of!(__kernel_start)) }
+unsafe extern "C" { static __text_end: u8; static __rodata_end: u8; } // linker*.ld, 2 MiB-aligned
+/// Where the image's code ends and its constants end (virtual addresses, 2 MiB-aligned): the
+/// high alias's rights change there (W^X, stage 7.4).
+pub fn kernel_text_end() -> u64 { vaddr(core::ptr::addr_of!(__text_end)) }
+pub fn kernel_rodata_end() -> u64 { vaddr(core::ptr::addr_of!(__rodata_end)) }
 /// The start of the kernel's image as the kernel sees it (its virtual address; `kernel_lo` is
 /// the physical one — the same today, apart once the image is linked high, stage 7).
 pub fn kernel_va_lo() -> u64 { vaddr(core::ptr::addr_of!(__kernel_start)) }

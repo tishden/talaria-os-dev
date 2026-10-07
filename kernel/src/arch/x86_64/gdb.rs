@@ -221,7 +221,7 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
     // at an entry by a #BP restore the orig byte and roll the rip back (an int3 is 1 byte)
     if f.vec == 3 {
         unsafe { for i in 0..BPMAX { if BP_USED[i] && BP_ADDR[i] == f.rip.wrapping_sub(1) {
-            core::ptr::write_volatile(crate::mem::vptr::<u8>(BP_ADDR[i]), BP_ORIG[i]); f.rip -= 1; break; } } }
+            core::ptr::write_volatile(crate::mem::vptr::<u8>(crate::mem::kimg_write_va(BP_ADDR[i])), BP_ORIG[i]); f.rip -= 1; break; } } }
     }
     if f.vec == 1 { unsafe { core::arch::asm!("mov dr6, {}", in(reg) 0u64, options(nomem, nostack)); } } // clear the DR6 (a watchpoint/a step)
     f.rflags &= !0x100; // clear the TF (after a step)
@@ -287,13 +287,13 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
                 let addr = parse_hex(&buf[3..n]);
                 unsafe { for i in 0..BPMAX { if !BP_USED[i] {
                     BP_ADDR[i]=addr; BP_ORIG[i]=core::ptr::read_volatile(crate::mem::vptr::<u8>(addr));
-                    core::ptr::write_volatile(crate::mem::vptr::<u8>(addr), 0xCC); BP_USED[i]=true; break; } } }
+                    core::ptr::write_volatile(crate::mem::vptr::<u8>(crate::mem::kimg_write_va(addr)), 0xCC); BP_USED[i]=true; break; } } }
                 PORT.send(b"OK");
             }
             b'z' if n >= 2 && buf[1] == b'0' => { // z0,addr,kind
                 let addr = parse_hex(&buf[3..n]);
                 unsafe { for i in 0..BPMAX { if BP_USED[i] && BP_ADDR[i]==addr {
-                    core::ptr::write_volatile(crate::mem::vptr::<u8>(addr), BP_ORIG[i]); BP_USED[i]=false; break; } } }
+                    core::ptr::write_volatile(crate::mem::vptr::<u8>(crate::mem::kimg_write_va(addr)), BP_ORIG[i]); BP_USED[i]=false; break; } } }
                 PORT.send(b"OK");
             }
             b'Z' if n >= 2 && (buf[1] == b'2' || buf[1] == b'3' || buf[1] == b'4') => { // hw-watchpoint
@@ -320,7 +320,7 @@ fn rust_gdb_inner(f: *mut Frame) -> u8 {
             b'D' => {
                 unsafe {
                     for i in 0..BPMAX { if BP_USED[i] {
-                        core::ptr::write_volatile(crate::mem::vptr::<u8>(BP_ADDR[i]), BP_ORIG[i]); BP_USED[i] = false; } }
+                        core::ptr::write_volatile(crate::mem::vptr::<u8>(crate::mem::kimg_write_va(BP_ADDR[i])), BP_ORIG[i]); BP_USED[i] = false; } }
                     clear_watchpoint(); clear_hw_exec_all();
                 }
                 if f.vec == 1 { f.rflags |= 1 << 16; }

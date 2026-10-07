@@ -171,12 +171,18 @@ fn clear_watchpoint() { WP_CTRL.store(0, Ordering::SeqCst); publish(); }
 const BPMAX: usize = 32;
 static SW_ADDR: [AtomicU64; BPMAX] = [const { AtomicU64::new(0) }; BPMAX];
 static SW_ORIG: [AtomicU64; BPMAX] = [const { AtomicU64::new(0) }; BPMAX];
+/// A breakpoint can go at `addr`: it is mapped, and either the image's code (written through
+/// the direct map — the alias itself is read-only, W^X) or a writable page.
 fn text_writable(addr: u64) -> bool {
     let (present, writable, _, _) = crate::paging::query(addr);
-    addr & 3 == 0 && present && writable
+    addr & 3 == 0 && present && (writable || crate::mem::kimg_write_va(addr) != addr)
 }
 fn poke_insn(addr: u64, insn: u32) {
-    unsafe { core::ptr::write_volatile(crate::mem::vptr::<u32>(addr), insn); }
+    let w = crate::mem::kimg_write_va(addr);
+    unsafe { core::ptr::write_volatile(crate::mem::vptr::<u32>(w), insn); }
+    // The data side by the address written through, the instruction side by the one fetched
+    // (`sync` cleans by VA: both name the same lines on a PIPT cache).
+    super::icache::sync(w, 4);
     super::icache::sync(addr, 4);
 }
 fn sw_set(addr: u64) -> bool {
