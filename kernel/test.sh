@@ -935,6 +935,17 @@ for v in "" " talaria.dmap=0"; do
   assert "anyram: ALL OK" "anyram$v: the kernel's memory from any RAM — a block and a process space's tables above 4 GB with the map, below it without"
   stopq $q4
 done
+# A 200 GB guest (RAM not reserved by the host): the RAM past the identity ceiling (192 GB,
+# `user::PROC_HEAP_BASE`) is the kernel's own through the map, taken first.
+rm -f /tmp/o.log
+qemu-system-x86_64 -M microvm,rtc=off,memory-backend=m -object memory-backend-ram,id=m,size=200G,reserve=off -enable-kvm -cpu "$CPU" -smp 1 -m 200G \
+  -kernel "/w/$K" -append "console=ttyS0 talaria.test=anyram" -display none -serial file:/tmp/o.log -no-reboot >/tmp/q.log 2>&1 &
+q4=$!
+for i in $(seq 1 90); do sleep 1; grep -aq "anyram: ALL OK\|anyram: FAILED\|no high area\|panic" /tmp/o.log 2>/dev/null && break; done
+assert "mem: RAM beyond the identity \(#0\) 0x3000000000\.\.0x3240000000" "anyram 200 GB: the RAM past the identity ceiling (192 GB) is seen"
+assert "anyram: alloc_any takes the RAM beyond the identity first: OK" "anyram 200 GB: the kernel takes it first, the workload stays where the identity reaches"
+assert "anyram: ALL OK" "anyram 200 GB: the whole gate"
+stopq $q4
 # A c7g.large's shape (850 MB below 4 GB): forktls's 1.5 GB took 2 MB pages from the LOW
 # memory, and the next page table found no frame — a kernel panic on the real machine.
 rm -f /tmp/o.log

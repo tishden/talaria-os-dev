@@ -37,6 +37,24 @@ use crate::memspan::MAX_HIGH;
 static HIGH_BASE: [AtomicU64; MAX_HIGH] = [const { AtomicU64::new(0) }; MAX_HIGH];
 static HIGH_NEXT: [AtomicU64; MAX_HIGH] = [const { AtomicU64::new(0) }; MAX_HIGH];
 static HIGH_END: [AtomicU64; MAX_HIGH] = [const { AtomicU64::new(0) }; MAX_HIGH];
+// RAM BEYOND THE IDENTITY (§10.16 stage 6): the pieces above `ident_ceiling` (192 GiB — a
+// `c6i.metal`'s last 64 GiB) that the direct map covers. They have no identity leaf anywhere, so
+// only `alloc_any` hands them out — the kernel's own structures, reached through `kptr` — and it
+// takes them FIRST, leaving the identity-reachable areas to the workload. With the map off they
+// are not built. Freed blocks go to the areas' free list like the high areas'.
+static XHIGH_BASE: [AtomicU64; MAX_HIGH] = [const { AtomicU64::new(0) }; MAX_HIGH];
+static XHIGH_NEXT: [AtomicU64; MAX_HIGH] = [const { AtomicU64::new(0) }; MAX_HIGH];
+static XHIGH_END: [AtomicU64; MAX_HIGH] = [const { AtomicU64::new(0) }; MAX_HIGH];
+fn xhigh_areas() -> impl Iterator<Item = (usize, u64, u64)> {
+    (0..MAX_HIGH).map(|i| (i, XHIGH_BASE[i].load(Ordering::Relaxed), XHIGH_END[i].load(Ordering::Relaxed)))
+        .take_while(|&(_, b, _)| b != 0)
+}
+/// The piece of RAM beyond the identity `i` as it was built ((0, 0): none) — `talaria.test=anyram`.
+pub fn xhigh_area_n(i: usize) -> (u64, u64) {
+    if i >= MAX_HIGH { return (0, 0); }
+    (XHIGH_BASE[i].load(Ordering::Relaxed), XHIGH_END[i].load(Ordering::Relaxed))
+}
+
 /// The areas that exist, as (index, base, end); a base of 0 ends the list.
 fn high_areas() -> impl Iterator<Item = (usize, u64, u64)> {
     (0..MAX_HIGH).map(|i| (i, HIGH_BASE[i].load(Ordering::Relaxed), HIGH_END[i].load(Ordering::Relaxed)))
@@ -128,6 +146,7 @@ pub fn init(start_info: u64) {
 fn seen_bytes() -> u64 {
     let mut s = END.load(Ordering::Relaxed).saturating_sub(ALLOC_BASE.load(Ordering::Relaxed));
     for (_, b, e) in high_areas() { s += e - b; }
+    for (_, b, e) in xhigh_areas() { s += e - b; }
     for n in 0..MAX_NODES {
         s += NODE_END[n].load(Ordering::Relaxed).saturating_sub(NODE_BASE[n].load(Ordering::Relaxed));
     }
@@ -197,6 +216,24 @@ fn high_init() {
         }
     }
     rc_grow();
+    if crate::mem::DMAP_ON.load(Ordering::Relaxed) {
+        let runs = crate::memspan::pick_high(&ram[..nram], &taken, ceil.max(4u64 << 30), DMAP_SPAN, FRAME, own);
+        let mut k = 0usize;
+        for &(b, e) in runs.iter() {
+            if e <= b { continue; }
+            // Only what the map reaches: a piece it does not cover would be RAM by no address.
+            if !dmap_covers(b) || !dmap_covers(e - 1) {
+                crate::println!("mem: RAM beyond the identity {:#x}..{:#x} is not in the direct map — dropped", b, e);
+                continue;
+            }
+            XHIGH_BASE[k].store(b, Ordering::Relaxed);
+            XHIGH_NEXT[k].store(b, Ordering::Relaxed);
+            XHIGH_END[k].store(e, Ordering::Relaxed);
+            crate::println!("mem: RAM beyond the identity (#{}) {:#x}..{:#x} ({} MB) — the kernel's own, through the direct map",
+                k, b, e, (e - b) / 1048576);
+            k += 1;
+        }
+    }
     // LOUDLY, WHEN THE MACHINE CANNOT SEE ITS MEMORY. On the stand (c6i.xlarge, 8 GB)
     // the allocator once saw 3021 MB, and it is from THAT number that `ext2::cache_pick` takes
     // a sixteenth for the block cache (180 MB against Linux's page cache
@@ -434,21 +471,25 @@ fn alloc_main(n: u64) -> Option<u64> {
 /// bumps), not zeroed. None: no area or none has room.
 #[track_caller]
 fn high_take(n: u64, align: u64) -> Option<u64> {
-    for (i, hb, he) in high_areas() {
-        if let Some(a) = fl_node_take_aligned(n, align, hb, he) { crate::metrics::add_frames(n); fc_alloc(a, n); return Some(a); }
-        loop {
-            let base = HIGH_NEXT[i].load(Ordering::Relaxed);
-            let a = (base + align - 1) & !(align - 1);
-            let end = a + n * FRAME;
-            if end > he { break; }
-            if HIGH_NEXT[i].compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
-            // The alignment's gap goes into the area's free list rather than being lost.
-            if a > base { fl_node_put(base, (a - base) / FRAME); }
-            crate::metrics::add_frames(n); fc_alloc(a, n);
-            return Some(a);
-        }
+    high_areas().find_map(|(i, hb, he)| area_take(&HIGH_NEXT[i], hb, he, n, align))
+}
+
+/// `n` frames aligned to `align` from the area [hb, he) whose bump is `next`: its free list
+/// first, then the bump.
+#[track_caller]
+fn area_take(next: &AtomicU64, hb: u64, he: u64, n: u64, align: u64) -> Option<u64> {
+    if let Some(a) = fl_node_take_aligned(n, align, hb, he) { crate::metrics::add_frames(n); fc_alloc(a, n); return Some(a); }
+    loop {
+        let base = next.load(Ordering::Relaxed);
+        let a = (base + align - 1) & !(align - 1);
+        let end = a + n * FRAME;
+        if end > he { return None; }
+        if next.compare_exchange(base, end, Ordering::Relaxed, Ordering::Relaxed).is_err() { continue; }
+        // The alignment's gap goes into the area's free list rather than being lost.
+        if a > base { fl_node_put(base, (a - base) / FRAME); }
+        crate::metrics::add_frames(n); fc_alloc(a, n);
+        return Some(a);
     }
-    None
 }
 
 /// The workload's ALIGNED frames (a 2 MB page): the high area, then the low allocator above
@@ -490,7 +531,12 @@ pub fn alloc_any_frame() -> Option<u64> { alloc_any_aligned(1, FRAME) }
 pub fn alloc_any_aligned(n: u64, align: u64) -> Option<u64> {
     if n == 0 { return None; }
     if DMAP_ON.load(Ordering::Relaxed) {
-        if let Some(a) = high_take(n, align.max(FRAME)) { ANY_FROM_HIGH.fetch_add(n, Ordering::Relaxed); return Some(a); }
+        let al = align.max(FRAME);
+        if let Some(a) = xhigh_areas().find_map(|(i, b, e)| area_take(&XHIGH_NEXT[i], b, e, n, al))
+            .or_else(|| high_take(n, al)) {
+            ANY_FROM_HIGH.fetch_add(n, Ordering::Relaxed);
+            return Some(a);
+        }
     }
     if align <= FRAME { alloc_contig(n) } else { alloc_contig_aligned(n, align) }
 }
@@ -529,6 +575,7 @@ static mut FLN_N: usize = 0;
 /// Does the address lie in the area of some node or in the high area (not in the main allocator).
 fn in_node_area(addr: u64) -> bool {
     if high_areas().any(|(_, b, e)| addr >= b && addr < e) { return true; }
+    if xhigh_areas().any(|(_, b, e)| addr >= b && addr < e) { return true; }
     for n in 0..MAX_NODES {
         let b = NODE_BASE[n].load(Ordering::Relaxed);
         if b != 0 && addr >= b && addr < NODE_END[n].load(Ordering::Relaxed) { return true; }
@@ -819,6 +866,7 @@ pub fn free_frames() -> u64 {
     let left = |n: u64, e: u64| if e > n { (e - n) / FRAME } else { 0 };
     let mut s = left(NEXT.load(Ordering::Relaxed), END.load(Ordering::Relaxed));
     for (i, _, he) in high_areas() { s += left(HIGH_NEXT[i].load(Ordering::Relaxed), he); }
+    for (i, _, he) in xhigh_areas() { s += left(XHIGH_NEXT[i].load(Ordering::Relaxed), he); }
     for n in 0..MAX_NODES {
         if NODE_BASE[n].load(Ordering::Relaxed) != 0 {
             s += left(NODE_NEXT[n].load(Ordering::Relaxed), NODE_END[n].load(Ordering::Relaxed));

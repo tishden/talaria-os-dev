@@ -2222,10 +2222,21 @@ loaders, a COW copy of an executable page, a 2 MiB `mprotect(PROT_EXEC)`. Under 
 space has no such address; TCG does not translate cache maintenance, so only hardware would have
 faulted, and only on a code page written in a forked child. They pass `kva(frame)`.
 
+RAM beyond the identity followed the same day. The high areas stop at `user::PROC_HEAP_BASE`
+(192 GiB: the process heap's slot overlays any identity above), so a `c6i.metal` (256 GiB) never
+saw its last 64. With the map on, the RAM above that ceiling and inside the map's slot (512 GiB)
+becomes up to four more areas WITHOUT any identity leaf (`mem::XHIGH_*`); only `alloc_any` hands
+them out — the kernel's structures, reached through `kptr` — and it takes them first, which keeps
+the identity-reachable areas for the workload (whose frames the identity modes still touch by
+address). `anyram` on a 200 GB guest (`memory-backend-ram,reserve=off`, so the host needs none of
+it), on both machines: `0x30_0000_0000..0x32_4000_0000` (9 GB) is seen, `alloc_any` takes it
+first, the workload's frames stay below; PostgreSQL boots and answers on that guest.
+
 Left of stage 6: the low pieces other than the largest one are still unused (the low allocator
-takes one region); RAM above `user::PROC_HEAP_BASE` (192 GiB) is still unseen — with the map it
-needs no identity, but the high areas are still mapped by it; and the remaining `alloc_contig`
-callers that are not dual (the vDSO, `syscall.rs`'s identity-mode mmaps and shm) keep the low.
+takes one region; on x86 the other one is the 640 KB below 1 MB); the workload cannot use RAM
+beyond the identity yet (the identity modes would need a check of their own); and the remaining
+`alloc_contig` callers that are not dual (the vDSO, `syscall.rs`'s identity-mode mmaps and shm)
+keep the low.
 
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
