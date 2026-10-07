@@ -44,8 +44,9 @@ ld -m elf_i386 -Ttext=0x8000 -o "$W/s2.elf" "$W/s2.o"
 objcopy -O binary "$W/s2.elf" "$W/stage2.bin"
 S1=$(stat -c%s "$W/stage1.bin"); S2=$(stat -c%s "$W/stage2.bin")
 [ "$S1" -le 440 ] || { echo "stage1 is $S1 bytes — does not fit in 440"; exit 1; }
-ENTRY=$(nm "$KERN" | sed -n 's/^0*\([0-9a-f]*\) [Tt] mb2_start$/\1/p' | head -1)
-[ -n "$ENTRY" ] || { echo "the kernel has no mb2_start symbol"; exit 1; }
+# The PHYSICAL entry (linker.ld: mb2_start - KOFF; a script symbol, so `nm` types it A).
+ENTRY=$(nm "$KERN" | sed -n 's/^0*\([0-9a-f]*\) [TtAa] mb2_start_pa$/\1/p' | head -1)
+[ -n "$ENTRY" ] || { echo "the kernel has no mb2_start_pa symbol"; exit 1; }
 
 python3 - "$OUT" "$DATA" "$KERN" "$W/stage1.bin" "$W/stage2.bin" "$CFG" "0x$ENTRY" "$TRACE_LBA" <<'PYEOF'
 import os, struct, sys

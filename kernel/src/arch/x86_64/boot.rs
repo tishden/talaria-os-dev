@@ -9,6 +9,10 @@ use core::arch::global_asm;
 
 global_asm!(
     r#"
+/* STAGE 7 (ARM64-PLAN §10.16): the image may be linked KOFF above where it is loaded. Until
+   long mode is on and the jump below is taken, this code runs at the PHYSICAL address with
+   paging off or identity, so every absolute address in it is `(sym - KOFF_A)`. */
+.set KOFF_A, {koff}
 /* ── §3.1 multiboot2 (a BIOS boot through GRUB) ────────────────────────────
    Native bare metal on EC2 is closed by the platform: not a single *.metal type
    accepts an AMI with boot-mode uefi. The BIOS bootloader = GRUB, and the kernel needs a second
@@ -28,7 +32,7 @@ mb2_header:
     .short 3                               /* the tag: the entry address */
     .short 0
     .long 12
-    .long mb2_start
+    .long mb2_start_pa                     /* physical (linker.ld: mb2_start - KOFF) */
     .align 8
     .short 0                               /* the final tag */
     .short 0
@@ -41,12 +45,13 @@ mb2_header_end:
     .long 4                     /* descsz */
     .long 18                    /* XEN_ELFNOTE_PHYS32_ENTRY */
     .ascii "Xen\0"
-    .long pvh_start             /* desc: 32-bit entry point */
+    .long pvh_start_pa          /* desc: the 32-bit entry, physical (linker.ld) */
 
 .section .bss
 .align 4096
 pml4:   .skip 4096
 pdpt:   .skip 4096
+pdpt_hi: .skip 4096
 pds:    .skip 16384             /* 4 page directories = 4 GiB of 2M pages */
 .align 16
 stack_bottom:
@@ -62,7 +67,7 @@ gdt:
 gdt_end:
 gdt_desc:
     .word gdt_end - gdt - 1
-    .long gdt
+    .long gdt - KOFF_A
 
 .section .text.boot, "ax"
 .code32
@@ -73,8 +78,8 @@ gdt_desc:
    it is not a subroutine but a macro: there is nothing to do a `call` with here.
    The registers: edi/ecx/eax are free (we do not touch esi with the start_info). */
 .macro ZERO_BSS
-    mov $__bss_start, %edi
-    mov $__bss_end, %ecx
+    mov $(__bss_start - KOFF_A), %edi
+    mov $(__bss_end - KOFF_A), %ecx
     sub %edi, %ecx
     add $3, %ecx
     shr $2, %ecx
@@ -95,20 +100,31 @@ pvh_start:
 boot_common:
 
     /* pml4[0] = pdpt | P|RW */
-    mov $pdpt, %eax
+    mov $(pdpt - KOFF_A), %eax
     or $3, %eax
-    mov %eax, pml4
-    movl $0, pml4+4
+    mov %eax, (pml4 - KOFF_A)
+    movl $0, (pml4 - KOFF_A + 4)
+
+    /* The image's high alias (stage 7): pml4[511] = pdpt_hi, pdpt_hi[510] = the GB0 directory
+       (pds' first), so the image is at -2 GiB + its physical address as well. */
+    mov $(pdpt_hi - KOFF_A), %eax
+    or $3, %eax
+    mov %eax, (pml4 - KOFF_A + 511*8)
+    movl $0, (pml4 - KOFF_A + 511*8 + 4)
+    mov $(pds - KOFF_A), %eax
+    or $3, %eax
+    mov %eax, (pdpt_hi - KOFF_A + 510*8)
+    movl $0, (pdpt_hi - KOFF_A + 510*8 + 4)
 
     /* pdpt[i] = &pds[i*512] | P|RW, i = 0..4 */
     xor %ecx, %ecx
-1:  mov $pds, %eax
+1:  mov $(pds - KOFF_A), %eax
     mov %ecx, %edx
     shl $12, %edx
     add %edx, %eax
     or $3, %eax
-    mov %eax, pdpt(,%ecx,8)
-    movl $0, pdpt+4(,%ecx,8)
+    mov %eax, (pdpt - KOFF_A)(,%ecx,8)
+    movl $0, (pdpt - KOFF_A + 4)(,%ecx,8)
     inc %ecx
     cmp $4, %ecx
     jb 1b
@@ -121,13 +137,13 @@ boot_common:
     cmp $2032, %ecx             /* 0xFE000000 >> 21 */
     jb 3f
     or $0x18, %eax              /* PCD|PWT */
-3:  mov %eax, pds(,%ecx,8)
-    movl $0, pds+4(,%ecx,8)
+3:  mov %eax, (pds - KOFF_A)(,%ecx,8)
+    movl $0, (pds - KOFF_A + 4)(,%ecx,8)
     inc %ecx
     cmp $2048, %ecx
     jb 2b
 
-    mov $pml4, %eax
+    mov $(pml4 - KOFF_A), %eax
     mov %eax, %cr3
 
     /* CR4: PAE | OSFXSR | OSXMMEXCPT (SSE for the Rust target) */
@@ -141,7 +157,7 @@ boot_common:
     or $0x100, %eax
     wrmsr
 
-    lgdt gdt_desc
+    lgdt (gdt_desc - KOFF_A)
 
     /* CR0: clear EM, set MP, enable PG */
     mov %cr0, %eax
@@ -149,7 +165,7 @@ boot_common:
     or $0x80000003, %eax
     mov %eax, %cr0
 
-    ljmp $0x08, $long_start
+    ljmp $0x08, $(long_start - KOFF_A)
 
 .code32
 .global mb2_start
@@ -161,7 +177,7 @@ mb2_start:
     cld
     mov %ebx, %esi
     ZERO_BSS                    /* BEFORE the write of MB2_BOOT: the flag itself lies in the .bss */
-    movl $1, MB2_BOOT
+    movl $1, (MB2_BOOT - KOFF_A)
     mov $0x3F8, %dx
     mov $0x4D, %al              /* 'M': the multiboot2 entry */
     out %al, %dx
@@ -180,6 +196,10 @@ long_start:
     xor %ax, %ax
     mov %ax, %fs
     mov %ax, %gs
+    /* into the image's linked address (the high half once KOFF is not 0) */
+    movabs $long_high, %rax
+    jmp *%rax
+long_high:
     mov $stack_top, %rsp
     mov %esi, %edi              /* start_info (zero-extended) -> arg0 */
     xor %ebp, %ebp
@@ -187,6 +207,7 @@ long_start:
 4:  hlt
     jmp 4b
 "#,
+    koff = const crate::mem::KIMG_OFF,
     options(att_syntax)
 );
 

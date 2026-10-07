@@ -261,6 +261,16 @@ pub fn mmio_pa(va: u64) -> u64 { crate::paging::mmio_pa(va) }
 /// The alias's L1 entry for `paging::init`'s root: GB0 as a Device block, supervisor.
 pub fn dev_alias_l1_entry() -> u64 { device_block(0) }
 
+// What `boot.rs`'s early map (stage 7.3: the MMU on before any Rust) writes: the same block
+// encodings, MAIR and TCR as this file's, so the switch to `early_enable`'s tables changes the
+// root and (HA/HD) nothing else. The IPS field is the core's PARange, set by the asm.
+pub const BOOT_DEVICE_BLOCK: u64 = device_block(0);
+pub const BOOT_NORMAL_BLOCK: u64 = normal_block(0);
+pub const BOOT_MAIR: u64 = MAIR_VALUE;
+pub const BOOT_TCR: u64 = 16 | (1 << 8) | (1 << 10) | (0b11 << 12) | (1 << 23) | (1 << 36);
+/// The image's gigabyte at its high alias (stage 7): L0[511] -> this L1, entry 510.
+static mut L1HI: Table = Table([0; 512]);
+
 /// A 1 GiB Normal RAM block for the kernel alone (no EL0 access).
 const fn normal_block(pa: u64) -> u64 { pa | VALID | (ATTR_NORMAL << ATTR_SHIFT) | SH_INNER | AF | UXN }
 /// A 1 GiB Device block, never executed.
@@ -277,8 +287,9 @@ const fn device_block(pa: u64) -> u64 { pa | VALID | (ATTR_DEVICE << ATTR_SHIFT)
 /// first 512 GiB only: a device above that (a Graviton's GIC) is `paging`'s to map.
 ///
 /// # Safety
-/// Once, on the boot core, with the MMU off, from `kmain`, before any other core exists;
-/// running from an identity address (the image is loaded where it is linked).
+/// Once, on the boot core, from `kmain`, before any other core exists. The MMU is already on
+/// with `boot.rs`'s early map (stage 7.3): the kernel runs at its high alias, which both maps
+/// carry, so the switch keeps the code under it.
 pub unsafe fn early_enable(rams: &[(u64, u64)], devs: &[u64]) {
     let l1 = &mut *core::ptr::addr_of_mut!(L1);
     l1.0[0] = device_block(0);
@@ -297,14 +308,21 @@ pub unsafe fn early_enable(rams: &[(u64, u64)], devs: &[u64]) {
     // the devices' alias (see DEV_SLOT): GB0's Device block once more, high
     (*core::ptr::addr_of_mut!(L1DEV)).0[0] = device_block(0);
     l0.0[DEV_SLOT] = crate::mem::kpa_of(core::ptr::addr_of!(L1DEV)) | VALID | TABLE_OR_PAGE;
+    // The image's high alias (stage 7): the kernel runs there — this switch must keep it.
+    let img_gb = crate::mem::kernel_lo() & !((1u64 << 30) - 1);
+    let (s4, s3) = (((crate::mem::KIMG_VBASE >> 39) & 0x1FF) as usize, ((crate::mem::KIMG_VBASE >> 30) & 0x1FF) as usize);
+    (*core::ptr::addr_of_mut!(L1HI)).0[s3] = normal_block(img_gb);
+    l0.0[s4] = crate::mem::kpa_of(core::ptr::addr_of!(L1HI)) | VALID | TABLE_OR_PAGE;
     // The intermediate physical address size: what the core supports, capped at 48 bits
     // (the encodings of PARange and TCR.IPS coincide up to that point).
     HW_DIRTY.store(cpu::has_hw_dirty(), core::sync::atomic::Ordering::Relaxed);
     let tcr = tcr_value();
     core::arch::asm!(
+        "dsb ishst",            // the tables' stores before the walker may use them (the MMU is on)
         "msr mair_el1, {mair}",
         "msr tcr_el1, {tcr}",
         "msr ttbr0_el1, {ttbr}",
+        "isb",
         "tlbi vmalle1",
         "dsb ish",
         "isb",
@@ -324,9 +342,11 @@ pub unsafe fn enable_here() {
     // The same MAIR/TCR/TTBR as the boot core (a secondary's registers start undefined).
     let tcr = tcr_value();
     core::arch::asm!(
+        "dsb ishst",            // the tables' stores before the walker may use them (the MMU is on)
         "msr mair_el1, {mair}",
         "msr tcr_el1, {tcr}",
         "msr ttbr0_el1, {ttbr}",
+        "isb",
         "tlbi vmalle1",
         "dsb ish",
         "isb",
@@ -354,8 +374,11 @@ fn tcr_value() -> u64 {
     tcr
 }
 
+/// The TCR a core coming up should use (`ap_start`'s asm turns its MMU on with it).
+pub fn tcr_for_new_core() -> u64 { tcr_value() }
+
 /// The root a core coming up should use: `paging::init`'s table once it exists, the early one before.
-fn root_for_new_core() -> u64 {
+pub fn root_for_new_core() -> u64 {
     let k = crate::paging::kernel_cr3();
     if k != 0 { k } else { crate::mem::kpa_of(core::ptr::addr_of!(L0)) }
 }

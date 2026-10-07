@@ -920,6 +920,17 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     address as a virtual one. They pass `kva(frame)` now. **An instruction that takes an address
     but that the emulator does not execute is not tested by the emulator — read its callers.**
 
+55. **"The registers a core is born with are part of its page tables."** Stage 7.3 moved arm64's
+    MMU-on into asm, before any Rust, for the secondaries too: `ap_start` loads the kernel's root and
+    turns the MMU on. With the boot map's TCR it came up silent — every secondary "did not report
+    within 2 s", no fault, no line. The kernel's tables are written for a TCR with HA/HD: their
+    leaves leave the access flag and the dirty state to the hardware, and a core whose TCR lacks HA
+    takes an access-flag fault on its first access, before VBAR names any vector, and spins there.
+    The root alone does not describe a mapping; the TCR (and MAIR) that read it do. The secondary
+    now takes the boot core's own `tcr_value()`, published beside the root and cleaned to the point
+    of coherency (`AP_TCR`/`AP_ROOT`). **When a core is brought up by hand, give it every register
+    the tables were written for, not only the root.**
+
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
 * **The gate's image is part of the gate.** The dev box's `talaria-qemu-aarch64` was

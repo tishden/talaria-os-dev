@@ -111,6 +111,90 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if low.is_some() && bad == 0 { println!("dmapid: ALL OK"); } else { println!("dmapid: FAIL ({} bad)", bad); }
             crate::suite::park()
         }
+        "kimg" => {
+            // STAGE 7 OF THE DIRECT MAP (docs/ARM64-PLAN.md §10.16): the image's virtual and
+            // physical addresses. `kaddr::KIMG_OFF` must be the linker's `KOFF` (what the tables
+            // say the image's first byte is), and `kpa` of a word in each of
+            // the image's sections must be what the page tables say — the DMA from `.bss` (the
+            // virtio arena, ENA's buffers), the PV words and the boot records rest on it.
+            static RO_WORD: u64 = 0x6b69_6d67;
+            static mut DATA_WORD: u64 = 1;
+            static mut BSS_WORD: u64 = 0;
+            println!("talaria: kimg — the image's virtual and physical addresses (§10.16 stage 7)");
+            let mut bad = 0;
+            let va0 = crate::mem::kernel_va_lo();
+            // where the tables put the image's first byte (the linker scripts ASSERT that KOFF
+            // puts the image's gigabyte at KIMG_VBASE; this checks the running map agrees)
+            let pa0 = crate::paging::virt_to_phys(va0);
+            println!("kimg: the image at {:#x}, loaded at {:#x}, KIMG_OFF {:#x}", va0, pa0, crate::mem::KIMG_OFF);
+            if va0 - pa0 != crate::mem::KIMG_OFF { bad += 1; println!("kimg: KIMG_OFF is not the linker's KOFF: FAIL"); }
+            if crate::mem::kernel_lo() != pa0 { bad += 1; println!("kimg: kernel_lo is not the load address: FAIL"); }
+            let words: [(&str, u64); 4] = [
+                (".text", crate::mem::vaddr(crate::suite::park as *const ())),
+                (".rodata", crate::mem::vaddr(core::ptr::addr_of!(RO_WORD))),
+                (".data", crate::mem::vaddr(core::ptr::addr_of!(DATA_WORD))),
+                (".bss", crate::mem::vaddr(core::ptr::addr_of!(BSS_WORD))),
+            ];
+            for (name, va) in words {
+                let (pa, walk) = (crate::mem::kpa(va), crate::paging::virt_to_phys(va));
+                let ok = pa == walk && pa >= pa0 && pa < crate::mem::kernel_hi();
+                if !ok { bad += 1; }
+                println!("kimg: {} {:#x} -> kpa {:#x}, the tables {:#x}: {}", name, va, pa, walk, if ok { "OK" } else { "FAIL" });
+            }
+            // 7.1: the high alias — the same bytes at slot 511, in the kernel's space and in a
+            // process space (which copies slots 1..511).
+            match crate::paging::kimg_alias(va0) {
+                None => println!("kimg: no high alias (the boot tables are kept: no 1G pages)"),
+                Some(h0) => {
+                    let gb = pa0 & !((1u64 << 30) - 1);
+                    let good_base = h0 == crate::mem::KIMG_VBASE + (pa0 - gb);
+                    println!("kimg: the high alias of the image at {:#x}: {}", h0, if good_base { "OK" } else { "FAIL" });
+                    if !good_base { bad += 1; }
+                    let mut same = true;
+                    for (_, va) in words {
+                        let h = crate::paging::kimg_alias(va).unwrap_or(0);
+                        // SAFETY: both addresses name the same image word; a read changes nothing.
+                        same &= h != 0 && unsafe { core::ptr::read_volatile(crate::mem::vptr::<u8>(h)) == core::ptr::read_volatile(crate::mem::vptr::<u8>(va)) };
+                    }
+                    let d = crate::paging::kimg_alias(crate::mem::vaddr(core::ptr::addr_of!(DATA_WORD))).unwrap_or(0);
+                    // SAFETY: DATA_WORD is this gate's own static, and nothing else runs.
+                    let through = unsafe {
+                        core::ptr::write_volatile(crate::mem::vptr::<u64>(d), 0x7a7a_0711);
+                        core::ptr::read_volatile(core::ptr::addr_of!(DATA_WORD))
+                    };
+                    same &= through == 0x7a7a_0711;
+                    println!("kimg: the alias reads every section's word and a write through it shows at the image address: {}", if same { "OK" } else { "FAIL" });
+                    if !same { bad += 1; }
+                    // Executable: a leaf function called at its alias (7.2/7.3 run the kernel there).
+                    #[inline(never)]
+                    extern "C" fn probe(x: u64) -> u64 { x.wrapping_mul(3) ^ 0x55 }
+                    let fa = crate::paging::kimg_alias(crate::mem::vaddr(probe as *const ())).unwrap_or(0);
+                    // SAFETY: the alias maps the image's own code (supervisor, executable); the
+                    // function touches no static, so it runs the same at either address.
+                    let r = if fa != 0 {
+                        let f: extern "C" fn(u64) -> u64 = unsafe { core::mem::transmute(crate::mem::vptr::<u8>(fa)) };
+                        f(0x1234)
+                    } else { 0 };
+                    let ran = r == probe(0x1234);
+                    println!("kimg: a function runs at its alias {:#x}: {}", fa, if ran { "OK" } else { "FAIL" });
+                    if !ran { bad += 1; }
+                    let asp = crate::paging::new_process_space();
+                    // SAFETY: into a fresh process space and back at once; it shares the kernel's slots.
+                    let seen = unsafe {
+                        let orig = crate::paging::current_cr3();
+                        crate::paging::switch(asp);
+                        let v = core::ptr::read_volatile(crate::mem::vptr::<u64>(d));
+                        crate::paging::switch(orig);
+                        v
+                    };
+                    crate::paging::free_address_space(asp);
+                    println!("kimg: a process space has the alias: {}", if seen == 0x7a7a_0711 { "OK" } else { "FAIL" });
+                    if seen != 0x7a7a_0711 { bad += 1; }
+                }
+            }
+            println!("kimg: {}", if bad == 0 { "ALL OK" } else { "FAILED" });
+            crate::suite::park()
+        }
         "anyram" => {
             // STAGE 6 OF THE DIRECT MAP (docs/ARM64-PLAN.md §10.16): the kernel's own memory —
             // page tables, the window's stacks, the FS and the drivers' buffers — comes from any
