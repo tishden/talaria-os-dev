@@ -193,7 +193,6 @@ Locally (debugging the suite):
 
 ```sh
 make -C bench/suite/tlgen                      # the instrument
-services/clickhouse/build-kernel.sh            # the high-base kernel (goes stale on ANY kernel change)
 bench/suite/run-local.sh nginx both            # one workload, both stands
 bench/suite/run-all.sh                         # six tlgen workloads
 bench/suite/run-everything.sh 3                # EVERYTHING: tlgen + five harnesses + the summary, 3 repeats of the noisy ones

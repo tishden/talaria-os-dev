@@ -1,6 +1,8 @@
 #!/bin/sh
-# Run ClickHouse on Talaria. THE KERNEL is the high-base build (build-kernel.sh):
-# the ClickHouse binary is not relocatable and occupies 2 MB..526 MB, where the normal kernel lies.
+# Run ClickHouse on Talaria — on the normal kernel. The ClickHouse binary is not relocatable and
+# occupies 2 MB..526 MB, where the kernel's image is LOADED; since the image runs at its high alias
+# and a strict process space keeps none of its identity (docs/ARM64-PLAN.md §10.16 stage 7), the
+# binary takes those addresses. The high-base build it needed before is gone.
 #   run.sh [secs] [extra talaria.*]     env: SMP=N MEM=MB KERNEL=path
 set -u
 # THE LOG TAIL IS A PARAMETER, NOT A CONSTANT. The gates (`kernel/validate.sh`)
@@ -10,7 +12,7 @@ set -u
 # the whole log — hence TAIL=.
 TAIL=${TAIL:-40}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-K=${KERNEL:-kernel/target-hi/x86_64-talaria/release/talaria}
+K=${KERNEL:-kernel/target/x86_64-talaria/release/talaria}
 SECS=${1:-180}; EXTRA=${2:-}
 # Large pages are requested by THE IMAGE'S MANIFEST itself (`huge=2`, see mkdisk.sh):
 # a property of the workload, not of the stand, so the command line has no business with it.

@@ -120,7 +120,7 @@ cat > "$ROOT/users.xml" <<'USR'
 USR
 
 cat > "$ROOT/cell.manifest" <<M
-# ClickHouse on Talaria (the high-base kernel: build-kernel.sh)
+# ClickHouse on Talaria (the normal kernel: its image runs in the higher half, ARM64-PLAN §10.16 stage 7)
 binary=${CH_BINARY:-/clickhouse}
 args=${CH_ARGV0:-clickhouse} ${CH_ARGS:-local --config-file=/config.xml --queries-file /q.sql}
 env=HOME=/
