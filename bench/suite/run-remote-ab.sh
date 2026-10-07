@@ -64,7 +64,7 @@ else
         say "== tail B: $EXTRA -> ${AB_ROLES:-server loadgen} ($(date +%H:%M:%S))"
         okb=1
         for role in ${AB_ROLES:-server loadgen}; do
-            ROLE=$role "$HERE/infra/talaria-cmdline.sh" "$EXTRA" >> "$LOG" 2>&1 || { say "   $role: the tail did not take"; okb=0; }
+            APPEND=1 ROLE=$role "$HERE/infra/talaria-cmdline.sh" "$EXTRA" >> "$LOG" 2>&1 || { say "   $role: the tail did not take"; okb=0; }
         done
         # AFTER TAIL B THE GENERATOR MUST ANSWER — AND THAT IS CHECKED WITH ONE
         # SHORT JOB, NOT WITH A LADDER.
@@ -124,6 +124,17 @@ else
             say "   tail B did not take (see $LOG)"; RED=1
         fi
     fi
+fi
+
+# THE CONSOLES OF PHASE B COME HOME before the teardown: a B whose server stopped answering
+# (MariaDB under `talaria.dmap=1`, 2026-10-07) could not be explained — nobody had kept them.
+if [ -f "$STAND_DIR/stand.env" ]; then
+    eval "$(/usr/bin/grep -a '^talaria_\(server\|loadgen\)_id=' "$STAND_DIR/stand.env")"
+    for role in server loadgen; do
+        eval "id=\${talaria_${role}_id:-}"
+        [ -n "$id" ] && aws ec2 get-console-output --instance-id "$id" --latest --query Output --output text \
+            > "$ALL/console-$role-end.log" 2>/dev/null || true
+    done
 fi
 
 if [ "${AB_KEEP:-0}" = 1 ]; then
