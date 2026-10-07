@@ -16,6 +16,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 SUITE=$(cd "$HERE/.." && pwd)
 REPO=$(cd "$SUITE/../.." && pwd)
 STAND_DIR=${STAND_DIR:-$HOME/.talaria-lab/stand}
+. "$HERE/../lib/standlock.sh"; stand_lock "$@"
 TF="$HERE/terraform"
 mkdir -p "$STAND_DIR"
 . "$SUITE/lib/arch.sh"

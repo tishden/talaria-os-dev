@@ -10,6 +10,7 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 TF="$HERE/terraform"
 STAND_DIR=${STAND_DIR:-$HOME/.talaria-lab/stand}
+. "$HERE/../lib/standlock.sh"; stand_lock "$@"
 KEEP_AMI=${1:-}
 export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-1}
 
