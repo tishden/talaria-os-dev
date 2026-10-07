@@ -10,6 +10,7 @@ set -u
 TAIL=${TAIL:-30}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 K=kernel/target/x86_64-talaria/release/talaria
+# MEM=MB: the guest's RAM (default 1024; above ~3 GB the microvm puts RAM above 4 GB — the high area).
 SECS=${1:-40}; EXTRA=${2:-}
 # THE NUMBER OF CORES IS A PARAMETER (default 1). It was added to investigate a
 # forked PostgreSQL background process crashing with `#PF err=0x15` on `SMP=2
@@ -19,12 +20,12 @@ SECS=${1:-40}; EXTRA=${2:-}
 # performance programme; gate `forktls`) — and PostgreSQL is measured on two
 # cores in `bench/suite`. The knob stays: it is how that class is reproduced.
 docker run --rm -i --device /dev/kvm --device /dev/net/tun --device /dev/vhost-net \
-  --cap-add NET_ADMIN -e SMP -v "$REPO":/w talaria-qemu2 bash -s "$K" "$SECS" "$EXTRA" <<'INNER'
+  --cap-add NET_ADMIN -e SMP -e MEM -v "$REPO":/w talaria-qemu2 bash -s "$K" "$SECS" "$EXTRA" <<'INNER'
 set -u; K=$1; SECS=$2; EXTRA=$3; SMP=${SMP:-1}
 mkdir -p /w/services/postgresql/build   # without the directory QEMU cannot open the serial file and exits silently
 ip tuntap add tap0 mode tap 2>/dev/null
 ip addr add 10.0.0.1/24 dev tap0 2>/dev/null; ip link set tap0 up 2>/dev/null
-qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu host -smp ${SMP:-1} -m 1024 \
+qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu host -smp ${SMP:-1} -m ${MEM:-1024} \
   -kernel "/w/$K" -append "console=ttyS0 talaria.mode=proc $EXTRA" -display none -serial file:/w/services/postgresql/build/serial.log -no-reboot \
   -netdev tap,id=n0,ifname=tap0,script=no,downscript=no,vhost=on \
   -device virtio-net-device,netdev=n0,mac=52:54:00:12:34:56 \

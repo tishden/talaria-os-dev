@@ -721,7 +721,7 @@ impl Ena {
     /// (`rss->rss_ind_tbl[i].cq_idx = io_sq_queues[idx].idx`) — with the CQ's index
     /// the device took the frames into nowhere: udp_ping gave "all lost" with the command accepted.
     pub fn rss_config_parts(&mut self, rx_idx: u16, tbl: bool, hash: bool) -> bool {
-        let page = match crate::mem::alloc_contig(1) { Some(a) => a, None => return false };
+        let page = match crate::mem::alloc_any(1) { Some(a) => a, None => return false };
         // 1) the redirection table: 128 records {u16 cq_idx; u16 rsv} = 512 B
         unsafe {
             let t = crate::mem::kptr::<u16>(page);
@@ -779,7 +779,7 @@ impl Ena {
         crate::println!("ena: the PHC: the type={} the call@{:#x} expire={}us block={}us", typ, db, g[4], g[5]);
         if typ != PHC_TYPE_READLESS { crate::println!("ena: the PHC: only readless is supported"); return false; }
         if self.phc_out == 0 {
-            match crate::mem::alloc_contig(1) { Some(a) => self.phc_out = a, None => return false }
+            match crate::mem::alloc_any(1) { Some(a) => self.phc_out = a, None => return false }
         }
         unsafe { core::ptr::write_bytes(crate::mem::kptr::<u8>(self.phc_out), 0, 4096) };
         let mut c = [0u32; 16];
@@ -843,10 +843,10 @@ pub fn probe_at(d: &crate::pci::PciDev) -> Option<Ena> {
     if bar0 == 0 { crate::println!("ena: BAR0 is unavailable"); return None; }
 
     // the pages for the queues/buffers (identity: phys == virt)
-    let aq = crate::mem::alloc_contig(1)?;                 // 32*64 = 2 KB
-    let acq = crate::mem::alloc_contig(1)?;
-    let aenq = crate::mem::alloc_contig(1)?;               // 16*64 = 1 KB
-    let mmio_resp = crate::mem::alloc_contig(1)?;
+    let aq = crate::mem::alloc_any(1)?;                 // 32*64 = 2 KB
+    let acq = crate::mem::alloc_any(1)?;
+    let aenq = crate::mem::alloc_any(1)?;               // 16*64 = 1 KB
+    let mmio_resp = crate::mem::alloc_any(1)?;
     // the rings: 512 records x 16 B = 8 KB, we allocate 16 KB and align by 16 KB
     // The rings come from the RAM ABOVE 4 GB: a live ena driver on this hardware places them
     // there (dma_alloc_coherent), and that is the only thing by which its CREATE_CQ accepted by the device
@@ -948,7 +948,7 @@ pub fn probe_at(d: &crate::pci::PciDev) -> Option<Ena> {
     //   0 os_type | 4 os_dist_str[128] | 132 os_dist | 136 kernel_ver_str[32]
     //   168 kernel_ver | 172 driver_version | 176 supported_network_features[2]
     //   184 ena_spec_version | 186 bdf | 188 num_cpus | 192 driver_supported_features
-    let hi = crate::mem::alloc_contig(1)?;
+    let hi = crate::mem::alloc_any(1)?;
     unsafe {
         core::ptr::write_bytes(crate::mem::kptr::<u8>(hi), 0, 4096);
         core::ptr::write_volatile(crate::mem::kptr::<u32>(hi), 1u32);                  // os_type = LINUX (a Linux-ABI runtime)

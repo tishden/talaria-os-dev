@@ -2265,7 +2265,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 // and gave ring 3 addresses inside the kernel's window. Now: an address from the
                 // process's region (or the MAP_FIXED one), the frames mapped as SHARED leaves (not
                 // private: `fork_cow_space` hands them to the child as they are, never COW),
-                // zeroed through the direct map. The frames' lifetime is the identity one's:
+                // zeroed through the direct map, from the workload's memory (the high area first,
+                // stage 6). The frames' lifetime is the identity one's:
                 // `unmap_proc` leaves a non-private frame alone and `mreg` frees it at a restart.
                 // A MAP_SHARED|MAP_FIXED went to the private branch below and stopped being shared
                 // at the first fork; it is shared now too. `talaria.sharedid=1` restores the identity.
@@ -2273,7 +2274,7 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 let vaddr = if fixed { f.a1 & !0xFFF } else { crate::proc::mmap_alloc(f.a2) };
                 if fixed && ((vaddr < 0x1_0000_0000 && !crate::paging::fixed_low_ok(vaddr, pages)) || crate::paging::ident_leaf_overlap(vaddr, pages)) { return (-22i64) as u64; }
                 if fixed && f.a4 & 0x10_0000 != 0 && crate::paging::any_mapped(vaddr, pages) { return (-17i64) as u64; }
-                let Some(b) = crate::mem::alloc_contig(pages) else { return (-12i64) as u64; };
+                let Some(b) = crate::mem::alloc_contig_node(pages, crate::affinity::my_node()) else { return (-12i64) as u64; };
                 zero_serviced(b, pages * 4096);
                 if fixed { crate::paging::unmap_proc(vaddr, pages); }
                 let cr3 = crate::paging::current_cr3() & !0xFFF;

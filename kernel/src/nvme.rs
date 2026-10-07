@@ -294,12 +294,12 @@ pub fn probe_nth(n: usize) -> Option<Nvme> {
     let (bar0, _sz) = crate::pci::bar(d.bus, d.dev, d.func, 0);
     if bar0 == 0 { crate::println!("nvme: BAR0 is unavailable"); return None; }
     // the queues and the Identify buffer: physically contiguous pages (identity: phys==virt)
-    let asq = crate::mem::alloc_contig(1)?; let acq = crate::mem::alloc_contig(1)?;
-    let iosq = crate::mem::alloc_contig(1)?; let iocq = crate::mem::alloc_contig(1)?;
-    let idbuf = crate::mem::alloc_contig(1)?;
+    let asq = crate::mem::alloc_any(1)?; let acq = crate::mem::alloc_any(1)?;
+    let iosq = crate::mem::alloc_any(1)?; let iocq = crate::mem::alloc_any(1)?;
+    let idbuf = crate::mem::alloc_any(1)?;
     // §8.1: a page of the PRP list per EVERY CID (the commands go in a pipeline, and
     // the list is needed by the device until the end of the transfer — otherwise the next one would overwrite it)
-    let prp = crate::mem::alloc_contig(QD as u64)?;
+    let prp = crate::mem::alloc_any(QD as u64)?;
     for p in [asq, acq, iosq, iocq, idbuf] { unsafe { core::ptr::write_bytes(crate::mem::kptr::<u8>(p), 0, 4096) }; }
     unsafe { core::ptr::write_bytes(crate::mem::kptr::<u8>(prp), 0, QD * 4096) };
     let cap = unsafe { core::ptr::read_volatile(crate::mem::devptr::<u64>(bar0)) };

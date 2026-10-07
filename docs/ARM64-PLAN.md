@@ -2193,6 +2193,40 @@ the window is built and did nothing — such a `=0` (for `dmap`, `kwin`, `mwin`)
 IGNORED instead of passing in silence. Next: strict as the default (the databases on the machines
 under it), then stage 6.
 
+**Stage 6, its first part, is done (2026-10-07): the kernel's memory from any RAM.** The low
+allocator still stops at 4 GiB, and it stays what it is: the memory a frame's identity can reach —
+the identity modes' dual frames (`// DMAP: dual`), x86's AP boot (a 32-bit CR3, the trampoline),
+everything with `talaria.dmap=0`, all the early structures. Beside it, `mem::alloc_any` (and
+`_frame`, `_aligned`): with the map on, the high areas first (their free list, then their bumps),
+the low allocator after them; with the map off it IS the low allocator. Moved onto it: every page
+table after the boot (`new_level*`, the splits, a process space's PML4/PDPT/PD and its PT copies,
+the windows' tables), the stacks' window frames, the FS's buffers (read-ahead, write-back, the
+journal's stage and copies, the cache's fallback), NVMe's queues and PRP lists, ENA's admin
+queues, its host-info and PHC pages, the DMA bounce, arm64's ITS tables, the PMU walk and the
+unwinder's buffer. The workload's own memory moved with it: the ELF image's chunks and pages
+(ClickHouse's 525 MB came from below 4 GiB) and an anonymous `MAP_SHARED` (PostgreSQL's
+`shared_buffers`) are the workload allocator's now — the high area first, the low one above its
+reserve. On a `c7g.large` (850 MB below 4 GiB) that leaves the low memory to what needs it.
+`mem::ANY_FROM_HIGH` counts the frames taken from above (`kstat mem`, the `cell:` status line);
+gate `talaria.test=anyram` on both machines (4 GiB guests): a block above 4 GiB through the map,
+back to the areas' free list, a process space whose tables lie above 4 GiB switched into and read
+through, the counter moving — and with `talaria.dmap=0` all of it below 4 GiB. The three
+databases boot and answer with 5 GiB (a 2 GiB high area) by default and under strict
+(`MEM=` is a knob of their `run.sh` now), ClickHouse and the JVM with 6 GiB. The regressions: x86
+530/0 + host 22/0, `validate.sh` 14/0; arm64 364/0, its databases 14/0 (PostgreSQL, MariaDB,
+MongoDB, the JVM, ClickHouse).
+
+Moving the loader found a stage-1 leftover the census could not see (ENGINEERING-NOTES 54): arm64's
+`icache::sync` cleans by virtual address, and five callers gave it the frame's identity — the
+loaders, a COW copy of an executable page, a 2 MiB `mprotect(PROT_EXEC)`. Under strict a process
+space has no such address; TCG does not translate cache maintenance, so only hardware would have
+faulted, and only on a code page written in a forked child. They pass `kva(frame)`.
+
+Left of stage 6: the low pieces other than the largest one are still unused (the low allocator
+takes one region); RAM above `user::PROC_HEAP_BASE` (192 GiB) is still unseen — with the map it
+needs no identity, but the high areas are still mapped by it; and the remaining `alloc_contig`
+callers that are not dual (the vDSO, `syscall.rs`'s identity-mode mmaps and shm) keep the low.
+
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
 check on every queued address); arm64 attribute aliasing (map RAM only, never split a leaf);

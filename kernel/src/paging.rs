@@ -45,7 +45,7 @@
 //! ring 3 only explicitly, by `protect`.
 
 use crate::arch::mmu;
-use crate::mem::{kpa_of, kptr};
+use crate::mem::{kpa_of, kptr, kva};
 
 /// Build our own tables (1G identity, GB3 uncached for MMIO) and load CR3.
 pub fn init() {
@@ -362,7 +362,7 @@ fn mwin_map(pa: u64) -> Option<u64> {
             if fresh {
                 if !ram_touches(glo, glo + (1 << 30)) {
                     pte_w(e3, glo | DEV);
-                } else if let Some(t) = crate::mem::alloc_frame() {
+                } else if let Some(t) = crate::mem::alloc_any_frame() {
                     core::ptr::write_bytes(kptr::<u8>(t), 0, 4096);
                     let mut n = 0;
                     for m in 0..512u64 {
@@ -570,7 +570,7 @@ unsafe fn kwin_pte(va: u64) -> Option<*mut Pte> {
         let e = t.add(((va >> shift) & 0x1FF) as usize);
         let old = pte_r(e);
         if old & PTE_P == 0 {
-            let f = crate::mem::alloc_frame()?;
+            let f = crate::mem::alloc_any_frame()?;
             core::ptr::write_bytes(kptr::<u8>(f), 0, 4096);
             if !install_table(e, old, f, PTE_P | PTE_RW) { crate::mem::free_contig(f, 1); }
         }
@@ -874,7 +874,7 @@ unsafe fn install_table(slot: *mut Pte, expect: u64, table: u64, extra: u64) -> 
 unsafe fn new_level(slot: *mut Pte, what: &str) {
     let old = pte_r(slot);
     if old & PTE_P != 0 { return; }
-    let t = crate::mem::alloc_frame().expect(what);
+    let t = crate::mem::alloc_any_frame().expect(what);
     core::ptr::write_bytes(kptr::<u8>(t), 0, 4096);
     if !install_table(slot, old, t, PTE_P | PTE_RW | PTE_US) {
         crate::mem::free_contig(t, 1);
@@ -888,7 +888,7 @@ unsafe fn new_level(slot: *mut Pte, what: &str) {
 unsafe fn new_level_opt(slot: *mut Pte) -> Option<()> {
     let old = pte_r(slot);
     if old & PTE_P != 0 { return Some(()); }
-    let t = crate::mem::alloc_frame()?;
+    let t = crate::mem::alloc_any_frame()?;
     core::ptr::write_bytes(kptr::<u8>(t), 0, 4096);
     if !install_table(slot, old, t, PTE_P | PTE_RW | PTE_US) { crate::mem::free_contig(t, 1); }
     Some(())
@@ -904,7 +904,7 @@ unsafe fn split_1g(e3: *mut Pte) {
     if parent & PTE_PS == 0 { return; }          // a neighbour managed to split it — we work with its table
     let base = parent & 0x000F_FFFF_C000_0000; // the 1G-aligned base
     let flags = parent & (INHERIT); // inherit RW/US/NX/the cacheability
-    let pd = kptr::<Pte>(crate::mem::alloc_frame().expect("split_1g: there is no frame"));
+    let pd = kptr::<Pte>(crate::mem::alloc_any_frame().expect("split_1g: there is no frame"));
     for m in 0..512u64 {
         pte_w(pd.add(m as usize), (base + m * 0x20_0000) | flags | PTE_PS);
     }
@@ -928,7 +928,7 @@ unsafe fn split_2m_lazy(e2: *mut Pte) {
     if parent & (PTE_LAZY | PTE_PS) != (PTE_LAZY | PTE_PS) || parent & PTE_P != 0 { return; }
     HUGE_SPLIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let flags = parent & (PTE_LAZY | PTE_PRIV | PTE_PNONE | LAZY_W | LAZY_X); // without PS and LAZY_4K: they are about the directory entry
-    let pt = kptr::<Pte>(crate::mem::alloc_frame().expect("split_2m_lazy: there is no frame"));
+    let pt = kptr::<Pte>(crate::mem::alloc_any_frame().expect("split_2m_lazy: there is no frame"));
     for m in 0..512usize { pte_w(pt.add(m), flags); }
     if !install_table(e2, parent, kpa_of(pt), PTE_P | PTE_RW | PTE_US) {
         crate::mem::free_contig(kpa_of(pt), 1);
@@ -945,7 +945,7 @@ unsafe fn split_2m(e2: *mut Pte) {
     if parent & PTE_PS == 0 { return; }          // a neighbour has already split it
     let base = parent & 0x000F_FFFF_FFE0_0000; // the 2M-aligned base
     let flags = parent & (INHERIT);
-    let pt = kptr::<Pte>(crate::mem::alloc_frame().expect("split_2m: there is no frame"));
+    let pt = kptr::<Pte>(crate::mem::alloc_any_frame().expect("split_2m: there is no frame"));
     for m in 0..512u64 {
         pte_w(pt.add(m as usize), (base + m * 0x1000) | flags);
     }
@@ -1199,7 +1199,7 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
                         if writable { ne |= PTE_RW; }
                         if !exec { ne |= PTE_NX; }
                         pte_w(pde, ne);
-                        if exec { crate::arch::icache::sync(e & ADDR_MASK, 0x20_0000); } // mprotect(PROT_EXEC) over written code
+                        if exec { crate::arch::icache::sync(kva(e & ADDR_MASK), 0x20_0000); } // mprotect(PROT_EXEC) over written code
                         a += 0x20_0000;
                         continue;
                     }
@@ -2598,7 +2598,7 @@ fn map_1g(phys: u64, cached: bool) -> u64 {
         // then we create a PDPT table for it.
         let e4 = pml4.add(l4);
         if pte_r(e4) & PTE_P == 0 {
-            let pdpt = match crate::mem::alloc_frame() { Some(f) => f, None => return 0 };
+            let pdpt = match crate::mem::alloc_any_frame() { Some(f) => f, None => return 0 };
             core::ptr::write_bytes(kptr::<u8>(pdpt), 0, 4096);
             pte_w(e4, pdpt | PTE_P | PTE_RW);
         }
@@ -2678,8 +2678,8 @@ pub fn new_address_space() -> u64 {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
         let base_pml4 = if k != 0 { kptr::<Pte>(k) } else { cr3_root() };
         let kern_pdpt = kptr::<Pte>(pte_r(base_pml4) & ADDR_MASK); // PML4[0] -> kernel PDPT
-        let new_pml4 = crate::mem::alloc_frame().expect("as: pml4");
-        let new_pdpt = crate::mem::alloc_frame().expect("as: pdpt");
+        let new_pml4 = crate::mem::alloc_any_frame().expect("as: pml4");
+        let new_pdpt = crate::mem::alloc_any_frame().expect("as: pdpt");
         core::ptr::write_bytes(kptr::<u8>(new_pml4), 0, 4096);
         copy_kernel_pml4(base_pml4, new_pml4);
         for i in 0..512usize { // a copy of the kernel PDPT (0..3 are filled, 4.. are free for the private one)
@@ -2704,9 +2704,9 @@ pub fn new_process_space() -> u64 {
         let kern_pdpt = kptr::<Pte>(pte_r(base_pml4) & ADDR_MASK);
         let kgb = user_gb();
         let kern_pd0 = kptr::<Pte>(pte_r(kern_pdpt.add(kgb)) & ADDR_MASK); // PDPT[kgb] -> the kernel's GB PD
-        let pml4 = crate::mem::alloc_frame().expect("proc: pml4");
-        let pdpt = crate::mem::alloc_frame().expect("proc: pdpt");
-        let pd0 = crate::mem::alloc_frame().expect("proc: pd0");
+        let pml4 = crate::mem::alloc_any_frame().expect("proc: pml4");
+        let pdpt = crate::mem::alloc_any_frame().expect("proc: pdpt");
+        let pd0 = crate::mem::alloc_any_frame().expect("proc: pd0");
         core::ptr::write_bytes(kptr::<u8>(pml4), 0, 4096);
         copy_kernel_pml4(base_pml4, pml4);
         // THE GB0 IDENTITY WINDOW IN A PROCESS'S AS IS FOR THE KERNEL ONLY. In the kernel's AS everything
@@ -2727,7 +2727,7 @@ pub fn new_process_space() -> u64 {
                 // the entry is already split into 4K ones (e.g. the kernel's heap after nx_range): a DEEP COPY of the PT,
                 // otherwise the process and the kernel would share one PT -> a map_leaf in this region would spoil the shared one.
                 let src_pt = kptr::<Pte>(e & ADDR_MASK);
-                let new_pt = crate::mem::alloc_frame().expect("proc: pt-copy");
+                let new_pt = crate::mem::alloc_any_frame().expect("proc: pt-copy");
                 for j in 0..512usize {
                     let v = pte_r(src_pt.add(j));
                     let v = if v & PTE_PRIV == 0 { v & !PTE_US } else { v };
@@ -3033,7 +3033,7 @@ pub fn cow_fault(vaddr: u64) -> bool {
                     // The copy comes from the node OF THE ONE WHO WRITES: the page moves to it forever.
                     let np = crate::mem::alloc_contig_node(1, crate::affinity::my_node()).expect("cow: page");
                     core::ptr::copy_nonoverlapping(kptr::<u8>(phys), kptr::<u8>(np), 4096);
-                    if keep & PTE_NX == 0 { crate::arch::icache::sync(np, 4096); }   // an executable page: fetch must see the copy
+                    if keep & PTE_NX == 0 { crate::arch::icache::sync(kva(np), 4096); }   // an executable page: fetch must see the copy
                     // The copy is installed by a CAS over the entry the decision was made on: two
                     // threads of one process faulting on the same page used to both install
                     // (the second overwrote the first's copy, and the writes made into it were

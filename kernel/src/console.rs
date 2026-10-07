@@ -530,9 +530,11 @@ fn exec(cmd: &[u8]) {
                 feeds, adj, steps, back,
                 if back != 0 { " — time jumped backwards, stamps from that period cannot be compared" } else { "" });
         }
-        "mem" => crate::println!("the allocator: bump-free={} frames ({} MB), the reclaim free list={} pages ({} MB)",
+        "mem" => crate::println!("the allocator: bump-free={} frames ({} MB), the reclaim free list={} pages ({} MB), \
+            the low memory free {} MB, kernel frames taken from above 4 GB {}",
             mem::free_frames(), mem::free_frames() * 4 / 1024,
-            mem::free_list_pages(), mem::free_list_pages() * 4 / 1024),
+            mem::free_list_pages(), mem::free_list_pages() * 4 / 1024,
+            mem::free_low_frames() * 4 / 1024, mem::ANY_FROM_HIGH.load(core::sync::atomic::Ordering::Relaxed)),
         "ps" => crate::obs::top::cmd_ps(rest),
         "top" => crate::obs::top::cmd(rest, interactive()),
         "cores" => { crate::affinity::dump(); crate::cat::dump(); }

@@ -2199,7 +2199,7 @@ fn kwin_take() -> Option<u64> {
     KSLOT_USED[i / 64].fetch_or(1 << (i % 64), Ordering::AcqRel);
     let base = kslot_base(i);
     for p in 1..KSTACK_PAGES {
-        let ok = match crate::mem::alloc_frame() {
+        let ok = match crate::mem::alloc_any_frame() {
             Some(f) => crate::paging::kwin_map(base + p * 4096, f) || { crate::mem::free_contig(f, 1); false },
             None => false,
         };

@@ -57,7 +57,7 @@ impl Bounce {
     pub fn need(p: *const u8, len: usize) -> Option<Bounce> {
         if !crate::mem::in_kwin(crate::mem::vaddr(p)) || len == 0 { return None; }
         let pages = (len as u64).div_ceil(4096);
-        let pa = crate::mem::alloc_contig(pages).expect("fs: a DMA bounce for a stack buffer");
+        let pa = crate::mem::alloc_any(pages).expect("fs: a DMA bounce for a stack buffer");
         Some(Bounce { pa, pages, len })
     }
     #[allow(clippy::mut_from_ref)]

@@ -22,7 +22,7 @@ pub fn clean_inval_poc(addr: u64, len: u64) {
 }
 
 /// Make the bytes at `[addr, addr + len)` visible to instruction fetch on every core.
-/// `addr` is the address the KERNEL wrote through (the frame's identity address for a
+/// `addr` is the address the KERNEL wrote through (the frame's direct-map address, `kva`, for a
 /// loader, the process's own for an `mprotect`): the clean is by address and reaches the
 /// same lines either way; the invalidate is by address only on a PIPT instruction cache
 /// (`CTR_EL0.L1Ip` = 0b11 — Neoverse and every recent core), and on a VIPT one it is the
