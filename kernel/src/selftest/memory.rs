@@ -178,6 +178,17 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                     let ran = r == probe(0x1234);
                     println!("kimg: a function runs at its alias {:#x}: {}", fa, if ran { "OK" } else { "FAIL" });
                     if !ran { bad += 1; }
+                    // W^X (stage 7.4): the code read-only + executable, the constants read-only, the
+                    // data writable, nothing both — when the kernel runs at the alias.
+                    if crate::mem::KIMG_OFF != 0 {
+                        for (name, va, w, x) in [(".text", words[0].1, false, true), (".rodata", words[1].1, false, false),
+                                                 (".data", words[2].1, true, false), (".bss", words[3].1, true, false)] {
+                            let (p, wr, _, ex) = crate::paging::query(va);
+                            let ok = p && wr == w && ex == x;
+                            println!("kimg: W^X {} writable={} executable={}: {}", name, wr, ex, if ok { "OK" } else { "FAIL" });
+                            if !ok { bad += 1; }
+                        }
+                    }
                     let asp = crate::paging::new_process_space();
                     // SAFETY: into a fresh process space and back at once; it shares the kernel's slots.
                     let seen = unsafe {

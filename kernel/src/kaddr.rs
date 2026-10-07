@@ -134,6 +134,11 @@ pub const KIMG_OFF: u64 = 0x0000_FFFF_4000_0000; // the image's gigabyte (0x4000
 pub const KIMG_VBASE: u64 = 0xFFFF_FFFF_8000_0000;
 #[cfg(not(target_arch = "x86_64"))]
 pub const KIMG_VBASE: u64 = 0x0000_FFFF_8000_0000;
+/// Where to WRITE a byte of the kernel's code at `va` (a debugger's breakpoint): the image's high
+/// alias is read-only (W^X, stage 7.4), so an image address is written through the direct map —
+/// the same RAM, writable, never executable; any other address is returned as it is.
+#[inline]
+pub fn kimg_write_va(va: u64) -> u64 { if KIMG_OFF != 0 && va >= KIMG_VBASE { kva(va - KIMG_OFF) } else { va } }
 /// The physical address of kernel virtual address `va` of RAM (the inverse of `kva`): the map's
 /// range and the image's are translated, anything else is the identity (a kernel stack in the
 /// identity, a miss).

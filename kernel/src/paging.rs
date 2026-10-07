@@ -124,9 +124,20 @@ pub fn init() {
         let hpd = crate::mem::alloc_frame().expect("frame: the image's alias (pd)");
         core::ptr::write_bytes(kptr::<u8>(hpdpt), 0, 4096);
         core::ptr::write_bytes(kptr::<u8>(hpd), 0, 4096);
+        // W^X (stage 7.4): the linker scripts start `.rodata` and `.data` on 2 MiB, so each leaf
+        // is one section's — the code read-only and executable, the constants read-only, the data
+        // writable; never both writable and executable. (A gdb breakpoint writes the code through
+        // the direct map.)
+        let (text_end, ro_end) = (crate::mem::kernel_text_end(), crate::mem::kernel_rodata_end());
+        let alias_off = crate::mem::KIMG_VBASE - img_gb;
         for abs in sup_lo..sup_hi {
             let j = (abs - (img_gb >> 21)) as usize;
-            pte_w(kptr::<Pte>(hpd).add(j), (abs << 21) | PTE_P | PTE_RW | PTE_PS);
+            let va = (abs << 21) + alias_off;
+            let rights = if crate::mem::KIMG_OFF == 0 { PTE_RW }       // the image runs low: the alias is a copy
+                else if va < text_end { 0 }
+                else if va < ro_end { PTE_NX }
+                else { PTE_RW | PTE_NX };
+            pte_w(kptr::<Pte>(hpd).add(j), (abs << 21) | PTE_P | PTE_PS | rights);
         }
         let s4 = ((crate::mem::KIMG_VBASE >> 39) & 0x1FF) as usize;
         let s3 = ((crate::mem::KIMG_VBASE >> 30) & 0x1FF) as usize;

@@ -301,7 +301,10 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
         let memsz = p.memsz;
         lo = lo.min(vaddr & !0xFFF); hi = hi.max((vaddr + memsz + 0xFFF) & !0xFFF);
     }
-    if hi > lo && lo < 0x1_0000_0000 { crate::mem::reserve(lo, hi - lo); }
+    // Under strict a process space has no RAM identity and the kernel reaches every frame through
+    // the map, so no frame's identity can collide with the image: nothing to reserve (ClickHouse's
+    // 2 MB..528 MB would fence off half a gigabyte of the low memory for nothing).
+    if hi > lo && lo < 0x1_0000_0000 && !crate::paging::strict() { crate::mem::reserve(lo, hi - lo); }
     for p in crate::elfhdr::phdrs(&ph, phentsize, phnum.min(32)).filter(|p| p.is_load()) {
         let (writable, exec_) = p.rights();
         let off = p.off;

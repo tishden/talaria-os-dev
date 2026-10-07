@@ -22,7 +22,13 @@ SECTIONS
      the first bytes of the raw image (`objcopy -O binary`), and its `code0` is the
      branch to the entry. */
   .text : AT(ADDR(.text) - KOFF) { KEEP(*(.text.boot)) *(.text .text.*) } :text
+  /* W^X at the high alias (stage 7.4): the code, the constants and the data each start on a 2 MiB
+     boundary, so the alias's 2M leaves carry one section's rights each (paging::init). */
+  . = ALIGN(0x200000);
+  __text_end = .;
   .rodata : AT(ADDR(.rodata) - KOFF) { *(.rodata .rodata.*) } :text
+  . = ALIGN(0x200000);
+  __rodata_end = .;
   .data : AT(ADDR(.data) - KOFF) { *(.data .data.*) } :text
   /* The kernel zeroes its own .bss first thing (boot.rs): QEMU's loader of a raw
      image fills nothing beyond the file, and on a board the memory holds garbage —
