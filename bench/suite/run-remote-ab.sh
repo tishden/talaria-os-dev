@@ -26,6 +26,7 @@ EXTRA=${2:?the cmdline tail for B, e.g. "talaria.netirq=1"}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 export STAND_DIR=${STAND_DIR:-$HOME/.talaria-lab/stand}
+. "$HERE/lib/standlock.sh"; stand_lock "$@"
 export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-1}
 KERN=${KERN:-$REPO/kernel/target/x86_64-talaria/release/talaria}
 export KERN

@@ -24,6 +24,7 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 # ARCH=arm64: the Graviton stand (lib/arch.sh) — its own directory name, never mixed with x86's
 ALL="$HERE/results/ec2all$([ "${ARCH:-x86_64}" = arm64 ] && echo -a64)-$STAMP"
 export STAND_DIR=${STAND_DIR:-$HOME/.talaria-lab/stand}
+. "$HERE/lib/standlock.sh"; stand_lock "$@"
 export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-northeast-1}
 mkdir -p "$ALL"
 LOG="$ALL/log.txt"
