@@ -2341,7 +2341,9 @@ executable; `kimg` checks all four. The one writer of the kernel's code, a gdb b
 not executable) and arm64 syncs both addresses. The ELF loader no longer reserves an image's identity
 range from the frame allocator under strict (nothing can collide there; ClickHouse's would have
 fenced off half a gigabyte of the low memory). `user_gb()` keeps its name; the image's LOW identity
-in the kernel's own space stays RWX (the identity modes run there). The identity modes (`talaria.cell=identity`, `run_disk`) still share the kernel's space and
+in the kernel's own space stays RWX (the identity modes run there). On the machines (`variants.sh`, mdpipe, `smp=4`): the W^X
+kernel with strict keeping only leaf 0 gives p99 2.59 us on a `c7g.xlarge` (Linux 4.81 in the same
+hour) and 6.00 on a `c6i.xlarge` (Linux 8.67). The identity modes (`talaria.cell=identity`, `run_disk`) still share the kernel's space and
 cannot take an ET_EXEC at 2 MB.
 
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
