@@ -13,7 +13,6 @@
 #   ps -C tlgen -o pid=,etime=            # NOT ONE (tlgen runs with --spin and eats a core)
 #   docker ps --filter label=tlbench=1    # empty
 #   make -C bench/suite/tlgen             # the instrument
-#   services/clickhouse/build-kernel.sh   # the high-base kernel GOES STALE on any kernel change
 # And never run the regression and the suite at the same time.
 #
 # REPEATS. The actor, ClickHouse and JVM harnesses are noisier between runs than

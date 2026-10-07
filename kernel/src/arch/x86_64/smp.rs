@@ -582,7 +582,10 @@ pub fn start_ap(apic_id: u32) -> bool {
     }
     unsafe {
         // 1. prepare the trampoline: copy the code, write in the CR3 and the stack
-        let cr3: u64; core::arch::asm!("mov {}, cr3", out(reg) cr3);
+        // THE KERNEL'S root, not whatever space this core is in: the trampoline needs 0x8000
+        // by its identity and the image at its high alias, below 4 GiB (a 32-bit CR3 load) —
+        // `paging::init`'s root has all three; a process space keeps leaf 0 only by courtesy.
+        let cr3: u64 = match crate::paging::kernel_cr3() { 0 => { let c: u64; core::arch::asm!("mov {}, cr3", out(reg) c); c } k => k };
         // 16 KB: run_cell's locals (rx_slot/tx_slot/tx_len with QS=256) are >6 KB; one
         // page overflowed into the neighbouring frames (it was caught as garbage in the TX ring)
         // §1.1: 32 KB of working stack + A GUARD PAGE under it. 128 KB were needed

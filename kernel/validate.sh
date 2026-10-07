@@ -188,12 +188,12 @@ else
   echo "  SKIP  jvm (B11): there is no services/jvm/build/jdk-21* — see services/jvm/README.md"
 fi
 # ── B12: ClickHouse (the official binary) on Talaria ──
-# The kernel here is a DIFFERENT one — with a high link base (build-kernel.sh): the
-# non-relocatable ET_EXEC of ClickHouse takes 2 MB..526 MB, on top of the usual kernel image.
+# The NORMAL kernel: the non-relocatable ET_EXEC of ClickHouse takes 2 MB..526 MB, where the
+# kernel's image is loaded — it runs at its high alias and a strict process space keeps none of
+# its identity (docs/ARM64-PLAN.md §10.16 stage 7; the high-base build it needed is gone).
 echo "== B12: ClickHouse 25.8 (the official binary) on Talaria =="
 if ls "$REPO"/services/clickhouse/build/clickhouse-common-static-*/usr/bin/clickhouse >/dev/null 2>&1; then
-  ( cd "$REPO/services/clickhouse" && ./build-kernel.sh >/dev/null 2>&1
-    ./mkdisk.sh 1500M >/dev/null 2>&1
+  ( cd "$REPO/services/clickhouse" && ./mkdisk.sh 1500M >/dev/null 2>&1
     SMP=2 ./run.sh 300 >/dev/null 2>&1
     # WE READ THE LOG RATHER THAN THE LAUNCHER'S OUTPUT. `run.sh` prints a TAIL of forty
     # lines, while the `stat:` block has grown to fifty over the past sessions and pushed

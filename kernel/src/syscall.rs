@@ -2109,7 +2109,10 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             // We touch only what is NOT the kernel's image (the boundary is taken from
             // the linkage rather than from the constant 32 MB: with a build with a high base the user code
             // lies exactly in the low addresses).
-            if len > 0 && addr >= 0x20_0000 && (addr >= crate::mem::kernel_hi() || addr + len <= crate::mem::kernel_lo()) {
+            // Under strict, in a process space, the image's former range is the process's own
+            // (stage 7.4: an ET_EXEC linked at 2 MB lives there).
+            if len > 0 && addr >= 0x20_0000 && (addr >= crate::mem::kernel_hi() || addr + len <= crate::mem::kernel_lo()
+                || crate::paging::proc_low_ok(addr & !0xFFF, (addr + len - (addr & !0xFFF)).div_ceil(4096))) {
                 if prot == 0 { // PROT_NONE — non-present + the PNONE mark (munmap will free the frame)
                     crate::paging::protect_none(addr, len);
                 } else {

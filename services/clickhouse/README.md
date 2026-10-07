@@ -29,21 +29,13 @@ INTERP /lib64/ld-linux-x86-64.so.2
 ```
 
 Its segments must land exactly at **0x200000..0x20e8b1e8 (2 MB … 526 MB)** —
-exactly where the Talaria image itself lies: the kernel is linked at 2 MB and
-takes ~30 MB. The binary cannot be moved (an ET_EXEC has no relocations), so
-the kernel moves.
-
-Done: **the kernel's link base became a parameter** (`kernel/linker.ld`,
-`--defsym KBASE=`; the kernel takes its image bounds from the `__kernel_start`/
-`__kernel_end` symbols, not from a "32 MB" constant). The normal kernel is still
-built at 2 MB — all four boot loaders and the whole regression use it. For
-ClickHouse a variant with base **0x21000000 (528 MB)** is built:
-
-```sh
-./build-kernel.sh          # -> kernel/target-hi/x86_64-talaria/release/talaria
-```
-
-That kernel is fully functional: the whole JVM benchmark passes on it too.
+exactly where the Talaria image is LOADED (2 MB, ~60 MB). The binary cannot be
+moved (an ET_EXEC has no relocations). It used to need a kernel with a high link
+base (528 MB, `build-kernel.sh`); since 2026-10-07 the kernel's image runs at its
+high alias (x86 −2 GiB) and a process space under `talaria.dmap=strict` (the
+default) keeps none of its identity, so the normal kernel runs it
+(docs/ARM64-PLAN.md §10.16 stage 7). The identity modes (`talaria.cell=identity`,
+`run_disk`) still share the kernel's space and cannot.
 
 ## How to build and run
 
@@ -52,7 +44,6 @@ cd services/clickhouse
 curl -sL -o build/ch-common.tgz \
   https://github.com/ClickHouse/ClickHouse/releases/download/v25.8.33.6-lts/clickhouse-common-static-25.8.33.6-amd64.tgz
 tar -C build -xzf build/ch-common.tgz
-./build-kernel.sh                 # the high-base kernel
 ./mkdisk.sh 1500M                 # the disk: binary + glibc runtime (Ubuntu 22.04) + config
 SMP=2 MEM=3072 ./run.sh 300
 ./run-linux.sh                    # the reference: the same binary on Linux, as many cores

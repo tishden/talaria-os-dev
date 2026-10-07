@@ -65,7 +65,7 @@ fi
 # kernel/user/*.
 (cd "$REPO/kernel" && python3 mkfs.py "$IMG/disk.img" >/dev/null) || echo "mkfs.py: disk.img was not built (no kernel/user/mhello?)"
 # The ext2 image for the tests of the RW FS and of the process model (it is recreated: the tests write onto the disk)
-E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
+E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/sigtest-lo" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
 # the symlinks in the image: a "fast" one (the target inside the inode) to a file and to a directory —
 # exactly what the launch with the runtime from Ubuntu stumbled over (/lib64/ld-linux… is a symlink)
 mkdir -p "$E2/dir"; echo inside > "$E2/dir/inside.txt"
@@ -567,6 +567,9 @@ assert "sigtest: ALL OK" "proc: the fd tables/dup2/pipe/cwd/readdir + the signal
 q=$(bootd "talaria.test=sigtesthi talaria.dmap=strict" /img/disk_ext2.img); sleep 2
 assert "sigtest: ALL OK" "proc: sigtest LINKED AT 0x40000000 (RAM's former identity, GB1) under strict — the image, its forks (COW) and its shared memory where the kernel's identity used to be (ARM64-PLAN §10.16 stage 4b)"
 refute "RAM BY ITS IDENTITY|DEVICE BY ITS IDENTITY|CRASH DUMP" "proc: the image at 1 GiB under strict — no kernel access missed its kva, no crash"; stopq $q
+q=$(bootd "talaria.test=sigtestlo" /img/disk_ext2.img); sleep 2
+assert "sigtest: ALL OK" "proc: sigtest LINKED AT 0x200000 — the kernel image's own load address (ARM64-PLAN §10.16 stage 7.4): the image runs at its high alias, a process space has none of its identity"
+refute "RAM BY ITS IDENTITY|DEVICE BY ITS IDENTITY|CRASH DUMP" "proc: the image at 2 MB — no kernel access missed its kva, no crash"; stopq $q
 q=$(bootd "talaria.test=sigtest talaria.dmap=1" /img/disk_ext2.img); sleep 2
 assert "sigtest: ALL OK" "proc: the same with talaria.dmap=1 — the map with RAM's identity kept in the process spaces (the A/B of strict), fork/COW/MAP_SHARED/shm/signals intact"
 assert "sigtest: a low MAP_FIXED at 0xa0000000: refused" "proc: with talaria.dmap=1 a MAP_FIXED below 4 GiB is refused (the kernel's identity is in the process space)"

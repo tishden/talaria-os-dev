@@ -125,6 +125,13 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/sigtest-hi", &[b"sigtest"], &[b"HOME=/"]); } }
             crate::suite::park()
         }
+        "sigtestlo" => {
+            // The same binary linked at 0x20_0000 — on x86 the kernel image's own load address
+            // (stage 7.4): the image runs at its high alias, a strict process space has none of
+            // its identity, so the process's image, forks and shared memory live there.
+            if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/sigtest-lo", &[b"sigtest"], &[b"HOME=/"]); } }
+            crate::suite::park()
+        }
         "sigtest" => {
             // The process model: fd tables, a pipe, fork+SIGCHLD, kill/handlers, cwd, shm — a musl test from the ext2 disk.
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/sigtest", &[b"sigtest"], &[b"HOME=/"]); } }

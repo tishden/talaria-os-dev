@@ -442,9 +442,13 @@ pub fn strict_init(want: bool, asked: bool) -> bool {
         crate::println!("talaria: talaria.dmap=strict REFUSED — {} address spaces exist already", live);
         return false;
     }
-    STRICT_KEEP.store((crate::mem::kernel_hi() + 0x1F_FFFF) & !0x1F_FFFF, Ordering::Relaxed);
+    // Stage 7.4: the image runs at its high alias, so its low identity is nobody's in a process
+    // space any more — only leaf 0 stays (x86's AP trampoline at 0x8000, the BIOS area). With
+    // `KIMG_OFF` 0 the image still runs by its identity, and everything below its end stays.
+    let keep = if crate::mem::KIMG_OFF != 0 { 0x20_0000 } else { (crate::mem::kernel_hi() + 0x1F_FFFF) & !0x1F_FFFF };
+    STRICT_KEEP.store(keep, Ordering::Relaxed);
     STRICT.store(true, Ordering::SeqCst);
-    crate::println!("talaria: the direct map is STRICT: process spaces carry no identity leaf over the map's RAM (the image below {:#x} stays)",
+    crate::println!("talaria: the direct map is STRICT: process spaces carry no identity leaf over the map's RAM (below {:#x} it stays)",
         STRICT_KEEP.load(Ordering::Relaxed));
     true
 }
@@ -491,6 +495,12 @@ pub fn fixed_low_ok(vaddr: u64, pages: u64) -> bool {
         c += 0x20_0000;
     }
     true
+}
+/// May a process change the rights of [vaddr, +pages) below 4 GiB: strict dropped every identity
+/// leaf there AND the current space is a process's (never the kernel's, where the identity modes
+/// run ring 3 beside the image).
+pub fn proc_low_ok(vaddr: u64, pages: u64) -> bool {
+    fixed_low_ok(vaddr, pages) && current_cr3() & ADDR_MASK != kernel_cr3() & ADDR_MASK
 }
 /// For a kernel fault's dump: was `addr` RAM by its identity, touched in a process space under strict.
 pub fn strict_miss(addr: u64) -> bool {

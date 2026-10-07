@@ -2324,6 +2324,20 @@ came up silent with the boot map's TCR: the kernel's leaves leave the access fla
 (TCR.HA), a core without HA faults on its first access — before it has vectors. They take the boot
 core's own TCR now (ENGINEERING-NOTES 55).
 
+**Stage 7.4 and 7.5 are done (2026-10-07).** With the image at its high alias, strict keeps only
+leaf 0 of RAM's identity in a process space (`STRICT_KEEP` = 2 MiB: x86's AP trampoline at 0x8000,
+the BIOS area) instead of everything below the image's end; `mprotect` may change the image's former
+range in a strict process space (`paging::proc_low_ok`, never in the kernel's own); x86's trampoline is
+handed `kernel_cr3()` explicitly. Gate `talaria.test=sigtestlo`: `sigtest` linked at 0x200000 — the
+kernel image's own load address — passes (its image, forks, shared memory); the pre-stage-7 kernel
+(9220575) hangs silently on the same binary, its process overlaying the kernel's code. 7.5: the official
+ClickHouse ET_EXEC (2 MB..528 MB) runs on the normal kernel — `validate.sh` B12 passed on it — and
+`services/clickhouse/build-kernel.sh` (KBASE 528 MB, `target-hi`) is gone. x86 538/0 + 22/0,
+`validate.sh` 14/0, arm64 370/0, arm64 databases 14/0. Not done: W^X on the image (`.text` RX,
+`.rodata` R, `.data`/`.bss` NX — the alias is 2M leaves over one RWX segment today); `user_gb()` keeps
+its name. The identity modes (`talaria.cell=identity`, `run_disk`) still share the kernel's space and
+cannot take an ET_EXEC at 2 MB.
+
 **The risks, ranked:** a missed conversion stays silent until 4b (the meter, the strict knob,
 a fault message that names the map); a device given a kernel address (the `Pa` type, a bound
 check on every queued address); arm64 attribute aliasing (map RAM only, never split a leaf);
