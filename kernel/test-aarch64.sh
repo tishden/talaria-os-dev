@@ -728,13 +728,24 @@ fi
 if command -v python3 >/dev/null 2>&1; then
   # The stub on the console's line: the registers (gdb's aarch64-core: 268 bytes = 536 hex),
   # the threads, two software steps, an hbreak set and cleared, detach.
-  bootrsp 60 "talaria.mode=gdb" "" 1251 $RSP PORT '?' qSupported g qfThreadInfo s s 'Z1,40080000,4' 'z1,40080000,4' D
+  # Then a SOFTWARE breakpoint in the kernel's read-only code: `_head`'s first instruction at its
+  # high address (run once, at the boot) — written through the direct map (W^X, stage 7.4).
+  KT=ffff80080000
+  bootrsp 60 "talaria.mode=gdb" "" 1251 $RSP PORT '?' qSupported g qfThreadInfo s s 'Z1,40080000,4' 'z1,40080000,4' \
+    "m$KT,4" "Z0,$KT,4" "m$KT,4" "z0,$KT,4" "m$KT,4" D
   assert '^first: T05thread:1;core:0;'                                      'gdb-stub: the machine stops in the stub and says so over the console'"'"'s line'
   assert '^qSupported -> PacketSize=400'                                    'gdb-stub: qSupported'
   assert '^g -> [0-9a-f]{536}$'                                             'gdb-stub: g gives x0..x30, sp, pc, cpsr'
   assert '^qfThreadInfo -> m1'                                              'gdb-stub: the thread list'
   assertcount '^s -> T05thread:1;core:0;' 2                                 'gdb-stub: the software step stops after one instruction (twice)'
-  assertcount ' -> OK$' 3                                                   'gdb-stub: hbreak (Z1/z1) and detach (D) answer OK'
+  assertcount ' -> OK$' 5                                                   'gdb-stub: hbreak (Z1/z1), a software breakpoint (Z0/z0) and detach (D) answer OK'
+  KV=$(grep -o "^m$KT,4 -> [0-9a-f]*" "$LOG" | awk '{print $3}' | tr '\n' ' ')
+  K1=$(echo $KV | cut -d' ' -f1); K2=$(echo $KV | cut -d' ' -f2); K3=$(echo $KV | cut -d' ' -f3)
+  # K2 is the stub's `brk` (little-endian, ...20d4); K1 the instruction before, K3 after removal
+  case "$K2" in *20d4) KBRK=1;; *) KBRK=0;; esac
+  if [ -n "$K3" ] && [ $KBRK = 1 ] && [ "$K1" = "$K3" ] && [ "$K1" != "$K2" ]; then
+    echo "  PASS  gdb-stub: a software breakpoint in the kernel's read-only code (W^X) — brk written through the direct map, read back, removed, the instruction restored"; PASS=$((PASS+1))
+  else echo "  FAIL  gdb-stub: the software breakpoint in the kernel's code: the reads were '$KV'"; FAIL=$((FAIL+1)); fi
   if [ -n "$GDB" ]; then
     bootrsp 60 "talaria.mode=gdb" "" 1253 $GDB -batch -nx -ex 'set remotetimeout 20' -ex 'target remote :PORT' -ex 'bt 3' \
       -ex 'info registers pc cpsr' -ex stepi -ex 'info threads' -ex detach "$REPO/${IMG%.img}"
