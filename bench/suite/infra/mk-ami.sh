@@ -25,7 +25,10 @@ WD="$SUITE/workloads/$WL"
 . "$SUITE/lib/arch.sh"
 [ -x "$TLGEN_BIN" ] || { echo "no $TLGEN_BIN — run make -C bench/suite/tlgen$([ "$ARCH" = arm64 ] && echo ' a64')"; exit 1; }
 
-OUT=${OUT:-$HOME/.talaria-lab/bench-$WL$([ "$ARCH" = arm64 ] && echo -a64).img}
+# `|| true`: under `set -e` an assignment takes the status of its command substitution, and a
+# false `[ ]` on x86 ended the script with NO output — every x86 stand failed with an empty
+# mk-ami log ("the AMI was not built") once this line came in with the arm64 scoreboard.
+OUT=${OUT:-$HOME/.talaria-lab/bench-$WL$([ "$ARCH" = arm64 ] && echo -a64 || true).img}
 mkdir -p "$(dirname "$OUT")"
 TREE=$(mktemp -d)
 trap 'rm -rf "$TREE"' EXIT
