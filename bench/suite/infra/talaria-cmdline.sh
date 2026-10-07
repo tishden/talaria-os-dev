@@ -5,7 +5,8 @@
 #
 #   infra/talaria-cmdline.sh "<extra tokens>"       # e.g. "talaria.netirq=1"
 #   infra/talaria-cmdline.sh ""                      # restore the default
-#   env: STAND_DIR= (by default ~/.talaria-lab/stand), ROLE=server|loadgen
+#   env: STAND_DIR= (by default ~/.talaria-lab/stand), ROLE=server|loadgen,
+#        APPEND=1 — keep every current token the new tail does not set (an A/B's B)
 #
 # How it works: the instance's user-data is the cmdline tail (see terraform,
 # `talaria.userdata=1`). The tail is read by the kernel on every boot over IMDS, so
@@ -39,7 +40,11 @@ cur=$(aws ec2 describe-instance-attribute --instance-id "$ID" --attribute userDa
 # `talaria.stat=8000` in the base plus `talaria.stat=2000` in the tail gave the kernel
 # one knob twice, and it refused to boot ("given TWICE") — the node did not
 # come up while the script waited 15 minutes for serial.
-base=$(printf '%s\n' "$cur" | tr ' ' '\n' | /usr/bin/grep -a "^talaria\.\(smp\|manifest\|stat\)=" | while read -r tok; do
+# APPEND=1 (an A/B's tail B): EVERY current token stays unless the new tail sets the same key — B
+# must be A plus the knob. Without it a B of `talaria.dmap=1` dropped the generator's
+# `talaria.netidle=1` (ARM64-PLAN §11.1): two knobs changed, one of them unasked.
+KEEP='^talaria\.\(smp\|manifest\|stat\)='; [ "${APPEND:-0}" = 1 ] && KEEP='^talaria\.'
+base=$(printf '%s\n' "$cur" | tr ' ' '\n' | /usr/bin/grep -a "$KEEP" | while read -r tok; do
     key=${tok%%=*}
     printf '%s ' "$EXTRA" | tr ' ' '\n' | /usr/bin/grep -aq "^$key=" || printf '%s ' "$tok"
 done)
