@@ -51,7 +51,9 @@ bootd() {
 # bootx SECS APPEND DISK [MEM]: as `boot`, with DISK (a path under the repository) on
 # virtio-blk and MEM megabytes (1024 by default).
 bootx() {
-  QEMU="timeout $1 qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL -smp 4 -m ${4:-1024} -nographic \
+  # A size in gigabytes ("200G") is a guest larger than the host: RAM not reserved up front.
+  local mb=""; case "${4:-}" in *G) mb="-machine memory-backend=m -object memory-backend-ram,id=m,size=$4,reserve=off";; esac
+  QEMU="timeout $1 qemu-system-aarch64 -M virt,gic-version=3,its=on $ACCEL $mb -smp 4 -m ${4:-1024} -nographic \
     -kernel /w/$IMG -append \"console=ttyAMA0 $2 talaria.smp=4 talaria.poweroff=1\" \
     -drive id=d0,file=/w/$3,format=raw,if=none -device virtio-blk-device,drive=d0"
   if command -v qemu-system-aarch64 >/dev/null 2>&1; then
@@ -363,6 +365,10 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     assert 'anyram: ALL OK'                                                   'anyram: the kernel'"'"'s memory from any RAM — a block and a process space'"'"'s tables above 4 GB (§10.16 stage 6)'
     run 60 "talaria.test=anyram talaria.dmap=0" ext2 4096
     assert 'anyram: ALL OK'                                                   'anyram: with talaria.dmap=0 the kernel'"'"'s memory stays below 4 GB'
+    run 240 "talaria.test=anyram" ext2 200G
+    assert 'mem: RAM beyond the identity \(#0\) 0x3000000000\.\.0x3240000000'     'anyram: a 200 GB guest — the RAM past the identity ceiling (192 GB) is seen'
+    assert 'anyram: alloc_any takes the RAM beyond the identity first: OK'      'anyram: 200 GB — the kernel takes it first, the workload stays where the identity reaches'
+    assert 'anyram: ALL OK'                                                   'anyram: 200 GB — the whole gate'
     # A c7g.large's shape: 850 MB below 4 GB, the rest above. forktls's 1.5 GB went into
     # 2 MB pages from the LOW memory and the next page table found no frame — a panic one
     # syscall in, on the real machine; reproduced here by cutting the low allocator.

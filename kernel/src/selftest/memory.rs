@@ -144,6 +144,15 @@ pub fn run(name: &str, cmdline: &str) -> bool {
                 crate::mem::free_contig(a, 4);
                 check("the block goes back to a free list", crate::mem::frame_is_free(a));
             }
+            // RAM past `ident_ceiling` (a 200 GB guest): the kernel's alone, and taken first.
+            let (xb, xe) = crate::mem::xhigh_area_n(0);
+            if xb != 0 {
+                println!("anyram: RAM beyond the identity {:#x}..{:#x}", xb, xe);
+                check("alloc_any takes the RAM beyond the identity first", a >= xb && a < xe);
+                let wl = crate::mem::alloc_contig_node(16, 255).unwrap_or(0);
+                check("the workload's frames stay where the identity reaches", wl != 0 && !(wl >= xb && wl < xe));
+                if wl != 0 { crate::mem::free_contig(wl, 16); }
+            }
             // A process space: its PML4/PDPT/PD come from `alloc_any`; the hardware walks them.
             let w = crate::mem::alloc_any_frame().unwrap_or(0);
             let asp = crate::paging::new_process_space();
