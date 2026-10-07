@@ -31,7 +31,16 @@ TREE=$(mktemp -d)
 trap 'rm -rf "$TREE"' EXIT
 
 echo "== the workload tree $WL"
-"$WD/tree.sh" "$TREE" | sed 's/^/   /'
+# A TREE THAT FAILED TO BUILD MUST STOP THE IMAGE. Through a pipe into `sed` its exit status
+# was sed's: a worktree without `services/mariadb/build` gave an AMI with no server binary, and
+# the stand spent an hour on a phase A whose every point was "connection did not come up"
+# (the console said "proc: the binary was not found on the disk").
+TLOG=$(mktemp)
+if ! "$WD/tree.sh" "$TREE" > "$TLOG" 2>&1; then
+    sed 's/^/   /' "$TLOG"; rm -f "$TLOG"
+    echo "REFUSAL: the workload tree of $WL did not build"; exit 1
+fi
+sed 's/^/   /' "$TLOG"; rm -f "$TLOG"
 
 cp "$TLGEN_BIN" "$TREE/tlgen"
 cp "$WD/manifest" "$TREE/cell.manifest"
@@ -48,7 +57,8 @@ M
 SZ=$(( ${DISK_MB:-64} * 2 ))
 [ "$SZ" -lt 128 ] && SZ=128
 echo "== ext2 image ${SZ}M -> $OUT"
-"$REPO/kernel/mkext2.sh" "$TREE" "$OUT" "${SZ}M" | sed 's/^/   /'
+"$REPO/kernel/mkext2.sh" "$TREE" "$OUT" "${SZ}M" > "$OUT.log" 2>&1 || { sed 's/^/   /' "$OUT.log"; echo "REFUSAL: the ext2 image did not build"; exit 1; }
+sed 's/^/   /' "$OUT.log"
 
 if [ "$LOCAL_ONLY" = "--local-only" ]; then
     echo "== --local-only: not building an AMI, the data image is ready: $OUT"
