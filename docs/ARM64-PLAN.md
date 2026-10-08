@@ -2400,7 +2400,12 @@ order of work:
    deferred path is never taken there. Then: a `kernel stack overflow` in `metrics::dump` on window
    slot 0 when all the tasks are gone (the dump's 2 KB frame on a stack ~59 KB deep — the caller's
    path), repeating every ~6 s. Next: make the local run take the deferred path (an AP left idle on a
-   dead space while the parent migrates onto it), then the frame that goes to zero.
+   dead space while the parent migrates onto it), then the frame that goes to zero. Leads read so far:
+   `rip` 0 and 1 are SIG_DFL and SIG_IGN, and the startup child resets its SIGCHLD disposition — but
+   both delivery paths (`deliver_signals`, `deliver_exception_signal`) skip a handler of 0/1, so the
+   zero is in the postmaster's saved context or stack, not a disposition; the per-core deferred rsp
+   substitution (`percpu::sig_newrsp`, `SIGRSP[t]`, carried by `ap_loop` and the switch) is the
+   next to read; the pickup loop's own CR3 handling compares against the loaded CR3 and is right.
 1. **The databases under strict on the EC2 scoreboard — done 2026-10-08 except x86 PostgreSQL
    (item 0).** One run per stand (`stand_lock`), B = A plus `talaria.dmap=1` (`APPEND=1`), the
    consoles kept, mk-ami's silent x86 death fixed. Under strict, against AL2023 in the same hour:
