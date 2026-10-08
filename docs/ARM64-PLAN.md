@@ -2385,8 +2385,8 @@ step was gated on both regressions and booted on a `c7g.xlarge` and a `c6i.xlarg
 `arm64-port` stays a branch until the owner says otherwise. What is left, the order being the
 order of work:
 
-0. **PostgreSQL's processes are corrupted on a `c6i.xlarge` (found 2026-10-08, open, the first
-   item).** The x86 board's PostgreSQL stand never got its role; a probe (`talaria-deploy.sh --data`
+0. **PostgreSQL's processes are corrupted on a `c6i.xlarge` (found 2026-10-08, CLOSED 2026-10-09:
+   a stale root reloaded by the switch stub — see the end of this item).** The x86 board's PostgreSQL stand never got its role; a probe (`talaria-deploy.sh --data`
    the board's image, `--keep-disk`, the kernel's log read off the volume with `read-disk-trace.sh`,
    because EC2's 64 KB console window is overwritten by the end-of-run dump loop) shows the shape every
    time: the startup process exits on core 1, core 1 idles and "has left the tables of the finished
@@ -2432,7 +2432,7 @@ order of work:
    just-freed bounce frame (a stale translation of the destination through the map? a copy from
    the wrong source?), and the triple-fault variant (a QEMU `-d int` trace of the last exceptions).
 
-   **Closed locally (2026-10-08, the EC2 confirmation is the next step).** The `-d int` trace caught
+   **Closed (2026-10-08 locally, 2026-10-09 on a `c6i.xlarge`).** The `-d int` trace caught
    the triple fault: a kernel `#PF` in `netsys::yield_window` on a root whose kernel half was gone —
    a freed, reused top-level table still loaded. A ring of the last 64 `unmap_proc` calls (with the
    task, the core, the loaded root and a fork marker) then named the whole thing on a staged
@@ -2457,9 +2457,17 @@ order of work:
    `cowstale` failed in the first run of every series → 12 of 12; PostgreSQL ~1 boot in 5 → 30 of
    30 ready with the deferred path taken 7 times. Gates `cowstale`/`cowstalet` on both machines.
    The instruments stay, opt-in or one entry per call: the `unmap_proc` ring and the walk of the
-   faulting stack's tables in the ring-3 fault report, the roots `free_address_space` freed.
-1. **The databases under strict on the EC2 scoreboard — done 2026-10-08 except x86 PostgreSQL
-   (item 0).** One run per stand (`stand_lock`), B = A plus `talaria.dmap=1` (`APPEND=1`), the
+   faulting stack's tables in the ring-3 fault report, the roots `free_address_space` freed. On EC2
+   (`ec2ab-postgresql-20261008-223129`, `6962a3b`): the server's console shows THE sequence that
+   failed every probe before — "core 1 ... has left the tables of the finished process", "the
+   freeing of the AS ... is deferred" — followed by "ready to accept connections", no fault, and
+   phase A ran the whole ladder (item 1 has the numbers). Phase B was cut by the session's
+   two-hour limit for a background job, after its server had booted with `dmap=1` and served `pk`;
+   the stand was torn down by hand.
+1. **The databases under strict on the EC2 scoreboard — done 2026-10-08, x86 PostgreSQL
+   2026-10-09 (after item 0).** x86 PostgreSQL under strict against AL2023 in the same hour, every
+   point Talaria's (p50/p99/p99.9 us): `pk` at 2309 req/s 78/92/98 vs 96/119/154, at 20781 75/96/163
+   vs 96/939/2875; `select1` at 3779 53/68/73 vs 58/76/88, at 34011 52/72/77 vs 52/1527/5788. One run per stand (`stand_lock`), B = A plus `talaria.dmap=1` (`APPEND=1`), the
    consoles kept, mk-ami's silent x86 death fixed. Under strict, against AL2023 in the same hour:
    arm64 PostgreSQL `select1` p99 75-100 us vs 78-9249, `pk` p50 96-101 vs 114-133; arm64 MariaDB
    p99.9 70-93 vs 131-10068; x86 MariaDB `pk` p50 55-60 vs 69-114, p99.9 76-88 vs 150-10469;
