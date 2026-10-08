@@ -2406,6 +2406,31 @@ order of work:
    zero is in the postmaster's saved context or stack, not a disposition; the per-core deferred rsp
    substitution (`percpu::sig_newrsp`, `SIGRSP[t]`, carried by `ap_loop` and the switch) is the
    next to read; the pickup loop's own CR3 handling compares against the loaded CR3 and is right.
+
+   **Found since (2026-10-08).** Reproduced LOCALLY: PostgreSQL under TCG (`-accel tcg`, two cores,
+   q35 or microvm with virtio-mmio), about 1 boot in 5-6 — the same sequence (the startup child exits,
+   the deferred free, the postmaster on core 1 at `rip=0`), or the machine dying silently there (a
+   triple fault: QEMU exits under `-no-reboot`). **It is older than the migration and than the
+   arm64 port**: `main` (`3a29de1`, before the port) fails the same way, 2 of 10 in the microvm
+   shape. Instruments built for it (opt-in): the ring-3 fault report prints the faulting stack page's
+   frame, whether the ledger counts it handed out, its refcount; `talaria.freetrace=1` keeps the last
+   8192 frees with caller and task and the report lists every free of that frame (it also puts
+   dropped DMA bounces in a canary quarantine); `talaria.watchframe=<phys>` prints every hand-out,
+   free and refcount change of one frame. What they showed: the postmaster's stack frame is
+   legitimately its own — its history is "a private page of another backend, munmapped
+   (`unmap_proc`, refcount released to 0), twice a disk-read bounce (`fs::Bounce`), then the
+   postmaster's COW copy of its stack page" — the same in a clean run and in a crashing one; no
+   double hand-out, no double free; the fork's `PROT_NONE` 2 MB branch is not hit; no device writes
+   into a bounce after its I/O completes (the canary). Yet the page's contents read zero where a
+   return address was. Every instrument that slows the frames' reuse (the watch's prints, the
+   quarantine) makes the crash disappear (0 of 25 each; at the base rate that is a ~1 % chance).
+   Read and found right on the way: the COW fault (an atomic choice of copy or in place), the
+   frees in `relazy_pages`/`unmap_proc`/`free_pt`/`free_pd` (all through `rc_release`), the deferred
+   space free's guard, the HAL (`share` is a table walk, `unshare` copies nothing), the CR3 switch
+   (a real `mov cr3`, no PCID, no global user leaves). A real bug found on the way: `rt_sigsuspend`
+   ignored its mask (75bd3be, gate `chldrace`). Next: the COW copy's source and destination around a
+   just-freed bounce frame (a stale translation of the destination through the map? a copy from
+   the wrong source?), and the triple-fault variant (a QEMU `-d int` trace of the last exceptions).
 1. **The databases under strict on the EC2 scoreboard — done 2026-10-08 except x86 PostgreSQL
    (item 0).** One run per stand (`stand_lock`), B = A plus `talaria.dmap=1` (`APPEND=1`), the
    consoles kept, mk-ami's silent x86 death fixed. Under strict, against AL2023 in the same hour:

@@ -979,7 +979,9 @@ fn rc_cell(phys: u64) -> Option<&'static AtomicU8> {
     if i < len { Some(unsafe { AtomicU8::from_ptr(t.add(i)) }) } else { None }
 }
 /// Set a frame's refcount (the number of COW references).
+#[track_caller]
 pub fn rc_set(phys: u64, v: u8) {
+    watch(phys, "rc_set", v as u64);
     if let Some(c) = rc_cell(phys) { c.store(v, Ordering::Release); }
 }
 /// Get the refcount. OUTSIDE the table it is "shared" (2) rather than "free" (0): see the header.
@@ -990,7 +992,9 @@ pub fn rc_get(phys: u64) -> u8 {
     }
 }
 /// +1 reference (for a fork). If it was 0 -> it becomes 2 (the parent+the child).
+#[track_caller]
 pub fn rc_share(phys: u64) {
+    watch(phys, "rc_share, was", rc_get(phys) as u64);
     if let Some(c) = rc_cell(phys) {
         let _ = c.try_update(Ordering::AcqRel, Ordering::Relaxed, |v| Some(if v == 0 { 2 } else { v.saturating_add(1) }));
     }
@@ -1001,7 +1005,9 @@ pub fn rc_share(phys: u64) {
 /// left" (a leak) or both think "I am the last" (a double free). The Release of the
 /// decrement and the Acquire of the last one order an owner's reads of the frame before
 /// another's reuse of it. Outside the table: never the last (the frame leaks, see the header).
+#[track_caller]
 pub fn rc_release(phys: u64) -> bool {
+    watch(phys, "rc_release, was", rc_get(phys) as u64);
     let Some(c) = rc_cell(phys) else { RC_OUTSIDE.fetch_add(1, core::sync::atomic::Ordering::Relaxed); return false; };
     match c.try_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(1))) {
         Ok(v) | Err(v) => v <= 1,
@@ -1096,6 +1102,8 @@ pub fn fc_handed(phys: u64) -> Option<bool> { fc_idx(phys).map(|i| FC_BITS[i / 6
 /// `n` frames from `addr` are handed out.
 #[track_caller]
 fn fc_alloc(addr: u64, n: u64) {
+    let w = WATCH.load(Ordering::Relaxed);
+    if w != 0 && w >= addr && w < addr + n * FRAME { watch(w, "handed out in a block of", n); }
     for k in 0..n {
         let Some(i) = fc_idx(addr + k * FRAME) else { return };
         let bit = 1u64 << (i % 64);
@@ -1109,9 +1117,65 @@ fn fc_alloc(addr: u64, n: u64) {
         }
     }
 }
+// ── THE FREE TRACE (`talaria.freetrace=1`, ARM64-PLAN §11 item 0): the last frees, with who freed ──
+// A frame freed while a mapping still points at it and handed out ONCE again passes the ledger
+// (no double alloc, no double free) — the process just reads someone else's page. With the trace
+// on, a ring-3 fault asks whether the faulting stack's frame was freed lately, and by whom.
+pub static FREETRACE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// `talaria.watchframe=<phys>`: every hand-out, free and refcount change of that ONE frame is
+/// printed with its caller and the task (ARM64-PLAN §11 item 0). 0 — off.
+pub static WATCH: AtomicU64 = AtomicU64::new(0);
+#[track_caller]
+#[inline]
+fn watch(phys: u64, what: &str, v: u64) {
+    let w = WATCH.load(Ordering::Relaxed);
+    if w != 0 && phys & !(FRAME - 1) == w {
+        let l = core::panic::Location::caller();
+        crate::println!("watch {:#x}: {} {} by {}:{} (t{} on c{})", w, what, v, l.file(), l.line(),
+            crate::sched::current_id(), crate::percpu::cpu_id());
+    }
+}
+const FT_N: usize = 8192;
+static FT_ADDR: [AtomicU64; FT_N] = [const { AtomicU64::new(0) }; FT_N];
+static FT_LOC: [core::sync::atomic::AtomicUsize; FT_N] = [const { core::sync::atomic::AtomicUsize::new(0) }; FT_N];
+static FT_SEQ: AtomicU64 = AtomicU64::new(0);
+static FT_TASK: [AtomicU64; FT_N] = [const { AtomicU64::new(0) }; FT_N];
+/// Every free of `frame` still in the ring, the latest first: (how many frees ago, file, line);
+/// up to 4.
+pub fn freetrace_find(frame: u64) -> ([(u64, &'static str, u32, u64); 4], usize) {
+    let mut out = [(0u64, "?", 0u32, 0u64); 4];
+    let mut n = 0;
+    let now = FT_SEQ.load(Ordering::Acquire);
+    for back in 1..=now.min(FT_N as u64) {
+        let i = ((now - back) as usize) % FT_N;
+        if FT_ADDR[i].load(Ordering::Relaxed) == frame {
+            let l = FT_LOC[i].load(Ordering::Relaxed);
+            let task = FT_TASK[i].load(Ordering::Relaxed);
+            out[n] = if l == 0 { (back, "?", 0, task) } else {
+                // SAFETY: the slot holds a `&'static Location` stored by `fc_free`.
+                let loc = unsafe { &*vptr::<core::panic::Location<'static>>(l as u64) };
+                (back, loc.file(), loc.line(), task)
+            };
+            n += 1;
+            if n == 4 { break; }
+        }
+    }
+    (out, n)
+}
 /// `n` frames from `addr` come back.
 #[track_caller]
 fn fc_free(addr: u64, n: u64) {
+    let w = WATCH.load(Ordering::Relaxed);
+    if w != 0 && w >= addr && w < addr + n * FRAME { watch(w, "freed in a block of", n); }
+    if FREETRACE.load(Ordering::Relaxed) {
+        let loc = vaddr(core::panic::Location::caller() as *const core::panic::Location<'static>) as usize;
+        for k in 0..n.min(512) {
+            let i = (FT_SEQ.fetch_add(1, Ordering::AcqRel) as usize) % FT_N;
+            FT_ADDR[i].store(addr + k * FRAME, Ordering::Relaxed);
+            FT_LOC[i].store(loc, Ordering::Relaxed);
+            FT_TASK[i].store(crate::sched::current_id() as u64, Ordering::Relaxed);
+        }
+    }
     for k in 0..n {
         let Some(i) = fc_idx(addr + k * FRAME) else { return };
         let bit = 1u64 << (i % 64);

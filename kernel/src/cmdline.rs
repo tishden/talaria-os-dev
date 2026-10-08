@@ -288,6 +288,7 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.filedtoken", Kind::Text, "the filed token"),
     once("talaria.forkconns", Kind::Num, "forksrv: how many connections to serve before exiting"),
     once("talaria.forkreap", Kind::Flag, "forksrv: reap the children as a postmaster does"),
+    once("talaria.freetrace", Kind::Word(&["0", "1"]), "1 — remember the last 8192 frame frees with their callers; a ring-3 fault says whether its stack's frame was freed and by whom (ARM64-PLAN §11 item 0)"),
     once("talaria.fscache", Kind::Num, "the FS block cache, MB (0 — by memory)"),
     once("talaria.fscnt", Kind::Num, "the dirty set by a counter (1, the default) or by a walk over the whole cache (0 — as before)"),
     once("talaria.fsdevlock", Kind::Flag, "the FS lock while waiting for the disk (0 — a rollback)"),
@@ -394,6 +395,7 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.wakeidle", Kind::Flag, "a core with a network waiter is free for a waking thread"),
     once("talaria.wakepreempt", Kind::Num, "the preemption threshold on wakeup, ns"),
     once("talaria.wakepull", Kind::Flag, "a network waiter takes a ready thread from a busy core"),
+    once("talaria.watchframe", Kind::Num, "a physical frame (hex) whose every hand-out, free and refcount change is printed with its caller and task (ARM64-PLAN §11 item 0)"),
     once("talaria.wrwin", Kind::Flag, "the preemption window between portions of a long write (0 — as before)"),
     once("talaria.x2apic", Kind::Flag, "x2APIC (0 — off)"),
 ];

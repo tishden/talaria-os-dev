@@ -318,6 +318,27 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
                 Some(v) if v != fsb => " <-- THE TLS IS BROKEN: the self-pointer did not match fs",
                 _ => "",
             });
+        // THE STACK PAGE'S FRAME: a `ret` into 0 with a sane rsp says the page reads as zeros —
+        // is its frame still this process's (the ledger says handed out, the refcount), or was
+        // it freed from under the mapping (ARM64-PLAN §11 item 0)?
+        if cr3 != 0 && f.rsp < 0x0000_8000_0000_0000 {
+            match crate::paging::phys_of_in(cr3, f.rsp) {
+                Some(ph) => crate::println!("[fault] the stack page {:#x} -> the frame {:#x}: handed out {:?}, refcount {}, the ledger's double alloc/free {}/{}",
+                    f.rsp & !0xFFF, ph & !0xFFF, crate::mem::fc_handed(ph & !0xFFF), crate::mem::rc_get(ph & !0xFFF),
+                    crate::mem::FC_DOUBLE_ALLOC.load(core::sync::atomic::Ordering::Relaxed),
+                    crate::mem::FC_DOUBLE_FREE.load(core::sync::atomic::Ordering::Relaxed)),
+                None => crate::println!("[fault] the stack page {:#x} is NOT MAPPED in the process", f.rsp & !0xFFF),
+            }
+            if crate::mem::FREETRACE.load(core::sync::atomic::Ordering::Relaxed) {
+                if let Some(ph) = crate::paging::phys_of_in(cr3, f.rsp) {
+                    let (hits, n) = crate::mem::freetrace_find(ph & !0xFFF);
+                    if n == 0 { crate::println!("[fault] that frame is not among the last frees"); }
+                    for &(back, file, line, task) in &hits[..n] {
+                        crate::println!("[fault] THAT FRAME WAS FREED {} frees ago, by {}:{} (task t{}, this is t{})", back, file, line, task, crate::sched::current_id());
+                    }
+                }
+            }
+        }
         let sig = match f.vec { 6 => 4, 0 | 16 | 19 => 8, 17 => 7, _ => 11 };
         // The crashed thread's stack goes INTO THE LOG, always. A core dump requires an FS and the knob
         // switched on, while the stack is needed on a machine where there is neither.

@@ -66,7 +66,37 @@ impl Bounce {
         unsafe { core::slice::from_raw_parts_mut(crate::mem::kptr::<u8>(self.pa), self.len) }
     }
 }
-impl Drop for Bounce { fn drop(&mut self) { crate::mem::free_contig(self.pa, self.pages); } }
+impl Drop for Bounce { fn drop(&mut self) { bounce_quarantine(self.pa, self.pages, self.len); } }
+// THE BOUNCE QUARANTINE (ARM64-PLAN §11 item 0): a dropped bounce is filled with a canary and
+// kept for the next 16 drops before it is freed; a canary changed by then is a device write AFTER
+// the I/O was declared complete — said out loud, with the size. With `talaria.freetrace=1` only.
+const BQ_N: usize = 16;
+const BQ_CANARY: u64 = 0xB0B0_CA7A_B0B0_CA7A;
+static mut BQ: [(u64, u64, usize); BQ_N] = [(0, 0, 0); BQ_N];
+static BQ_I: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static BQ_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+fn bounce_quarantine(pa: u64, pages: u64, len: usize) {
+    if !crate::mem::FREETRACE.load(core::sync::atomic::Ordering::Relaxed) { crate::mem::free_contig(pa, pages); return; }
+    let words = (pages * 4096 / 8) as usize;
+    // SAFETY: the bounce's own frames, nobody else's until freed below.
+    unsafe { for k in 0..words { core::ptr::write_volatile(crate::mem::kptr::<u64>(pa + k as u64 * 8), BQ_CANARY); } }
+    while BQ_LOCK.compare_exchange(false, true, core::sync::atomic::Ordering::Acquire, core::sync::atomic::Ordering::Relaxed).is_err() { core::hint::spin_loop(); }
+    let i = BQ_I.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % BQ_N;
+    // SAFETY: the slot table under BQ_LOCK.
+    let old = unsafe { core::mem::replace(&mut *core::ptr::addr_of_mut!(BQ[i]), (pa, pages, len)) };
+    BQ_LOCK.store(false, core::sync::atomic::Ordering::Release);
+    let (opa, opages, olen) = old;
+    if opa == 0 { return; }
+    let owords = (opages * 4096 / 8) as usize;
+    let mut bad = 0usize; let mut first = usize::MAX;
+    // SAFETY: the quarantined frames are still ours.
+    unsafe { for k in 0..owords { if core::ptr::read_volatile(crate::mem::kptr::<u64>(opa + k as u64 * 8)) != BQ_CANARY { bad += 1; if first == usize::MAX { first = k; } } } }
+    if bad != 0 {
+        crate::println!("fs: A DEVICE WROTE INTO A FREED BOUNCE: {:#x} ({} pages, the I/O was {} bytes) — {} words changed, the first at +{:#x}",
+            opa, opages, olen, bad, first * 8);
+    }
+    crate::mem::free_contig(opa, opages);
+}
 
 enum Blk { Virtio(VBlk), Nvme(crate::nvme::Nvme) }
 impl Blk {
