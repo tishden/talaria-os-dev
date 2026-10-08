@@ -2490,7 +2490,17 @@ order of work:
    `c6i.xlarge`. Exit: judgeable points on both sides, B within A's spread or explained.
 2. **Phase 9's performance, as the numbers rank it** (§10.17, `docs/MEASUREMENTS.md` §10.13-10.14):
    (a) the Talaria generator's client path — the whole redis median/ceiling gap on the board is the
-   generator's (under the Linux generator the Talaria server's ceiling is 14-17 % above Linux's);
+   generator's (under the Linux generator the Talaria server's ceiling is 14-17 % above Linux's); a
+   LOCAL try (2026-10-09, one Talaria redis server under KVM, the closed-loop ping ceiling at 16
+   connections; the script is kept as `bench/suite/genpath.sh`): tlgen in Talaria spends 95 % of its
+   time inside `recvfrom` (64 %) and `sendto` (32 %), 3.6 and 4.0 us per call (`sysprof`), the stack's
+   lock held ~1.4 us per take, 3.3 takes per request, ~7.5 us of the 12.8 us request outside the lock
+   — the next instrument is a per-stage split of that outside part. But the local ORDER is not EC2's:
+   tlgen in the container (no VM) 123 k/s, in Talaria 78-85 k/s with `vhost=off` and 53 k/s with
+   `vhost=on`, in a Linux VM 21 k/s (p50 425 us) — the local virtual NIC (virtio kicks, vhost,
+   interrupts) reorders the contestants, where on EC2 the Linux generator was the faster. The client
+   path is measured on EC2 only (the console's `stat` needs `talaria.console=poll`, which EC2's
+   read-only console cannot drive — a periodic `stat` knob or the job's own report has to carry it);
    (b) the wfe tier's mdpipe tail at `smp=2` (oversubscription; only `wakepreempt=0` helps) — a per-tick
    instrument (who is on the core when a tick is slow); (c) redis's rare 0.3-0.9 ms outliers at low
    rates; (d) PostgreSQL `pk`'s ceiling, measured under the Linux generator too; (e) the lazy FP save
