@@ -2385,7 +2385,34 @@ step was gated on both regressions and booted on a `c7g.xlarge` and a `c6i.xlarg
 `arm64-port` stays a branch until the owner says otherwise. What is left, the order being the
 order of work:
 
-1. **The databases under strict on the EC2 scoreboard.** The A/B of 2026-10-07 (`run-remote-ab.sh
+0. **PostgreSQL's processes are corrupted on a `c6i.xlarge` (found 2026-10-08, open, the first
+   item).** The x86 board's PostgreSQL stand never got its role; a probe (`talaria-deploy.sh --data`
+   the board's image, `--keep-disk`, the kernel's log read off the volume with `read-disk-trace.sh`,
+   because EC2's 64 KB console window is overwritten by the end-of-run dump loop) shows the shape every
+   time: the startup process exits on core 1, core 1 idles and "has left the tables of the finished
+   process onto the kernel's CR3", the space's freeing "is deferred — its tables are held by an AP",
+   and at once the postmaster faults ON CORE 1 in ring 3 at `rip=0x0`/`0x1` (an instruction fetch; a
+   plausible `rsp`, the right `fs`) — its saved user context or its stack returned zero. Every probe
+   whose log has that "left the tables" right after the startup's exit failed; the ones where it
+   came later did not. NOT this migration's: the kernel before stage 6 (`9220575`) fails the same way
+   (1 of 3 strict, 3 of 3 in its non-strict default); today's kernel 5 of 8 strict, 3 of 3 with
+   `dmap=1`. Not reproduced locally in 11 runs (q35, 8 GiB, 2 and 4 cores, NVMe, virtio-net): the
+   deferred path is never taken there. Then: a `kernel stack overflow` in `metrics::dump` on window
+   slot 0 when all the tasks are gone (the dump's 2 KB frame on a stack ~59 KB deep — the caller's
+   path), repeating every ~6 s. Next: make the local run take the deferred path (an AP left idle on a
+   dead space while the parent migrates onto it), then the frame that goes to zero.
+1. **The databases under strict on the EC2 scoreboard — done 2026-10-08 except x86 PostgreSQL
+   (item 0).** One run per stand (`stand_lock`), B = A plus `talaria.dmap=1` (`APPEND=1`), the
+   consoles kept, mk-ami's silent x86 death fixed. Under strict, against AL2023 in the same hour:
+   arm64 PostgreSQL `select1` p99 75-100 us vs 78-9249, `pk` p50 96-101 vs 114-133; arm64 MariaDB
+   p99.9 70-93 vs 131-10068; x86 MariaDB `pk` p50 55-60 vs 69-114, p99.9 76-88 vs 150-10469;
+   mongodb on both mostly Talaria's below the ceiling. Strict against `dmap=1` (B after a stop/start,
+   which moves the instance to another host): arm64 PostgreSQL and MongoDB p50/p99 within ±11 %
+   (one ceiling point apart, with B's generator then still missing `netidle=1`), x86 MariaDB B 4-25 %
+   SLOWER on every point (the host move's size, not the tables'), x86 MongoDB median B/A 0.96. Strict
+   costs nothing measurable. arm64 MariaDB's B gave no point (its server stopped answering under
+   `dmap=1` — no console was kept then; to repeat). What the item said before:
+   **The databases under strict on the EC2 scoreboard.** The A/B of 2026-10-07 (`run-remote-ab.sh
    <wl> "talaria.dmap=strict"`) gave no judgeable point, and the stand, not the kernel, was why:
    an AMI built before the worktree had `services/*/build` (fixed: `mk-ami.sh` refuses a tree that
    did not build); a `mongodb` stand whose Talaria server ran MariaDB and whose generator refused
