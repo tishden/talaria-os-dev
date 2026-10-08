@@ -72,7 +72,7 @@ pub fn init() {
     // on arm64 that gigabyte is not the first one at all (RAM starts at 1 GiB on QEMU `virt`).
     let sup_lo = crate::mem::kernel_lo() >> 21;
     let sup_hi = (crate::mem::kernel_hi() + 0x1F_FFFF) >> 21;
-    let kgb = user_gb();
+    let kgb = ident_gb();
     // SAFETY: P1 + P4 + P5 — the three frames have just come from the allocator (identity-mapped,
     // nobody else holds them), they are filled COMPLETELY before the CR3 write, and the
     // CR3 write is what publishes them.
@@ -2775,7 +2775,7 @@ pub fn new_process_space() -> u64 {
         let k = KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
         let base_pml4 = if k != 0 { kptr::<Pte>(k) } else { cr3_root() };
         let kern_pdpt = kptr::<Pte>(pte_r(base_pml4) & ADDR_MASK);
-        let kgb = user_gb();
+        let kgb = ident_gb();
         let kern_pd0 = kptr::<Pte>(pte_r(kern_pdpt.add(kgb)) & ADDR_MASK); // PDPT[kgb] -> the kernel's GB PD
         let pml4 = crate::mem::alloc_any_frame().expect("proc: pml4");
         let pdpt = crate::mem::alloc_any_frame().expect("proc: pdpt");
@@ -2928,10 +2928,11 @@ pub unsafe fn switch(pml4_phys: u64) {
     crate::sched::note_real_cr3();
 }
 
-/// The identity gigabyte mapped by 2M leaves — the one with the kernel's image, where the
-/// user identity region lives (`init`) and which a process's space gets a private copy of
-/// (`new_process_space`). GB0 on x86, the RAM's first gigabyte on arm64.
-fn user_gb() -> usize { (crate::mem::kernel_lo() >> 30) as usize }
+/// The identity gigabyte mapped by 2M leaves: the RAM's lowest gigabyte with the kernel — the
+/// identity modes' user region (`init`), and the gigabyte a process's space gets a private PD
+/// for (`new_process_space`). GB0 on x86, the RAM's first gigabyte on arm64. (It was `user_gb`
+/// while processes lived in it; under strict they do not — ARM64-PLAN §11 item 4.)
+fn ident_gb() -> usize { (crate::mem::kernel_lo() >> 30) as usize }
 
 /// The current CR3 (the active PML4's physical address + the flags).
 pub fn kernel_cr3() -> u64 { KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed) }
@@ -3047,14 +3048,14 @@ pub fn fork_cow_space(src: u64) -> u64 {
                             // PostgreSQL keeps its shared buffers that way; the rest of the window in
                             // a process's AS is closed (see `new_process_space`).
                             // The window is the gigabyte with the private PD — GB0 on x86, the
-                            // RAM's first gigabyte on arm64 (`user_gb`); "< 1 GB" here left an
+                            // RAM's first gigabyte on arm64 (`ident_gb`); "< 1 GB" here left an
                             // arm64 child without its parent's MAP_SHARED page (a rights fault on
                             // the kernel's own 2M leaf at the child's first write).
                             // And since stage 4a of the direct map a MAP_SHARED is a non-private
                             // user leaf at an address of its own: any such leaf below USER_TOP is
                             // the same shared frame for the child (the vDSO's two pages are too).
                             if e1 & PTE_US != 0 && vaddr < USER_TOP
-                                && ((vaddr >> 30) as usize == user_gb() && e1 & ADDR_MASK == vaddr || (vaddr >> 30) as usize != user_gb()) {
+                                && ((vaddr >> 30) as usize == ident_gb() && e1 & ADDR_MASK == vaddr || (vaddr >> 30) as usize != ident_gb()) {
                                 pte_w(pte_ptr_in(dst, vaddr), e1);
                             }
                             continue;

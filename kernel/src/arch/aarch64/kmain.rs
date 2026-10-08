@@ -433,7 +433,7 @@ pub fn start_secondary(i: usize, mpidr: u64) -> i64 {
     super::icache::clean_inval_poc(ap_stack_top(i) - 16384, 16384);
     // The context is the secondary's sp with its MMU off: the stack's PHYSICAL address
     // (stage 7: the image may be linked above where it is loaded).
-    psci::cpu_on(mpidr, crate::mem::kpa_of(ap_start as *const ()), crate::mem::kpa(ap_stack_top(i)))
+    psci::cpu_on(mpidr, crate::mem::kpa_of(ap_start as *const ()), crate::mem::Pa::of_kva(ap_stack_top(i)).get())
 }
 /// The top of the boot stack of the secondary in slot `i` — also the stack its pickup loop
 /// returns to when a task exits on it (`sched::set_ap_stack`).

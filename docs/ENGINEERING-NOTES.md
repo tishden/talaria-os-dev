@@ -505,7 +505,7 @@ wider, and each is real under KVM.
     `SA_RESTART`'s syscall list, matched against the process's raw number, was
     the same thing with numbers (arm64's 61 is `getdents64`). An `mxcsr` read at
     offset 24 of an FPU image was the same thing with a layout. The tell is a
-    literal where a function of the machine belongs (`user_gb()`,
+    literal where a function of the machine belongs (`user_gb()`, now `ident_gb()`,
     `abi::to_internal`, `arch::switch::fpu_image_check`).
 19. **"A structure written in the other machine's layout overflows the caller."**
     `struct stat` is 144 bytes on x86-64 and 128 on arm64: the kernel's write did

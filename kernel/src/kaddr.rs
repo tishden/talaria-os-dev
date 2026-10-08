@@ -148,6 +148,40 @@ pub fn kpa(va: u64) -> u64 {
     else if KIMG_OFF != 0 && va >= KIMG_VBASE { va - KIMG_OFF }
     else { va }
 }
+/// A PHYSICAL address handed to a DEVICE (ARM64-PLAN §10.16 stage 1's last item, §11 item 4). A
+/// device takes whatever number it is given and writes there by DMA; the kernel's own addresses
+/// (the direct map, the stacks' window, the image's alias) are numbers too, and before this type
+/// nothing but care kept one out of a descriptor. Its makers say where the number comes from: a
+/// frame the allocator handed out (`frame`), or a kernel pointer translated (`of`, `of_kva`).
+/// None of them accepts a kernel virtual address — every one of those is at or above 2^47 on both
+/// machines (slot 256 and up), every RAM address below — and the refusal stops the kernel rather
+/// than let a device write over it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(transparent)]
+pub struct Pa(u64);
+#[cold]
+#[inline(never)]
+fn pa_refused(v: u64) -> ! {
+    panic!("a kernel virtual address {:#x} was about to be handed to a device as a physical one", v)
+}
+impl Pa {
+    /// A frame the allocator handed out (its physical address as `mem` returns it).
+    #[inline(always)]
+    pub fn frame(phys: u64) -> Pa { if phys >= 1 << 47 { pa_refused(phys) } Pa(phys) }
+    /// What kernel pointer `p` (to RAM) points at.
+    #[inline(always)]
+    pub fn of<T: ?Sized>(p: *const T) -> Pa { Pa::of_kva(vaddr(p)) }
+    /// What kernel virtual address `va` of RAM is (the map's or the image's; anything else is
+    /// refused — a stack in the stacks' window has no single physical address to hand out).
+    #[inline(always)]
+    pub fn of_kva(va: u64) -> Pa { Pa::frame(kpa(va)) }
+    /// The number the device is given.
+    #[inline(always)]
+    pub const fn get(self) -> u64 { self.0 }
+    /// `n` bytes further.
+    #[inline(always)]
+    pub const fn add(self, n: u64) -> Pa { Pa(self.0 + n) }
+}
 /// The physical address of what a kernel pointer to RAM points at.
 #[inline(always)] pub fn kpa_of<T: ?Sized>(p: *const T) -> u64 { kpa(vaddr(p)) }
 /// A pointer from an integer that already is a kernel virtual address.

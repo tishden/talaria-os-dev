@@ -199,7 +199,7 @@ The point where a new mode is added is `selftest/` or `runmode.rs` (§10.2).
   one-time enables are `arch::mmu` too (`root`, `set_root`, `flush_all`, `flush_page`,
   `has_1g`, `init_hw`); the IPI shootdown and the TLB mailbox are x86-only (`cfg`), an
   arm64 `flush_page` is broadcast by the hardware (`TLBI ...IS`).
-- `init()` builds a PML4+a PDPT (a 1G identity); the kernel's gigabyte (`user_gb()`: GB0 on
+- `init()` builds a PML4+a PDPT (a 1G identity); the kernel's gigabyte (`ident_gb()`: GB0 on
   x86, the RAM's first gigabyte on arm64) → a PD with 512×2M (for a per-page protection),
   the other three by what `arch::mmu::gb_kind` says they are (RAM on 1G, or a device hole).
  the privileged instructions, one wrapper each, with the `options(...)` the inline blocks used to carry: interrupt masking and the one-instruction `sti;hlt` / `sti;mwait` windows (W4 of `sync.rs`), MSRs, CPUID, CR0–CR4, `invlpg`, `wbinvd`, XCR0, port I/O, `rdtsc`, MONITOR, the triple-fault reboot | `irq_enable`, `irq_disable`, `irq_flags`, `halt_forever`, `rdmsr`, `wrmsr`, `cpuid`, `read_cr3`, `write_cr3`, `invlpg`, `inb`, `outb`, `rdtsc` |
@@ -334,7 +334,7 @@ the four bytes of alignment in the `prpsinfo` note).
   one-time enables are `arch::mmu` too (`root`, `set_root`, `flush_all`, `flush_page`,
   `has_1g`, `init_hw`); the IPI shootdown and the TLB mailbox are x86-only (`cfg`), an
   arm64 `flush_page` is broadcast by the hardware (`TLBI ...IS`).
-- `init()` builds a PML4+a PDPT (a 1G identity); the kernel's gigabyte (`user_gb()`: GB0 on
+- `init()` builds a PML4+a PDPT (a 1G identity); the kernel's gigabyte (`ident_gb()`: GB0 on
   x86, the RAM's first gigabyte on arm64) → a PD with 512×2M (for a per-page protection),
   the other three by what `arch::mmu::gb_kind` says they are (RAM on 1G, or a device hole).
 - `pte_ptr(vaddr)` is the walker that splits the large leaves along the way (`split_1g`,

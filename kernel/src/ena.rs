@@ -436,7 +436,7 @@ impl Ena {
     pub fn receive_begin(&mut self, slot: usize, addr: u64) -> u16 {
         let idx = (self.rx_tail & (RX_DEPTH - 1)) as u64;
         let d = self.rx_sq + idx * RX_DESC_SZ as u64;
-        let pa = crate::mem::kpa(addr); // the buffer is the kernel's pointer; the device takes its physical address
+        let pa = crate::mem::Pa::of_kva(addr).get(); // the buffer is the kernel's pointer; the device takes its physical address
         unsafe {
             // length(u16) | rsv(u8) | ctrl(u8: phase|first|last|comp_req) | req_id(u16) | rsv(u16)
             // Bit 5 in the header's ctrl marks "MBO", but ena_com does NOT set it —
@@ -531,7 +531,7 @@ impl Ena {
         let rem = len - hdr;
         let mut e = [0u8; 256];
         let req_id = slot as u32;
-        let buf_addr = if rem > 0 { crate::mem::kpa(addr) + hdr as u64 } else { 0 }; // the device's address of the frame's rest
+        let buf_addr = if rem > 0 { crate::mem::Pa::of_kva(addr).add(hdr as u64).get() } else { 0 }; // the device's address of the frame's rest
         // Slot 0 is the meta descriptor if the device does not cache the meta (accel_mode).
         // Then FIRST moves onto it, while the data descriptor goes as slot 1 —
         // exactly as in ena_com_prepare_tx (`if (!have_meta) desc->len_ctrl |= FIRST`).
@@ -588,7 +588,7 @@ impl Ena {
         self.tx_post_tsc[slot] = crate::tsc::rdtsc();
         let d = self.tx_sq + ((self.tx_tail & (Q_DEPTH - 1)) as u64) * TX_DESC_SZ as u64;
         let req_id = slot as u32;
-        let pa = crate::mem::kpa(addr); // the buffer is the kernel's pointer; the device takes its physical address
+        let pa = crate::mem::Pa::of_kva(addr).get(); // the buffer is the kernel's pointer; the device takes its physical address
         unsafe {
             // len_ctrl: length | req_id_hi<<16 | phase<<24 | first<<26 | last<<27 | comp_req<<28
             core::ptr::write_volatile(crate::mem::kptr::<u32>(d),

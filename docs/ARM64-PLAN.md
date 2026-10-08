@@ -2499,14 +2499,25 @@ order of work:
    unused — on x86 the 640 KB under 1 MB); the workload cannot use RAM beyond the identity ceiling
    yet (the identity modes need a check of their own first); the `alloc_contig` callers that are not
    dual (the vDSO, `syscall.rs`'s identity-mode mmaps, shm's identity fallback) keep the low memory.
-4. **The direct map's tails.** The `Pa` newtype for the drivers' entry points (stage 1's unfinished
-   item — a kernel pointer handed to a device should not compile); `user_gb()` renamed for what it
-   is now (the gigabyte of the identity modes' user region); ~~arm64's Image header claims "placement
+4. **The direct map's tails.** ~~The `Pa` newtype for the drivers' entry points~~ — done 2026-10-09:
+   `kaddr::Pa`, made only by `frame` (an allocator's frame), `of` (a kernel pointer) and `of_kva`;
+   each refuses a value at or above 2^47 (every kernel virtual address on both machines) by
+   stopping the kernel. NVMe's `push_rw`/`push_rw_ex` and the whole ext2 → fs → nvme request chain
+   carry it, ENA's descriptors are written from it, and so are the addresses the hypervisor or the
+   firmware write into (KVM's pvclock, steal time, PV EOI; virtio's `dma_alloc`; PSCI's secondary
+   stack). `NetDev` keeps taking the kernel's virtual address by design (virtnet/nicloop slice it);
+   the driver makes the `Pa`. Gate `parefuse` on both machines (a stacks' window address stops the
+   kernel with its message); ~~`user_gb()` renamed~~ — done
+   2026-10-09: `ident_gb()`, the identity gigabyte with 2M leaves (the identity modes' user region,
+   a process's private PD); ~~arm64's Image header claims "placement
    anywhere"~~ — done 2026-10-09: the flags no longer set bit 3, and `_start` compares where it was
    put with `_head_pa` before writing anything, stopping in a `wfi` loop otherwise (checked: an image
    loaded 2 MiB higher with `-device loader` sits at `_start+0x1c`, the loop); TTBR1 reconsidered only if ASIDs per process or a KPTI-like split are wanted.
-5. **Housekeeping.** A `c6i.large` billed $2.57 a day around the clock from 2026-09-20 to 10-04 (not
-   the port's; gone now) — find what started it; the worktree `my_os-s64` carries symlinked
+5. **Housekeeping.** ~~A `c6i.large` billed $2.57 a day~~ — answered 2026-10-09: Cost Explorer has it
+   at 24 h a day from 2026-06-12 (before the port, before CloudTrail's 90 days) to 2026-10-04 16:59
+   UTC — the account's `hermes-canary-sampler` (`Project=hermes`, another project; the cleanup filters
+   by `Project=talaria*` and leaves it alone by design). It stopped with no EC2 API call in CloudTrail
+   (from inside the instance), nothing of ours ended it; the worktree `my_os-s64` carries symlinked
    `services/*/build` and its own terraform state — retire it or make it the scoreboard's only home.
 6. **The merge of `arm64-port` into `main`** — the owner's call; before it, both regressions and
    `validate.sh` on the HEAD to be merged.

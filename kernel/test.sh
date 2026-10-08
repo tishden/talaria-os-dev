@@ -377,6 +377,8 @@ for spec in \
   "talaria.test=identhole|identhole: the identity invariant in the workload's AS: holes 0 substitutions 0 read-only 0|identhole: in the whole 0..4GB window of the workload's address space there is not a single hole (kstat paging prints the same counter)" \
   "talaria.test=wxorx|wxorx: ALL CHECKS PASSED|wxorx: W^X + NX + a guard page + a live #PF" \
   "talaria.test=allocfail|allocfail: ALL OK|allocfail: a refused contiguous request leaves the bump whole (it used to take the rest with it: a Graviton's refused fscache=512 panicked the next kernel stack)" \
+  "talaria.test=parefuse|parefuse: a frame OK, a map address OK, a .bss word OK|parefuse: the Pa type turns a frame, a map address and a .bss word into their physical addresses (ARM64-PLAN §11 item 4)" \
+  "talaria.test=parefuse|a kernel virtual address 0xffff8[0-9a-f]+ was about to be handed to a device|parefuse: a stacks' window address offered as a device address stops the kernel (the Pa type's refusal) — and the line after it never prints" \
   "talaria.test=kimg|kimg: ALL OK|kimg: the image's virtual and physical addresses — KIMG_OFF is the linker's KOFF, kpa of a .text/.rodata/.data/.bss word is what the tables say (ARM64-PLAN §10.16 stage 7)" \
   "talaria.test=dmapid|dmapid: ALL OK|dmapid: the address kinds round-trip (a low and a high frame, a .bss and a stack word: physical -> kernel pointer -> physical, written and read back) — the contract the direct map keeps (ARM64-PLAN §10.16)" \
   "talaria.test=dmapid|dmapid: the direct map ON at 0xffff800000000000|dmapid: the direct map is on by default (slot 256): every kptr goes through it, a word written there reads back through the identity" \
