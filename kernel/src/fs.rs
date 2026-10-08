@@ -119,7 +119,7 @@ impl Blk {
                 let dev: *mut crate::nvme::Nvme = n;
                 // SAFETY: D1 + D2 — the ring and the slot table under `ring_lock`; a slot is reused
                 // only after its completion has been seen.
-                if unsafe { nvme_rw_queued(dev, false, lba, crate::mem::kpa_of(buf.as_mut_ptr()), buf.len()) } { Ok(()) } else { Err(()) }
+                if unsafe { nvme_rw_queued(dev, false, lba, crate::mem::Pa::of(buf.as_mut_ptr()), buf.len()) } { Ok(()) } else { Err(()) }
             }
         }
     }
@@ -135,7 +135,7 @@ impl Blk {
                 let dev: *mut crate::nvme::Nvme = n;
                 // SAFETY: D1 + D2 — the ring and the slot table under `ring_lock`; a slot is reused
                 // only after its completion has been seen.
-                if unsafe { nvme_rw_queued(dev, true, lba, crate::mem::kpa_of(buf.as_ptr()), buf.len()) } { Ok(()) } else { Err(()) }
+                if unsafe { nvme_rw_queued(dev, true, lba, crate::mem::Pa::of(buf.as_ptr()), buf.len()) } { Ok(()) } else { Err(()) }
             }
         }
     }
@@ -790,7 +790,7 @@ unsafe fn nvme_harvest(dev: *mut crate::nvme::Nvme, mine: &mut u64, ok: &mut boo
 /// sectors)` must name a frame the kernel owns and will not touch until the command
 /// completes (a block-cache slot or a journal staging page). The wait is for OUR CIDs
 /// only — the mask taken under the ring's lock is what makes them ours.
-unsafe fn nvme_batch(dev: *mut crate::nvme::Nvme, write: bool, reqs: &[(usize, u64, u16)], fua: bool) -> bool {
+unsafe fn nvme_batch(dev: *mut crate::nvme::Nvme, write: bool, reqs: &[(usize, crate::mem::Pa, u16)], fua: bool) -> bool {
     use core::sync::atomic::Ordering::{Relaxed, SeqCst};
     if reqs.is_empty() && !(write && DEFER_MASK.load(SeqCst) != 0) { return true; }
     let mut mine: u64 = 0;
@@ -824,7 +824,7 @@ unsafe fn nvme_batch(dev: *mut crate::nvme::Nvme, write: bool, reqs: &[(usize, u
                 let (lba, addr, nblk) = reqs[i];
                 if off >= nblk { i += 1; off = 0; continue; }
                 let nb = (nblk - off).min(maxb);
-                match d.push_rw_ex(write, (lba + off as usize) as u64, nb, addr + off as u64 * 512, fua) {
+                match d.push_rw_ex(write, (lba + off as usize) as u64, nb, addr.add(off as u64 * 512), fua) {
                     Some(cid) => {
                         mine |= 1u64 << cid; off += nb; pushed = true;
                         IO_SUBMITS.fetch_add(1, Relaxed);
@@ -883,7 +883,7 @@ unsafe fn nvme_batch(dev: *mut crate::nvme::Nvme, write: bool, reqs: &[(usize, u
 /// D1 + D2 + D3, as `nvme_batch`, with one difference that matters: the submission
 /// returns BEFORE the completions, so those buffers stay the device's property until
 /// `nvme_flush_queued` has seen them. Only under `ring_lock`.
-unsafe fn nvme_submit_deferred(dev: *mut crate::nvme::Nvme, reqs: &[(usize, u64, u16)]) -> Option<bool> {
+unsafe fn nvme_submit_deferred(dev: *mut crate::nvme::Nvme, reqs: &[(usize, crate::mem::Pa, u16)]) -> Option<bool> {
     use core::sync::atomic::Ordering::{Relaxed, SeqCst};
     let mut mask: u64 = 0;
     let mut i = 0usize;
@@ -898,7 +898,7 @@ unsafe fn nvme_submit_deferred(dev: *mut crate::nvme::Nvme, reqs: &[(usize, u64,
             let (lba, addr, nblk) = reqs[i];
             while off < nblk {
                 let nb = (nblk - off).min(maxb);
-                match d.push_rw_ex(true, (lba + off as usize) as u64, nb, addr + off as u64 * 512, false) {
+                match d.push_rw_ex(true, (lba + off as usize) as u64, nb, addr.add(off as u64 * 512), false) {
                     Some(cid) => { mask |= 1u64 << cid; off += nb; IO_SUBMITS.fetch_add(1, Relaxed); }
                     None => { IO_QFULL.fetch_add(1, Relaxed); break 'outer; }
                 }
@@ -918,10 +918,10 @@ unsafe fn nvme_submit_deferred(dev: *mut crate::nvme::Nvme, reqs: &[(usize, u64,
         // it did not fit: the remainder goes synchronously, together with what has already been submitted
         DEFER_MASK.store(mask, SeqCst);
     }
-    let mut rest: [(usize, u64, u16); 64] = [(0, 0, 0); 64];
+    let mut rest: [(usize, crate::mem::Pa, u16); 64] = [(0, crate::mem::Pa::frame(0), 0); 64];
     let mut k = 0usize;
     let (lba, addr, nblk) = reqs[i];
-    if off < nblk { rest[k] = (lba + off as usize, addr + off as u64 * 512, nblk - off); k += 1; }
+    if off < nblk { rest[k] = (lba + off as usize, addr.add(off as u64 * 512), nblk - off); k += 1; }
     for r in &reqs[i + 1..] { if k < rest.len() { rest[k] = *r; k += 1; } }
     Some(nvme_batch(dev, true, &rest[..k], false))   // it will absorb DEFER_MASK
 }
@@ -931,19 +931,19 @@ unsafe fn nvme_submit_deferred(dev: *mut crate::nvme::Nvme, reqs: &[(usize, u64,
 /// # Safety
 /// D1 + D2 + D3, as `nvme_batch`, for one transfer: `buf` is a physical address of a
 /// frame the kernel owns, `len` bytes of it.
-unsafe fn nvme_rw_queued(dev: *mut crate::nvme::Nvme, write: bool, lba: usize, buf: u64, len: usize) -> bool {
+unsafe fn nvme_rw_queued(dev: *mut crate::nvme::Nvme, write: bool, lba: usize, buf: crate::mem::Pa, len: usize) -> bool {
     nvme_rw_queued_ex(dev, write, lba, buf, len, false)
 }
 /// # Safety
 /// As `nvme_rw_queued`; `fua` only tells the device not to lie about durability.
-unsafe fn nvme_rw_queued_ex(dev: *mut crate::nvme::Nvme, write: bool, lba: usize, buf: u64, len: usize, fua: bool) -> bool {
+unsafe fn nvme_rw_queued_ex(dev: *mut crate::nvme::Nvme, write: bool, lba: usize, buf: crate::mem::Pa, len: usize, fua: bool) -> bool {
     let _g = Busy::new();
     let mut done = 0usize;
     while done < len {
         // 32768 sectors = 16 MB: that is how much fits into a batch's `nblk` field (u16);
         // `nvme_batch` will cut the batch into shorter commands by the MDTS.
         let take = (len - done).min(16 * 1024 * 1024);
-        let req = (lba + done / 512, buf + done as u64, (take / 512).max(1) as u16);
+        let req = (lba + done / 512, buf.add(done as u64), (take / 512).max(1) as u16);
         if !nvme_batch(dev, write, &[req], fua) { return false; }
         done += take;
     }
@@ -1437,7 +1437,7 @@ pub fn blk_write_durable(lba: usize, buf: &[u8]) -> bool {
         let Some(Blk::Nvme(n)) = blk() else { return false };
         let dev: *mut crate::nvme::Nvme = n;
         // The partition's base — as in `io_one`: from the outside THE PARTITION is addressed, not the disk.
-        nvme_rw_queued_ex(dev, true, lba + part_base(), crate::mem::kpa_of(buf.as_ptr()), buf.len(), true)
+        nvme_rw_queued_ex(dev, true, lba + part_base(), crate::mem::Pa::of(buf.as_ptr()), buf.len(), true)
     };
     let dt = dev_note(&DEV_WR_N, &DEV_WR_TSC, t0);
     DEV_FUA_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1470,7 +1470,7 @@ fn io_one(lba: usize, buf: *mut u8, len: usize, write: bool) -> bool {
             // on purpose: otherwise a read would again stand behind a foreign barrier.
             Some(Blk::Nvme(n)) => {
                 let dev: *mut crate::nvme::Nvme = n;
-                return nvme_rw_queued(dev, write, lba + part_base(), crate::mem::kpa_of(buf), len);
+                return nvme_rw_queued(dev, write, lba + part_base(), crate::mem::Pa::of(buf), len);
             }
             None => return false,
         }
@@ -1638,7 +1638,7 @@ pub fn blk_read_raw(lba: usize, buf: &mut [u8]) -> bool {
 /// §8.1/§8.2: a batch of writes `(lba, the buffer's address, the number of 512-sectors)` in one
 /// pipeline. On NVMe it goes as a batch of commands with one ring; on virtio-blk —
 /// sequentially (there the queue is cheap anyway, the vmexit is amortised by vhost).
-pub fn blk_write_many(reqs: &[(usize, u64, u16)]) -> bool {
+pub fn blk_write_many(reqs: &[(usize, crate::mem::Pa, u16)]) -> bool {
     if FAIL_WRITES.load(core::sync::atomic::Ordering::Relaxed) { return write_failed(); }
     let _d = dev_lock(); let _g = Busy::new();
     let t0 = crate::tsc::rdtsc();
@@ -1654,7 +1654,7 @@ pub fn blk_write_many(reqs: &[(usize, u64, u16)]) -> bool {
 /// `true` if the batch is deferred — then its buffer and the cache channels are occupied until
 /// `blk_defer_wait`; `false` — it is written synchronously (virtio, a busy queue,
 /// there is already a deferred one), like `blk_write_many`.
-pub fn blk_write_many_defer(reqs: &[(usize, u64, u16)]) -> bool {
+pub fn blk_write_many_defer(reqs: &[(usize, crate::mem::Pa, u16)]) -> bool {
     if FAIL_WRITES.load(core::sync::atomic::Ordering::Relaxed) { write_failed(); return false; }
     if reqs.is_empty() { return false; }
     let _d = dev_lock(); let _g = Busy::new();
@@ -1665,7 +1665,7 @@ pub fn blk_write_many_defer(reqs: &[(usize, u64, u16)]) -> bool {
         match blk() {
             Some(Blk::Nvme(n)) if reqs.len() <= 64 && DEFER_MASK.load(core::sync::atomic::Ordering::SeqCst) == 0 => {
                 let dev: *mut crate::nvme::Nvme = n;
-                let mut sh: [(usize, u64, u16); 64] = [(0, 0, 0); 64];
+                let mut sh: [(usize, crate::mem::Pa, u16); 64] = [(0, crate::mem::Pa::frame(0), 0); 64];
                 for (k, &(lba, a, nb)) in reqs.iter().enumerate() { sh[k] = (lba + part_base(), a, nb); }
                 match nvme_submit_deferred(dev, &sh[..reqs.len()]) { None => return true, Some(ok) => ok }
             }
@@ -1723,14 +1723,14 @@ pub fn blk_defer_wait() -> bool {
     }
     !DEFER_ERR.swap(false, SeqCst)
 }
-fn blk_write_many_inner(reqs: &[(usize, u64, u16)]) -> bool {
+fn blk_write_many_inner(reqs: &[(usize, crate::mem::Pa, u16)]) -> bool {
     // SAFETY: D3 — the buffer handed to the device is a frame the kernel owns (a block-cache slot or a
     // staging page), untouched for the length of the command.
     unsafe {
         match blk() {
             Some(Blk::Nvme(n)) => {
                 let dev: *mut crate::nvme::Nvme = n;
-                let mut sh: [(usize, u64, u16); 64] = [(0, 0, 0); 64];
+                let mut sh: [(usize, crate::mem::Pa, u16); 64] = [(0, crate::mem::Pa::frame(0), 0); 64];
                 let mut k = 0;
                 for &(lba, a, nb) in reqs {
                     sh[k] = (lba + part_base(), a, nb); k += 1;
@@ -1764,7 +1764,7 @@ fn blk_write_many_inner(reqs: &[(usize, u64, u16)]) -> bool {
                                     let sl = ios[si].as_mut().unwrap();
                                     let req: *mut _ = &mut sl.req;
                                     let resp: *mut _ = &mut sl.resp;
-                                    let buf = core::slice::from_raw_parts(crate::mem::kptr::<u8>(a), nb as usize * 512);
+                                    let buf = core::slice::from_raw_parts(crate::mem::kptr::<u8>(a.get()), nb as usize * 512);
                                     match b.write_blocks_nb(lba + part_base(), &mut *req, buf, &mut *resp) {
                                         Ok(t) => { ios[si].as_mut().unwrap().token = t; Some(si) }
                                         Err(_) => { ios[si].as_mut().unwrap().busy = false; None }

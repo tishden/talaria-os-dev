@@ -23,7 +23,7 @@ unsafe impl Hal for TalariaHal {
         let base = unsafe { core::ptr::addr_of_mut!(DMA_ARENA).cast::<u8>().add(off) };
         // Freshly used regions must be zeroed for virtqueue init.
         unsafe { core::ptr::write_bytes(base, 0, bytes) };
-        (crate::mem::kpa_of(base) as PhysAddr, NonNull::new(base).unwrap())
+        (crate::mem::Pa::of(base).get() as PhysAddr, NonNull::new(base).unwrap())
     }
 
     unsafe fn dma_dealloc(_paddr: PhysAddr, _vaddr: NonNull<u8>, _pages: usize) -> i32 {

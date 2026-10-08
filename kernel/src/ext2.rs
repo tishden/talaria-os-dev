@@ -1219,7 +1219,7 @@ unsafe fn writeback_unlocked(sel: Sel, max_chunks: usize, chunk: usize, cause: W
         let tdev = crate::tsc::rdtsc();
     let dg = dev_lock_nowait_fs();
     ph_note(11, tdev);
-        let mut reqs: [(usize, u64, u16); 64] = [(0, 0, 0); 64];
+        let mut reqs: [(usize, crate::mem::Pa, u16); 64] = [(0, crate::mem::Pa::frame(0), 0); 64];
         let mut nr = 0usize;
         let mut slots: [u32; WB_BLOCKS] = [0; WB_BLOCKS];
         let mut k = 0usize;
@@ -1251,7 +1251,7 @@ unsafe fn writeback_unlocked(sel: Sel, max_chunks: usize, chunk: usize, cause: W
                 slots[k] = s as u32;
                 let lba = (bn as usize) * SPB;
                 if nr > 0 && reqs[nr - 1].0 + reqs[nr - 1].2 as usize == lba { reqs[nr - 1].2 += SPB as u16; }
-                else { reqs[nr] = (lba, buf + (k * BSZ) as u64, SPB as u16); nr += 1; STATS_RUNS += 1; }
+                else { reqs[nr] = (lba, crate::mem::Pa::frame(buf + (k * BSZ) as u64), SPB as u16); nr += 1; STATS_RUNS += 1; }
                 STATS_WR += 1; written += 1; k += 1;
                 }
             }
@@ -1295,7 +1295,7 @@ unsafe fn writeback_unlocked(sel: Sel, max_chunks: usize, chunk: usize, cause: W
 unsafe fn writeback_locked(sel: Sel, cause: WbC) -> usize {
     if DIRTY_N == 0 { return 0; }
     let mergeable = BS == BSZ;
-    let mut reqs: [(usize, u64, u16); 64] = [(0, 0, 0); 64];
+    let mut reqs: [(usize, crate::mem::Pa, u16); 64] = [(0, crate::mem::Pa::frame(0), 0); 64];
     let mut nr = 0usize;
     let mut written = 0usize;
     let (mut run_bn, mut run_slot, mut run_len) = (0u32, 0usize, 0usize);
@@ -1316,7 +1316,7 @@ unsafe fn writeback_locked(sel: Sel, cause: WbC) -> usize {
         };
         if !take {
             if run_len > 0 {
-                reqs[nr] = ((run_bn as usize) * SPB, CACHE_BASE + (run_slot * BSZ) as u64, (run_len * SPB) as u16);
+                reqs[nr] = ((run_bn as usize) * SPB, crate::mem::Pa::frame(CACHE_BASE + (run_slot * BSZ) as u64), (run_len * SPB) as u16);
                 nr += 1; STATS_RUNS += 1; run_len = 0;
             }
         } else {
@@ -1329,7 +1329,7 @@ unsafe fn writeback_locked(sel: Sel, cause: WbC) -> usize {
                 run_len += 1;
             } else {
                 if run_len > 0 {
-                    reqs[nr] = ((run_bn as usize) * SPB, CACHE_BASE + (run_slot * BSZ) as u64, (run_len * SPB) as u16);
+                    reqs[nr] = ((run_bn as usize) * SPB, crate::mem::Pa::frame(CACHE_BASE + (run_slot * BSZ) as u64), (run_len * SPB) as u16);
                     nr += 1; STATS_RUNS += 1;
                 }
                 run_bn = bn; run_slot = s; run_len = 1;
@@ -1342,7 +1342,7 @@ unsafe fn writeback_locked(sel: Sel, cause: WbC) -> usize {
         if nr >= reqs.len() - 1 { if !crate::fs::blk_write_many(&reqs[..nr]) { crate::println!("ext2: an error of the group write"); } nr = 0; }
     }
     if run_len > 0 {
-        reqs[nr] = ((run_bn as usize) * SPB, CACHE_BASE + (run_slot * BSZ) as u64, (run_len * SPB) as u16);
+        reqs[nr] = ((run_bn as usize) * SPB, crate::mem::Pa::frame(CACHE_BASE + (run_slot * BSZ) as u64), (run_len * SPB) as u16);
         nr += 1; STATS_RUNS += 1;
     }
     if nr > 0 && !crate::fs::blk_write_many(&reqs[..nr]) { crate::println!("ext2: an error of the group write"); }
@@ -4911,7 +4911,7 @@ unsafe fn jrn_txn(sel: JSel, cap: usize) -> usize {
             // Previously the descriptor was written by a separate blk_write, while the copies went by a second
             // blk_write_many: two submissions where one is needed. We reserve slot 0
             // for the descriptor and fill it after the last tag is laid out.
-            let mut reqs: [(usize, u64, u16); JREQS] = [(0, 0, 0); JREQS];
+            let mut reqs: [(usize, crate::mem::Pa, u16); JREQS] = [(0, crate::mem::Pa::frame(0), 0); JREQS];
             let mut nr = 1usize;
             let mut pos = jnext(dpos);
             let mut tags = 0usize;
@@ -4936,7 +4936,7 @@ unsafe fn jrn_txn(sel: JSel, cap: usize) -> usize {
                     // the slot's snapshot goes into JCOPY (§8.12), the DMA will go already without the FS lock
                     let cp = JCOPY + ((nr - 1) * BSZ) as u64;
                     core::ptr::copy_nonoverlapping(crate::mem::kptr::<u8>(addr), crate::mem::kptr::<u8>(cp), BS);
-                    reqs[nr] = ((JBLK[pos] as usize) * SPB, cp, SPB as u16); nr += 1;
+                    reqs[nr] = ((JBLK[pos] as usize) * SPB, crate::mem::Pa::frame(cp), SPB as u16); nr += 1;
                 }
                 CJPOS[slot] = pos as u32 | if esc { 0x8000_0000 } else { 0 };
                 pos = jnext(pos);
@@ -4951,7 +4951,7 @@ unsafe fn jrn_txn(sel: JSel, cap: usize) -> usize {
             // mark the last tag (after the first tag there are another 16 bytes of the UUID,
             // so we remember the position explicitly rather than compute it from the current offset)
             crate::jbd2::mark_last(d, last_tag);
-            reqs[0] = ((JBLK[dpos] as usize) * SPB, JSTAGE, SPB as u16);
+            reqs[0] = ((JBLK[dpos] as usize) * SPB, crate::mem::Pa::frame(JSTAGE), SPB as u16);
             // §8.12: the batch goes WITHOUT the FS lock (the snapshots are already in JCOPY/JSTAGE, the FS's
             // state it does not touch; the journal's statics are closed by JBUSY, the device is
             // ours). The released lock allows `nvme_batch` to yield the core.

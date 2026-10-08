@@ -261,7 +261,7 @@ pub fn steal_enable_here() {
     if feat & (1 << 5) == 0 { return; } // KVM_FEATURE_STEAL_TIME is not declared
     let cpu = crate::percpu::cpu_id();
     if cpu >= MAXCPU { return; }
-    let pa = unsafe { crate::mem::kpa_of(core::ptr::addr_of!(STEAL[cpu])) }; // the kernel is mapped one to one
+    let pa = unsafe { crate::mem::Pa::of(core::ptr::addr_of!(STEAL[cpu])).get() }; // the kernel is mapped one to one
     unsafe { wrmsr(MSR_KVM_STEAL_TIME, pa | 1); }
     if feat & (1 << 9) != 0 { PV_TLB_FLUSH.store(true, Ordering::SeqCst); } // KVM_FEATURE_PV_TLB_FLUSH
     if !STEAL_ON.swap(true, Ordering::SeqCst) {

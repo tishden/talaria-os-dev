@@ -89,7 +89,7 @@ pub fn init(cpu: usize) {
 /// The physical address of core `cpu`'s PV EOI word (the kernel is identity-mapped).
 pub fn pv_eoi_addr(cpu: usize) -> u64 {
     if cpu >= MAXCPU { return 0; }
-    unsafe { crate::mem::kpa_of(core::ptr::addr_of!(CPUS[cpu].pv_eoi)) }
+    unsafe { crate::mem::Pa::of(core::ptr::addr_of!(CPUS[cpu].pv_eoi)).get() }
 }
 
 /// The current core's number (gs:24). Before init() GS.base=0 — so calling it early is inadmissible.

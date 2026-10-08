@@ -677,6 +677,10 @@ echo "== observability on arm64: PMUv3, the profile with stacks, the gdb stub ==
 A0=$ACCEL; IC=0; [ "$ACCEL" = "-cpu max" ] && { ACCEL="$ACCEL -icount shift=0"; IC=1; }
 boot 30 "talaria.test=allocfail"
 assert 'allocfail: ALL OK'                                                 'allocfail: a refused contiguous request leaves the bump whole (a Graviton'"'"'s refused fscache=512 took it and the next kernel stack panicked)'
+boot 30 "talaria.test=parefuse"
+assert 'parefuse: a frame OK, a map address OK, a .bss word OK'             'parefuse: the Pa type turns a frame, a map address and a .bss word into their physical addresses (ARM64-PLAN §11 item 4)'
+assert 'a kernel virtual address 0x[0-9a-f]+ was about to be handed to a device' 'parefuse: a stacks'"'"' window address offered as a device address stops the kernel (the Pa type'"'"'s refusal)'
+assertnot 'parefuse: NOT REFUSED'                                          'parefuse: nothing past the refusal'
 boot 30 "talaria.test=kimg"
 assert 'kimg: ALL OK' 'kimg: the image'"'"'s virtual and physical addresses — KIMG_OFF is the linker'"'"'s KOFF, kpa of a .text/.rodata/.data/.bss word is what the tables say (ARM64-PLAN §10.16 stage 7)'
 boot 30 "talaria.test=dmapid"

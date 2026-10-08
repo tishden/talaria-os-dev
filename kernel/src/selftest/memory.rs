@@ -206,6 +206,26 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             println!("kimg: {}", if bad == 0 { "ALL OK" } else { "FAILED" });
             crate::suite::park()
         }
+        "parefuse" => {
+            // THE `Pa` TYPE REFUSES A KERNEL ADDRESS (ARM64-PLAN §11 item 4): a frame, a .bss word
+            // and a map address become the physical addresses they are; then a word in the
+            // stacks' window — a kernel virtual address with no single frame to hand a device —
+            // must stop the kernel with its message rather than reach a descriptor.
+            static mut PA_WORD: u64 = 0;
+            let f = crate::mem::alloc_any(1).expect("parefuse: a frame");
+            let ok_frame = crate::mem::Pa::frame(f).get() == f;
+            let ok_kva = crate::mem::Pa::of_kva(crate::mem::kva(f)).get() == f;
+            let b = crate::mem::Pa::of(core::ptr::addr_of!(PA_WORD)).get();
+            let ok_bss = b < 1 << 47 && crate::paging::virt_to_phys(crate::mem::vaddr(core::ptr::addr_of!(PA_WORD))) == b;
+            crate::mem::free_contig(f, 1);
+            println!("parefuse: a frame {}, a map address {}, a .bss word {}", if ok_frame { "OK" } else { "FAIL" },
+                if ok_kva { "OK" } else { "FAIL" }, if ok_bss { "OK" } else { "FAIL" });
+            let win = crate::mem::KWIN_BASE + 0x1000;
+            println!("parefuse: now {:#x} (the stacks' window) as a device address — the kernel must stop", win);
+            let p = crate::mem::Pa::of_kva(core::hint::black_box(win));
+            println!("parefuse: NOT REFUSED ({:#x}) — FAIL", p.get());
+            crate::suite::park()
+        }
         "anyram" => {
             // STAGE 6 OF THE DIRECT MAP (docs/ARM64-PLAN.md §10.16): the kernel's own memory —
             // page tables, the window's stacks, the FS and the drivers' buffers — comes from any

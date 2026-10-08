@@ -107,7 +107,8 @@ impl Nvme {
 
     /// Assemble a read/write command with PRP1/PRP2/a PRP list. prp_slot is the number
     /// of the list's page (one per command in flight).
-    fn build_rw(&mut self, write: bool, lba: u64, nblk: u16, buf: u64, prp_slot: usize, fua: bool) -> [u32; 16] {
+    fn build_rw(&mut self, write: bool, lba: u64, nblk: u16, buf: crate::mem::Pa, prp_slot: usize, fua: bool) -> [u32; 16] {
+        let buf = buf.get();
         let mut cmd = [0u32; 16];
         cmd[0] = if write { 0x01 } else { 0x02 };
         cmd[1] = 1; // nsid
@@ -162,11 +163,11 @@ impl Nvme {
     /// SUBMIT a read/write without waiting: it returns the CID by which the owner will later
     /// recognise its own completion. None — there are no free CIDs (ring and wait).
     /// `nblk` must not exceed `max_blocks()` — it is the caller that is bound to cut it.
-    pub fn push_rw(&mut self, write: bool, lba: u64, nblk: u16, buf: u64) -> Option<u16> {
+    pub fn push_rw(&mut self, write: bool, lba: u64, nblk: u16, buf: crate::mem::Pa) -> Option<u16> {
         self.push_rw_ex(write, lba, nblk, buf, false)
     }
     /// The same with FUA: the completion of such a write means "the data is on the medium".
-    pub fn push_rw_ex(&mut self, write: bool, lba: u64, nblk: u16, buf: u64, fua: bool) -> Option<u16> {
+    pub fn push_rw_ex(&mut self, write: bool, lba: u64, nblk: u16, buf: crate::mem::Pa, fua: bool) -> Option<u16> {
         if nblk == 0 { return None; }
         let cid = self.cid_alloc()?;
         // The page of the PRP list is EACH CID'S OWN and lives exactly as long:
@@ -267,7 +268,7 @@ impl Nvme {
         let mut done = 0usize;
         while done < buf.len() {
             let nb = (((buf.len() - done) / 512).max(1) as u16).min(maxb);
-            let Some(cid) = self.push_rw(false, (lba + done / 512) as u64, nb, crate::mem::kpa_of(buf.as_ptr()) + done as u64) else { return false };
+            let Some(cid) = self.push_rw(false, (lba + done / 512) as u64, nb, crate::mem::Pa::of(buf.as_ptr()).add(done as u64)) else { return false };
             self.kick();
             let hz = crate::tsc::calibrate_cached();
             let t0 = crate::tsc::rdtsc();

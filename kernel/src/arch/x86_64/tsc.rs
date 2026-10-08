@@ -119,8 +119,8 @@ pub fn ref_enable() -> bool {
     let (feat, _, _, _) = cpuid(0x4000_0001);
     if feat & (1 << 3) == 0 { return false; } // KVM_FEATURE_CLOCKSOURCE2
     unsafe {
-        let wp = crate::mem::kpa_of(core::ptr::addr_of_mut!(PV_WALL));
-        let tp = crate::mem::kpa_of(core::ptr::addr_of_mut!(PV_TIME));
+        let wp = crate::mem::Pa::of(core::ptr::addr_of_mut!(PV_WALL)).get(); // the host writes it
+        let tp = crate::mem::Pa::of(core::ptr::addr_of_mut!(PV_TIME)).get();
         wrmsr(0x4b56_4d01, tp | 1); // MSR_KVM_SYSTEM_TIME_NEW (enable)
         wrmsr(0x4b56_4d00, wp);     // MSR_KVM_WALL_CLOCK_NEW
         let w = core::ptr::read_volatile(core::ptr::addr_of!(PV_WALL));
