@@ -981,7 +981,7 @@ fn rc_cell(phys: u64) -> Option<&'static AtomicU8> {
 /// Set a frame's refcount (the number of COW references).
 #[track_caller]
 pub fn rc_set(phys: u64, v: u8) {
-    watch(phys, "rc_set", v as u64);
+    if WATCH.load(Ordering::Relaxed) != 0 { watch(phys, "rc_set", v as u64); }
     if let Some(c) = rc_cell(phys) { c.store(v, Ordering::Release); }
 }
 /// Get the refcount. OUTSIDE the table it is "shared" (2) rather than "free" (0): see the header.
@@ -994,7 +994,7 @@ pub fn rc_get(phys: u64) -> u8 {
 /// +1 reference (for a fork). If it was 0 -> it becomes 2 (the parent+the child).
 #[track_caller]
 pub fn rc_share(phys: u64) {
-    watch(phys, "rc_share, was", rc_get(phys) as u64);
+    if WATCH.load(Ordering::Relaxed) != 0 { watch(phys, "rc_share, was", rc_get(phys) as u64); }
     if let Some(c) = rc_cell(phys) {
         let _ = c.try_update(Ordering::AcqRel, Ordering::Relaxed, |v| Some(if v == 0 { 2 } else { v.saturating_add(1) }));
     }
@@ -1007,7 +1007,7 @@ pub fn rc_share(phys: u64) {
 /// another's reuse of it. Outside the table: never the last (the frame leaks, see the header).
 #[track_caller]
 pub fn rc_release(phys: u64) -> bool {
-    watch(phys, "rc_release, was", rc_get(phys) as u64);
+    if WATCH.load(Ordering::Relaxed) != 0 { watch(phys, "rc_release, was", rc_get(phys) as u64); }
     let Some(c) = rc_cell(phys) else { RC_OUTSIDE.fetch_add(1, core::sync::atomic::Ordering::Relaxed); return false; };
     match c.try_update(Ordering::AcqRel, Ordering::Acquire, |v| Some(v.saturating_sub(1))) {
         Ok(v) | Err(v) => v <= 1,
@@ -1122,6 +1122,9 @@ fn fc_alloc(addr: u64, n: u64) {
 // (no double alloc, no double free) — the process just reads someone else's page. With the trace
 // on, a ring-3 fault asks whether the faulting stack's frame was freed lately, and by whom.
 pub static FREETRACE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// `talaria.freetrace=2`: the trace AND the bounce quarantine (it slows the frames' reuse and
+/// hides the race it was built to catch — so it is not part of `=1`).
+pub static BOUNCE_QUARANTINE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// `talaria.watchframe=<phys>`: every hand-out, free and refcount change of that ONE frame is
 /// printed with its caller and the task (ARM64-PLAN §11 item 0). 0 — off.
 pub static WATCH: AtomicU64 = AtomicU64::new(0);
@@ -1140,6 +1143,8 @@ static FT_ADDR: [AtomicU64; FT_N] = [const { AtomicU64::new(0) }; FT_N];
 static FT_LOC: [core::sync::atomic::AtomicUsize; FT_N] = [const { core::sync::atomic::AtomicUsize::new(0) }; FT_N];
 static FT_SEQ: AtomicU64 = AtomicU64::new(0);
 static FT_TASK: [AtomicU64; FT_N] = [const { AtomicU64::new(0) }; FT_N];
+/// How many frees the trace has recorded so far (a clock for "before / after").
+pub fn free_seq() -> u64 { FT_SEQ.load(Ordering::Relaxed) }
 /// Every free of `frame` still in the ring, the latest first: (how many frees ago, file, line);
 /// up to 4.
 pub fn freetrace_find(frame: u64) -> ([(u64, &'static str, u32, u64); 4], usize) {

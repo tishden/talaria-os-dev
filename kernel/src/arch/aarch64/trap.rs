@@ -249,6 +249,7 @@ core::arch::global_asm!(r#"
 3:
     ldr x10, [x9, #40]
     cbz x10, 6f
+    str xzr, [x9, #40]  /* the decision is spent: x86's stub, which loads it on every pass, reloaded a stale root (ARM64-PLAN §11 item 0); here only another frame loads it, but a word that orders an action is cleared by its doer */
     msr ttbr0_el1, x10
     isb
     tlbi vmalle1

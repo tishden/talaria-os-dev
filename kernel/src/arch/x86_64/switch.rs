@@ -139,6 +139,12 @@ timer_stub_sched:
     test %rcx, %rcx
     jz 2f
     mov %rcx, %cr3          /* switch the address space here — the stack is already a common one */
+    /* THE DECISION IS SPENT: a later pass of this stub on which the scheduler STAYED (it does
+       not write gs:40) must not load this root again. It did: a task entered by `ap_loop`
+       (CR3 switched directly, gs:40 untouched) got, at its first tick, the root of the task
+       this core ran before — PostgreSQL's postmaster ran its mmaps in its dead child's space,
+       and a freed root reloaded this way killed the machine (ARM64-PLAN §11 item 0). */
+    movq $0, %gs:40
 2:
     pop %r15
     pop %r14

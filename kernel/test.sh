@@ -65,7 +65,7 @@ fi
 # kernel/user/*.
 (cd "$REPO/kernel" && python3 mkfs.py "$IMG/disk.img" >/dev/null) || echo "mkfs.py: disk.img was not built (no kernel/user/mhello?)"
 # The ext2 image for the tests of the RW FS and of the process model (it is recreated: the tests write onto the disk)
-E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/sigtest-lo" "$REPO/kernel/user/chldrace" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
+E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/sigtest-lo" "$REPO/kernel/user/chldrace" "$REPO/kernel/user/cowstale" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
 # the symlinks in the image: a "fast" one (the target inside the inode) to a file and to a directory —
 # exactly what the launch with the runtime from Ubuntu stumbled over (/lib64/ld-linux… is a symlink)
 mkdir -p "$E2/dir"; echo inside > "$E2/dir/inside.txt"
@@ -577,6 +577,12 @@ for m in chldrace chldracew; do
   assert "chldrace: ALL OK 500" "proc: $m — a SIGCHLD handler and 500 children that run alone on another core and exit ($( [ $m = chldrace ] && echo 'the parent in rt_sigsuspend with SIGCHLD blocked outside it: the call ignored its mask and hung at the first child' || echo 'the parent in waitpid'); ARM64-PLAN §11 item 0)"
   refute "THE PARENT.S STACK|\[fault\] ring 3" "proc: $m — the parent's stack intact, no fault in ring 3"; stopq $q
 done
+q=$(bootd "talaria.test=cowstale talaria.smp=2" /img/disk_ext2.img); sleep 2
+assert "cowstale: ALL OK 300" "proc: cowstale — a page cached on core 1, COW-copied on core 0, the original freed and reused, read back on core 1: the switch stub reloaded the root of the task this core ran before (the dead child's) on a tick that stayed (ARM64-PLAN §11 item 0)"
+refute "\[fault\] ring 3|CRASH DUMP" "proc: cowstale — no fault, no crash"; stopq $q
+q=$(bootd "talaria.test=cowstalet talaria.smp=2" /img/disk_ext2.img); sleep 2
+assert "cowstale: ALL OK 200 threads" "proc: cowstalet — a sibling thread on the other core sees the writer's COW copy (the copy is shot down before the original is freed; a write fault on a page another core already made writable is a stale translation, not a SIGSEGV)"
+refute "\[fault\] ring 3|CRASH DUMP" "proc: cowstalet — no fault, no crash"; stopq $q
 BOOTD_SMP=1
 q=$(bootd "talaria.test=sigtestlo" /img/disk_ext2.img); sleep 2
 assert "sigtest: ALL OK" "proc: sigtest LINKED AT 0x200000 — the kernel image's own load address (ARM64-PLAN §10.16 stage 7.4): the image runs at its high alias, a process space has none of its identity"
