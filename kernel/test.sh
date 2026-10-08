@@ -65,7 +65,7 @@ fi
 # kernel/user/*.
 (cd "$REPO/kernel" && python3 mkfs.py "$IMG/disk.img" >/dev/null) || echo "mkfs.py: disk.img was not built (no kernel/user/mhello?)"
 # The ext2 image for the tests of the RW FS and of the process model (it is recreated: the tests write onto the disk)
-E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/sigtest-lo" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
+E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/sigtest-lo" "$REPO/kernel/user/chldrace" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
 # the symlinks in the image: a "fast" one (the target inside the inode) to a file and to a directory —
 # exactly what the launch with the runtime from Ubuntu stumbled over (/lib64/ld-linux… is a symlink)
 mkdir -p "$E2/dir"; echo inside > "$E2/dir/inside.txt"
@@ -261,9 +261,9 @@ boot() {
   fi
 }
 # bootd MODE DISK -> like boot, but with the given disk (an ext2 image and so on)
-bootd() {
+bootd() {  # BOOTD_SMP=N: N cores (default 1)
   rm -f /tmp/o.log
-  qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 1 -m 512 \
+  qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp "${BOOTD_SMP:-1}" -m 512 \
     -kernel "/w/$K" -append "console=ttyS0 $1" -display none -serial file:/tmp/o.log -no-reboot \
     -drive id=d0,file=$2,format=raw,if=none -device virtio-blk-device,drive=d0 >/tmp/q.log 2>&1 & echo $!; qstarted "$1"
 }
@@ -571,6 +571,13 @@ assert "sigtest: ALL OK" "proc: the fd tables/dup2/pipe/cwd/readdir + the signal
 q=$(bootd "talaria.test=sigtesthi talaria.dmap=strict" /img/disk_ext2.img); sleep 2
 assert "sigtest: ALL OK" "proc: sigtest LINKED AT 0x40000000 (RAM's former identity, GB1) under strict — the image, its forks (COW) and its shared memory where the kernel's identity used to be (ARM64-PLAN §10.16 stage 4b)"
 refute "RAM BY ITS IDENTITY|DEVICE BY ITS IDENTITY|CRASH DUMP" "proc: the image at 1 GiB under strict — no kernel access missed its kva, no crash"; stopq $q
+BOOTD_SMP=2
+for m in chldrace chldracew; do
+  q=$(bootd "talaria.test=$m talaria.smp=2" /img/disk_ext2.img); sleep 2
+  assert "chldrace: ALL OK 500" "proc: $m — a SIGCHLD handler and 500 children that run alone on another core and exit ($( [ $m = chldrace ] && echo 'the parent in rt_sigsuspend with SIGCHLD blocked outside it: the call ignored its mask and hung at the first child' || echo 'the parent in waitpid'); ARM64-PLAN §11 item 0)"
+  refute "THE PARENT.S STACK|\[fault\] ring 3" "proc: $m — the parent's stack intact, no fault in ring 3"; stopq $q
+done
+BOOTD_SMP=1
 q=$(bootd "talaria.test=sigtestlo" /img/disk_ext2.img); sleep 2
 assert "sigtest: ALL OK" "proc: sigtest LINKED AT 0x200000 — the kernel image's own load address (ARM64-PLAN §10.16 stage 7.4): the image runs at its high alias, a process space has none of its identity"
 refute "RAM BY ITS IDENTITY|DEVICE BY ITS IDENTITY|CRASH DUMP" "proc: the image at 2 MB — no kernel access missed its kva, no crash"; stopq $q
