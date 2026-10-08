@@ -2499,8 +2499,8 @@ order of work:
    tlgen in the container (no VM) 123 k/s, in Talaria 78-85 k/s with `vhost=off` and 53 k/s with
    `vhost=on`, in a Linux VM 21 k/s (p50 425 us) — the local virtual NIC (virtio kicks, vhost,
    interrupts) reorders the contestants, where on EC2 the Linux generator was the faster. The client
-   path is measured on EC2 only (the console's `stat` needs `talaria.console=poll`, which EC2's
-   read-only console cannot drive — a periodic `stat` knob or the job's own report has to carry it);
+   path is measured on EC2 only: phase B with `AB_ROLES=loadgen` and `talaria.sysprof=1
+   talaria.stat=<ms>` on the generator (the periodic counter block needs no console input);
    (b) the wfe tier's mdpipe tail at `smp=2` (oversubscription; only `wakepreempt=0` helps) — a per-tick
    instrument (who is on the core when a tick is slow); (c) redis's rare 0.3-0.9 ms outliers at low
    rates; (d) PostgreSQL `pk`'s ceiling, measured under the Linux generator too; (e) the lazy FP save
