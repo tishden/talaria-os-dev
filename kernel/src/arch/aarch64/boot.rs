@@ -20,7 +20,11 @@ _head:
     .long   0                           /* code1 */
     .quad   0x80000                     /* text_offset: the image goes at RAM base + 512 KiB */
     .quad   __kernel_size               /* image_size: .bss included, the loader keeps this much free */
-    .quad   0xA                         /* flags: little-endian, 4K pages, physical placement anywhere */
+    .quad   0x2                         /* flags: little-endian, 4K pages, placement NOT anywhere (bit 3
+                                           clear): the image is linked KOFF above ONE physical address
+                                           (`kaddr::kpa` subtracts a constant), so a loader that moved it
+                                           elsewhere would get a kernel whose every `kpa` lies — the check
+                                           at `_start` stops it instead (ARM64-PLAN §11 item 4) */
     .quad   0, 0, 0                     /* res2..res4 */
     .ascii  "ARM\x64"                   /* magic */
     .long   0                           /* res5 (a PE header offset — none) */
@@ -30,6 +34,16 @@ _start:
     /* the device tree's address travels in x0 through everything below */
     mov     x19, x0
     msr     daifset, #0xf
+    /* WHERE WE WERE PUT must be where we were linked (see the flags above): otherwise stop
+       here, with the MMU off and nothing written, rather than run with every image address
+       translated to the wrong frame. A debugger finds the core in `9:`. */
+    adr     x9, _head
+    ldr     x10, =_head_pa
+    cmp     x9, x10
+    b.eq    8f
+9:  wfi
+    b       9b
+8:
     /* EL2 -> EL1 when a firmware left us high: EL1 is AArch64 (HCR.RW), the counter
        and the timer are visible at EL1 (CNTHCTL), no traps on FP/SIMD (CPTR). */
     mrs     x9, CurrentEL

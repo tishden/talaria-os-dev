@@ -2467,7 +2467,8 @@ order of work:
 1. **The databases under strict on the EC2 scoreboard — done 2026-10-08, x86 PostgreSQL
    2026-10-09 (after item 0).** x86 PostgreSQL under strict against AL2023 in the same hour, every
    point Talaria's (p50/p99/p99.9 us): `pk` at 2309 req/s 78/92/98 vs 96/119/154, at 20781 75/96/163
-   vs 96/939/2875; `select1` at 3779 53/68/73 vs 58/76/88, at 34011 52/72/77 vs 52/1527/5788. One run per stand (`stand_lock`), B = A plus `talaria.dmap=1` (`APPEND=1`), the
+   vs 96/939/2875; `select1` at 3779 53/68/73 vs 58/76/88, at 34011 52/72/77 vs 52/1527/5788.
+   The earlier runs: one run per stand (`stand_lock`), B = A plus `talaria.dmap=1` (`APPEND=1`), the
    consoles kept, mk-ami's silent x86 death fixed. Under strict, against AL2023 in the same hour:
    arm64 PostgreSQL `select1` p99 75-100 us vs 78-9249, `pk` p50 96-101 vs 114-133; arm64 MariaDB
    p99.9 70-93 vs 131-10068; x86 MariaDB `pk` p50 55-60 vs 69-114, p99.9 76-88 vs 150-10469;
@@ -2500,10 +2501,10 @@ order of work:
    dual (the vDSO, `syscall.rs`'s identity-mode mmaps, shm's identity fallback) keep the low memory.
 4. **The direct map's tails.** The `Pa` newtype for the drivers' entry points (stage 1's unfinished
    item — a kernel pointer handed to a device should not compile); `user_gb()` renamed for what it
-   is now (the gigabyte of the identity modes' user region); arm64's Image header claims "placement
-   anywhere" (flags bit 3) while `KOFF` assumes the image's gigabyte is 1 GiB (the linker ASSERT
-   holds the build, not a loader that places it elsewhere) — clear the bit or compute the offset at
-   boot; TTBR1 reconsidered only if ASIDs per process or a KPTI-like split are wanted.
+   is now (the gigabyte of the identity modes' user region); ~~arm64's Image header claims "placement
+   anywhere"~~ — done 2026-10-09: the flags no longer set bit 3, and `_start` compares where it was
+   put with `_head_pa` before writing anything, stopping in a `wfi` loop otherwise (checked: an image
+   loaded 2 MiB higher with `-device loader` sits at `_start+0x1c`, the loop); TTBR1 reconsidered only if ASIDs per process or a KPTI-like split are wanted.
 5. **Housekeeping.** A `c6i.large` billed $2.57 a day around the clock from 2026-09-20 to 10-04 (not
    the port's; gone now) — find what started it; the worktree `my_os-s64` carries symlinked
    `services/*/build` and its own terraform state — retire it or make it the scoreboard's only home.
