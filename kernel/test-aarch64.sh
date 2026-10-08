@@ -302,7 +302,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     [ $rc = 0 ] && [ -s "$REPO/$TD/$name.img" ]
   }
   if command -v mkfs.ext2 >/dev/null 2>&1 \
-     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls \
+     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace \
      && mkimg ms 64M '' mapshared && mkimg core 32M '' crashme \
      && mkimg coremt 32M 'binary=/crashme\nargs=crashme mt\nrestart=0\n' crashme \
      && mkimg crashr 32M 'binary=/crashme\nargs=crashme mt\nrestart=1\n' crashme \
@@ -325,6 +325,11 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     assert 'sigtest: ALL OK'                                                  'sigtest: the same with talaria.dmap=1 — the map with RAM'"'"'s identity kept in the process spaces (the A/B of strict)'
     assert 'sigtest: a low MAP_FIXED at 0xa0000000: refused'                 'sigtest: with talaria.dmap=1 a MAP_FIXED below 4 GiB is refused (the kernel'"'"'s identity is in the process space)'
     assertnot "$BAD|\[fault\]|the direct map is STRICT"                     'sigtest: talaria.dmap=1 turns strict off, no trap'
+    for m in chldrace chldracew; do
+      run 300 "talaria.test=$m" ext2
+      assert 'chldrace: ALL OK 500'                                           "$m: a SIGCHLD handler and 500 children exiting on another core (the parent in $( [ $m = chldrace ] && echo rt_sigsuspend || echo waitpid); ARM64-PLAN §11 item 0)"
+      assertnot "$BAD|THE PARENT.S STACK|\[fault\]"                          "$m: the parent's stack intact, no fault"
+    done
     run 150 "talaria.test=mbench" ext2
     assert 'RESULT mbench syscall [0-9]+ ns'                                  'mbench: the syscall primitive is timed (the number is for the stand)'
     assert 'mbench: ALL OK'                                                   'mbench: the primitives of the hot loop with the binary that goes to Linux'

@@ -125,6 +125,16 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/sigtest-hi", &[b"sigtest"], &[b"HOME=/"]); } }
             crate::suite::park()
         }
+        "chldrace" | "chldracew" => {
+            // A parent with a SIGCHLD handler and a child that runs alone on another core and
+            // exits, 500 times (docs/ARM64-PLAN.md §11 item 0). `chldrace`: the parent waits in
+            // rt_sigsuspend with SIGCHLD blocked outside it — the call ignored its mask and the
+            // parent looped on EINTR for good after the first child; `chldracew`: in waitpid.
+            crate::smp::start_from_cmdline(cmdline);
+            let mode: &[u8] = if name == "chldrace" { b"susp" } else { b"wait" };
+            if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/chldrace", &[b"chldrace", b"500", mode], &[b"HOME=/"]); } }
+            crate::suite::park()
+        }
         "sigtestlo" => {
             // The same binary linked at 0x20_0000 — on x86 the kernel image's own load address
             // (stage 7.4): the image runs at its high alias, a strict process space has none of

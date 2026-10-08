@@ -416,6 +416,28 @@ pub fn sigprocmask(how: u64, set: u64, old: u64) -> i64 {
     0
 }
 pub fn sigmask_of(t: usize) -> u64 { unsafe { SIGMASK[t] } }
+// ── rt_sigsuspend: the mask is TEMPORARY ────────────────────────────────────────
+// It used to be ignored: the syscall waited under the CURRENT mask, so the textbook
+// `sigprocmask(BLOCK, CHLD); fork(); ... sigsuspend(&unblocked)` never saw its SIGCHLD and looped
+// on EINTR for good. Now the given mask is installed for the wait, the old one is kept here and
+// goes into the signal frame's `uc_sigmask` (rt_sigreturn restores it, as on Linux), or is put
+// back at the syscall's return when no handler ran.
+static mut SUSP_SAVED: [u64; NT] = [0; NT];
+static mut SUSP_ON: [bool; NT] = [false; NT];
+/// Install `rt_sigsuspend`'s mask (read from ring 3 at `set`) for the current thread.
+pub fn sigsuspend_begin(set: u64) {
+    let t = crate::sched::current_id();
+    // SAFETY: the thread's own rows; `set` was validated by `uaccess::gate` (rt_sigsuspend, rd 8).
+    unsafe {
+        let m = core::ptr::read_unaligned(crate::uaccess::uptr::<u64>(set)) & !((1u64 << 8) | (1u64 << 18));
+        SUSP_SAVED[t] = SIGMASK[t]; SUSP_ON[t] = true; SIGMASK[t] = m;
+    }
+}
+/// The mask `rt_sigsuspend` replaced, once (None: the thread is not in one).
+pub fn sigsuspend_take(t: usize) -> Option<u64> {
+    // SAFETY: the thread's own rows.
+    unsafe { if SUSP_ON[t] { SUSP_ON[t] = false; Some(SUSP_SAVED[t]) } else { None } }
+}
 /// clone(CLONE_VM): the thread inherits the creator's mask, it has no pending signals.
 pub fn thread_inherit_sigmask(parent: usize, child: usize) { unsafe { SIGMASK[child] = SIGMASK[parent]; } PENDING[child].store(0, Ordering::Relaxed); }
 pub fn set_sigmask(t: usize, m: u64) { unsafe { SIGMASK[t] = m; } }

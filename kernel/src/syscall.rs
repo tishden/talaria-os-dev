@@ -1874,8 +1874,10 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         // SAFETY: S4 — `sti; hlt; cli` on THIS core: `rt_sigsuspend` waits for a signal, and
         // the window with interrupts open is exactly one instruction wide, so a signal that
         // arrives cannot be missed between the check above and the `hlt`.
-        130 => { if crate::proc::sig_pending() { (-4i64) as u64 } else { unsafe { crate::arch::cpu::irq_enable_halt_disable(); }
-            (-4i64) as u64 } } // rt_sigsuspend
+        130 => { // rt_sigsuspend(mask*, sigsetsize): wait under the given mask until a signal it admits
+            crate::proc::sigsuspend_begin(f.a1);
+            loop { if crate::proc::sig_pending() { break; } unsafe { crate::arch::cpu::irq_enable_halt_disable(); } }
+            (-4i64) as u64 }
         273 => 0, // set_robust_list -> ok (sigaltstack is implemented above)
         334 => ENOSYS, // rseq: not supported (glibc switches rseq off at an ENOSYS; a "success" without updating the area would break sched_getcpu)
         302 | 97 => { // prlimit64(pid, res, new, old) / getrlimit(res, rlim)
@@ -2657,7 +2659,15 @@ fn fatal_dumps(sig: u64) -> bool {
 /// redirect rip into the handler (rdi=sig, rsi=&siginfo, rdx=&uc). It returns rax.
 fn deliver_signals(f: &mut Frame, ret: u64) -> u64 {
     loop {
-        let sig = match crate::proc::take_pending() { Some(s) => s, None => return ret };
+        let sig = match crate::proc::take_pending() {
+            Some(s) => s,
+            None => {
+                // an rt_sigsuspend whose signal ran no handler (ignored): its mask goes back here
+                let t = crate::sched::current_id();
+                if let Some(m) = crate::proc::sigsuspend_take(t) { crate::proc::set_sigmask(t, m); }
+                return ret;
+            }
+        };
         let (h, flags, restorer, mask) = crate::proc::handler_of(sig);
         if strace_on() {
             crate::println!("[signal] t{} accepted {} (the handler {:#x})", crate::sched::current_id(), sig, h);
@@ -2717,10 +2727,13 @@ fn deliver_signals(f: &mut Frame, ret: u64) -> u64 {
             // by SIGCHLD came back as EINTR under SA_RESTART).
             let restart = ret as i64 == -4 && flags & 0x1000_0000 != 0
                 && matches!(crate::arch::abi::to_internal(f.nr), Some(0 | 1 | 17 | 18 | 19 | 20 | 43 | 288 | 61 | 44 | 45 | 46 | 47 | 42));
-            let old_mask = crate::proc::sigmask_of(t);
+            // The frame carries the mask to come back to: rt_sigsuspend's saved one when the
+            // thread is in one; the handler runs under the current (temporary) mask plus sa_mask.
+            let cur_mask = crate::proc::sigmask_of(t);
+            let old_mask = crate::proc::sigsuspend_take(t).unwrap_or(cur_mask);
             crate::arch::signal::write_syscall_context(uc, f, ret, usp, restart, old_mask);
             core::ptr::write_unaligned(uptr::<u64>(uc + UC_SIGMASK), old_mask); // uc_sigmask
-            let mut nm = old_mask | mask; if flags & 0x4000_0000 == 0 { nm |= 1u64 << (sig - 1); } // !SA_NODEFER
+            let mut nm = cur_mask | mask; if flags & 0x4000_0000 == 0 { nm |= 1u64 << (sig - 1); } // !SA_NODEFER
             crate::proc::set_sigmask(t, nm);
             // The FPU/SSE/AVX state of the interrupted code -> into the frame (uc_mcontext.fpregs)
             crate::arch::signal::write_fpu(base, uc, fpu_area(f));
