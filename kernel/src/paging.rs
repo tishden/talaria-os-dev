@@ -2105,10 +2105,12 @@ pub fn any_mapped(vaddr: u64, pages: u64) -> bool {
 struct Deferred { f: [(u64, u64); 64], n: usize }
 impl Deferred {
     const fn new() -> Self { Deferred { f: [(0, 0); 64], n: 0 } }
+    #[track_caller]
     fn put(&mut self, phys: u64, cnt: u64, flush: &dyn Fn()) {
         if self.n == self.f.len() { flush(); self.free(); }
         self.f[self.n] = (phys, cnt); self.n += 1;
     }
+    #[track_caller]
     fn free(&mut self) {
         for &(p, c) in &self.f[..self.n] { crate::mem::free_contig(p, c); }
         self.n = 0;
@@ -2974,6 +2976,7 @@ pub fn cow_count() -> u64 { COW_COUNT.load(core::sync::atomic::Ordering::Relaxed
 /// A fork through COW: the new space shares the source's PHYSICAL pages; the writable
 /// private pages are marked RO+COW on both sides (the copy happens at the first write).
 /// The RO pages (the code) are shared as they are. It is cheaper than an eager fork: there are 0 copies before a write.
+static FORK_PNONE2M: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub fn fork_cow_space(src: u64) -> u64 {
     let dst = new_process_space(); // dst with a private GB0 PD, without copies of the pages
     // The vDSO's image is ONE for all the processes, so its pages are NOT private, while
@@ -3004,6 +3007,9 @@ pub fn fork_cow_space(src: u64) -> u64 {
                         if e2 & PTE_P != 0 { split_2m(pd.add(l2)); e2 = pte_r(pd.add(l2)); }
                         else {
                             let vaddr2 = ((l4 as u64) << 39) | ((l3 as u64) << 30) | ((l2 as u64) << 21);
+                            if e2 & PTE_PNONE != 0 && e2 & PTE_LAZY == 0 && FORK_PNONE2M.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
+                                crate::println!("fork: a PROT_NONE 2 MB page WITH frames at {:#x} (frame {:#x}) copied to the child UNCOUNTED", vaddr2, e2 & ADDR_MASK);
+                            }
                             pte_w(pde_ptr_in(dst, vaddr2), e2);
                             continue;
                         }
