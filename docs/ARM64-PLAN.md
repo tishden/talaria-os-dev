@@ -2431,6 +2431,33 @@ order of work:
    ignored its mask (75bd3be, gate `chldrace`). Next: the COW copy's source and destination around a
    just-freed bounce frame (a stale translation of the destination through the map? a copy from
    the wrong source?), and the triple-fault variant (a QEMU `-d int` trace of the last exceptions).
+
+   **Closed locally (2026-10-08, the EC2 confirmation is the next step).** The `-d int` trace caught
+   the triple fault: a kernel `#PF` in `netsys::yield_window` on a root whose kernel half was gone —
+   a freed, reused top-level table still loaded. A ring of the last 64 `unmap_proc` calls (with the
+   task, the core, the loaded root and a fork marker) then named the whole thing on a staged
+   reproducer (`kernel/user/cowstale.c`: the parent pinned to core 1, then 0, a child exiting
+   between): **the parent t0, on core 1, ran its `mmap`s with its dead child's root loaded.** The
+   switch stub takes the root to load from a per-core word (`gs:40`; arm64's `sched_root`) and never
+   cleared it; `ap_loop` enters a task with a direct root switch that leaves the word alone; the next
+   tick on which the scheduler STAYED (it writes nothing) reloaded the previous task's root. The
+   postmaster after its startup child's exit is exactly that: it lands on the core the child left,
+   then lives in the child's space until the child's space is freed under it — `rip=0`, or a triple
+   fault. Fix: the stub spends the decision (`movq $0, %gs:40`). arm64's tail loads `sched_root` only
+   when it enters ANOTHER frame — a scheduler that stays returns the same frame and skips the load —
+   so arm64 was not exposed (its negative control passes, 3 of 3); it clears the word too
+   (`str xzr, [x9, #40]`), a decision being spent where it is carried out. The same chase
+   opened two holes real on their own: the COW copy freed the original before any other core
+   forgot it (a sibling thread kept reading the original — now the page is shot down first, as
+   `munmap` does), and a write fault from a stale read-only translation of a page another core had
+   already made writable was a SIGSEGV (now a spurious fault: flush and retry, a run of eight at one
+   address within a millisecond still faults). A belt over the brace: the dead-space reaper also
+   checks the root each core really holds (`REAL_CR3`, read by the core at its scheduler entry and
+   its every `paging::switch`); since the stub fix it never fires. Before → after under TCG:
+   `cowstale` failed in the first run of every series → 12 of 12; PostgreSQL ~1 boot in 5 → 30 of
+   30 ready with the deferred path taken 7 times. Gates `cowstale`/`cowstalet` on both machines.
+   The instruments stay, opt-in or one entry per call: the `unmap_proc` ring and the walk of the
+   faulting stack's tables in the ring-3 fault report, the roots `free_address_space` freed.
 1. **The databases under strict on the EC2 scoreboard — done 2026-10-08 except x86 PostgreSQL
    (item 0).** One run per stand (`stand_lock`), B = A plus `talaria.dmap=1` (`APPEND=1`), the
    consoles kept, mk-ami's silent x86 death fixed. Under strict, against AL2023 in the same hour:

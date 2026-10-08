@@ -138,6 +138,16 @@ pub fn queue_dead_space(cr3: u64) {
 /// at a restart of a cell — there it is caught by `aps_to_kernel_cr3`).
 static AP_CR3: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU];
 pub static AS_AP_DEFER: AtomicU64 = AtomicU64::new(0);
+/// THE CR3 EACH CORE REALLY HAS, as the core itself read it at its last scheduler entry or
+/// `paging::switch` (ARM64-PLAN §11 item 0). `AP_CR3` is what the scheduler DECIDED to load; a
+/// space must not be freed while either says a core is on it. A real one the belief missed is
+/// counted and said once.
+pub static REAL_CR3: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU];
+pub static AS_BELIEF_MISS: AtomicU64 = AtomicU64::new(0);
+#[inline] pub fn note_real_cr3() {
+    let c = crate::percpu::cpu_id() as usize;
+    if c < MAXCPU { REAL_CR3[c].store(crate::paging::current_cr3() & !0xFFF, Ordering::SeqCst); }
+}
 pub static AS_AP_LEFT: AtomicU64 = AtomicU64::new(0);
 static AP_CR3_PREV: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU];
 #[inline]
@@ -175,6 +185,18 @@ unsafe fn reap_dead_spaces(active_cr3: u64) {
                 if crate::percpu::cur_task_of(c) == u64::MAX { ap_ring(c); crate::sync::kick(c as u32); }
             }
         }
+        // What the cores REALLY hold (every core, the boot one included, except this one):
+        // a space the notes above missed is still not freed.
+        let me = crate::percpu::cpu_id() as usize;
+        for c in 0..MAXCPU {
+            if c == me { continue; }
+            if REAL_CR3[c].load(Ordering::SeqCst) == cr3 & !0xFFF && !on_ap {
+                on_ap = true;
+                if AS_BELIEF_MISS.fetch_add(1, Ordering::Relaxed) < 4 {
+                    crate::println!("sched: THE AS {:#x} IS STILL CR3 ON CORE {} though the scheduler's notes say otherwise — its freeing waits", cr3, c);
+                }
+            }
+        }
         if on_ap {
             // The first cases go out loud: otherwise by the log one cannot tell "the protection is not needed"
             // from "the protection did not work".
@@ -193,6 +215,18 @@ unsafe fn reap_dead_spaces(active_cr3: u64) {
         for t in 0..n { if CR3[t] == cr3 { CR3[t] = 0; } } // the dead tasks no longer point at the torn-down tables
         crate::paging::free_address_space(cr3);
     }
+}
+/// The distinct address spaces of the live tasks (the at-crash audit, `paging::audit_spaces`).
+pub fn live_spaces(out: &mut [u64]) -> usize {
+    let n = NREADY.load(Ordering::Relaxed);
+    let mut k = 0;
+    for t in 0..n {
+        // SAFETY: C1 — read-only, at a crash.
+        let (cr3, dead) = unsafe { (CR3[t] & !0xFFF, DEAD[t]) };
+        if cr3 == 0 || dead || out[..k].contains(&cr3) { continue; }
+        if k < out.len() { out[k] = cr3; k += 1; }
+    }
+    k
 }
 /// The diagnostics: is the frame phys mapped privately in the AS of any live task (except `except`).
 #[allow(dead_code)]
@@ -1109,6 +1143,7 @@ pub fn ap_loop(cpu: usize) -> ! {
             }
         }
         AP_CR3_PREV[cpu].store(0, Ordering::SeqCst); // here the switch has certainly finished
+        note_real_cr3();
         crate::gdb::apply_if_changed(cpu);
         // This core's share of L3. Here rather than only at the bring-up: the layout comes
         // from the manifest LATER than the cores are brought up, while a dedicated core has no tick
@@ -3542,6 +3577,7 @@ pub fn strace_take(cpu: usize, since: u64, before: usize, out: &mut [SchedEv]) -
 }
 
 fn ap_schedule(cpu: usize, cur_rsp: u64) -> u64 {
+    note_real_cr3();
     // We are in the scheduler again: the CR3 switch from the previous entry is finished.
     AP_CR3_PREV[cpu].store(0, Ordering::Relaxed);
     crate::gdb::apply_if_changed(cpu); // the debugger's breakpoints go on all the cores

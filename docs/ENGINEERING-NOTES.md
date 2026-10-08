@@ -930,6 +930,28 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     now takes the boot core's own `tcr_value()`, published beside the root and cleaned to the point
     of coherency (`AP_TCR`/`AP_ROOT`). **When a core is brought up by hand, give it every register
     the tables were written for, not only the root.**
+56. **"A decision must be spent where it is carried out."** PostgreSQL's postmaster died at
+    `rip=0` on a `c6i.xlarge` after its startup child exited, or the machine triple-faulted; it
+    was older than the arm64 port, and every instrument that slowed the frames' reuse hid it. The
+    scheduler tells the switch stub which root to load in a per-core word (`gs:40`, arm64's
+    `sched_root`); the stub loaded it and left it there. The pickup loop (`ap_loop`) enters a task
+    with a direct `mov cr3`, without the word — so the next tick on which the scheduler decided
+    to STAY (and wrote nothing) reloaded the root of the task this core had run before: the
+    parent, migrated onto the core its child had just exited on, ran in its dead child's space.
+    Its `mmap`s went there, its own space lost nothing — and when the child's space was freed,
+    the parent's next instruction ran on reused tables. arm64's tail was safe by shape — it loads
+    the word only when it enters another frame, and a scheduler that stays returns the same one —
+    which is the same rule written as control flow. What named it was a 64-entry ring of
+    `unmap_proc` calls with the task, the core and the loaded root, and a fork marker: "t0,
+    core 1, `mmap`, root = the child's". Two other holes the same chase opened, real on their
+    own: a COW copy freed the original at once while another core (a sibling thread, or a core
+    lazily keeping the space) still translated the page to it — the copy now shoots the page
+    down first, as `munmap` does; and the write fault such a stale read-only translation raises on
+    a page another core already made writable was delivered as SIGSEGV — it is now a spurious
+    fault (flush, retry). The gate is `cowstale`/`cowstalet` (staged with `sched_setaffinity`,
+    failing in the first run under TCG before the fix). **A value that orders an action — "load
+    this root", "flush this range" — is consumed by the code that performs it, not left for the
+    next caller to inherit.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 

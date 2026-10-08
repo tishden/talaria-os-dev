@@ -302,7 +302,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     [ $rc = 0 ] && [ -s "$REPO/$TD/$name.img" ]
   }
   if command -v mkfs.ext2 >/dev/null 2>&1 \
-     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace \
+     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace cowstale \
      && mkimg ms 64M '' mapshared && mkimg core 32M '' crashme \
      && mkimg coremt 32M 'binary=/crashme\nargs=crashme mt\nrestart=0\n' crashme \
      && mkimg crashr 32M 'binary=/crashme\nargs=crashme mt\nrestart=1\n' crashme \
@@ -330,6 +330,12 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
       assert 'chldrace: ALL OK 500'                                           "$m: a SIGCHLD handler and 500 children exiting on another core (the parent in $( [ $m = chldrace ] && echo rt_sigsuspend || echo waitpid); ARM64-PLAN §11 item 0)"
       assertnot "$BAD|THE PARENT.S STACK|\[fault\]"                          "$m: the parent's stack intact, no fault"
     done
+    run 300 "talaria.test=cowstale" ext2
+    assert 'cowstale: ALL OK 300'                                             'cowstale: a page COW-copied on one core, read back on the other after the original was freed and reused (the switch tail reloaded a stale root; ARM64-PLAN §11 item 0)'
+    assertnot "$BAD|\[fault\]"                                              'cowstale: no fault'
+    run 300 "talaria.test=cowstalet" ext2
+    assert 'cowstale: ALL OK 200 threads'                                     'cowstalet: a sibling thread on the other core sees the writer'"'"'s COW copy (shootdown before the free; a stale read-only translation is a spurious fault)'
+    assertnot "$BAD|\[fault\]"                                              'cowstalet: no fault'
     run 150 "talaria.test=mbench" ext2
     assert 'RESULT mbench syscall [0-9]+ ns'                                  'mbench: the syscall primitive is timed (the number is for the stand)'
     assert 'mbench: ALL OK'                                                   'mbench: the primitives of the hot loop with the binary that goes to Linux'

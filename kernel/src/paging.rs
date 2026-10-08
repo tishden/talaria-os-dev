@@ -1149,7 +1149,23 @@ pub fn query(vaddr: u64) -> (bool, bool, bool, bool) {
     (present, e & PTE_RW != 0, e & PTE_US != 0, present && (e & PTE_NX == 0))
 }
 
+/// Is the page at `vaddr` marked copy-on-write (the fault report).
+pub fn is_cow(vaddr: u64) -> bool { leaf_entry(vaddr).is_some_and(|e| e & PTE_COW != 0) }
 /// A page's leaf entry in its entirety (for the cache-policy tests): None — it is not mapped.
+/// The fault report: the entries on the way to `vaddr` in the current space, top level first
+/// (0 past the first absent one), and each table's frame.
+pub fn walk_path(vaddr: u64) -> [(u64, u64); 4] {
+    let mut out = [(0u64, 0u64); 4];
+    let mut table = current_cr3() & ADDR_MASK;
+    for (lvl, shift) in [39u32, 30, 21, 12].iter().enumerate() {
+        // SAFETY: P1 — a read-only walk of the current space's tables through the direct map.
+        let e = unsafe { pte_r(kptr::<Pte>(table).add(((vaddr >> shift) & 511) as usize)) };
+        out[lvl] = (table, e);
+        if e & PTE_P == 0 || (lvl > 0 && lvl < 3 && e & PTE_PS != 0) { break; }
+        table = e & ADDR_MASK;
+    }
+    out
+}
 pub fn leaf_entry(vaddr: u64) -> Option<u64> {
     // SAFETY: P1 + P2 — a read-only walk.
     let e = unsafe { walk_entry(vaddr) };
@@ -2909,6 +2925,7 @@ pub fn map_in(pml4_phys: u64, vaddr: u64, phys: u64, writable: bool, user: bool)
 /// half is shared).
 pub unsafe fn switch(pml4_phys: u64) {
     mmu::set_root(pml4_phys);
+    crate::sched::note_real_cr3();
 }
 
 /// The identity gigabyte mapped by 2M leaves — the one with the kernel's image, where the
@@ -3060,17 +3077,162 @@ pub fn fork_cow_space(src: u64) -> u64 {
     // cached there would let their writes after the fork land in the frame the child now
     // shares (both machines; the local flush above was all there was).
     shootdown_range_user(0, 0);
+    um_mark(1, dst);
     dst
+}
+
+// THE COW TRACE (with `talaria.freetrace=1`, ARM64-PLAN §11 item 0): the last copies made by
+// `cow_fault` — the page, the source frame, the copy. A process that reads zeros from a fresh
+// copy points at its SOURCE: was that frame freed (and reused) before it was copied from?
+const CT_N: usize = 1024;
+static CT: [[core::sync::atomic::AtomicU64; 4]; CT_N] = [const { [const { core::sync::atomic::AtomicU64::new(0) }; 4] }; CT_N];
+static CT_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+fn cow_note(va: u64, src: u64, dst: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !crate::mem::FREETRACE.load(Relaxed) { return; }
+    let i = (CT_SEQ.fetch_add(1, Relaxed) as usize) % CT_N;
+    CT[i][0].store(va, Relaxed); CT[i][1].store(src, Relaxed); CT[i][2].store(dst, Relaxed);
+    CT[i][3].store(crate::sched::current_id() as u64 | (crate::mem::free_seq() << 16), Relaxed);
+}
+/// The COW copy whose destination is `dst`: (the page, the source frame, the task, the free
+/// counter at the copy).
+pub fn cow_find(dst: u64) -> Option<(u64, u64, u64, u64)> {
+    use core::sync::atomic::Ordering::Relaxed;
+    let now = CT_SEQ.load(Relaxed);
+    for back in 1..=now.min(CT_N as u64) {
+        let i = ((now - back) as usize) % CT_N;
+        if CT[i][2].load(Relaxed) == dst {
+            let w = CT[i][3].load(Relaxed);
+            return Some((CT[i][0].load(Relaxed), CT[i][1].load(Relaxed), w & 0xFFFF, w >> 16));
+        }
+    }
+    None
+}
+
+// THE AT-CRASH AUDIT (`talaria.faultaudit=1`, ARM64-PLAN §11 item 0). Nothing runs before the
+// fault — every instrument that touched the hot path hid the race — so the consistency of what
+// the live spaces map is checked only when a process has already crashed: every private user
+// frame against the ledger (handed out?) and the refcount (as many owners as mappings?), every
+// table frame against the leaves (a page table mapped as somebody's page?).
+pub static FAULTAUDIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+const AU_N: usize = 1 << 16;
+static mut AU_K: [u64; AU_N] = [0; AU_N];
+static mut AU_C: [u16; AU_N] = [0; AU_N];
+static mut AU_T: [u64; 8192] = [0; 8192];
+pub fn audit_spaces() {
+    let mut cr3s = [0u64; 64];
+    let ns = crate::sched::live_spaces(&mut cr3s);
+    // SAFETY: at a crash, single-threaded use of the audit's own tables; the walks only read.
+    unsafe {
+        let (k, c, tb) = (&mut *core::ptr::addr_of_mut!(AU_K), &mut *core::ptr::addr_of_mut!(AU_C), &mut *core::ptr::addr_of_mut!(AU_T));
+        k.fill(0); c.fill(0);
+        let mut nt = 0usize; let mut leaves = 0u64; let mut over = false;
+        let mut add = |f: u64| {
+            let mut h = ((f >> 12).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 48) as usize % AU_N;
+            for _ in 0..AU_N { if k[h] == 0 || k[h] == f { k[h] = f; c[h] = c[h].saturating_add(1); return true; } h = (h + 1) % AU_N; }
+            false
+        };
+        let kern = kernel_cr3() & ADDR_MASK;
+        let kpml4 = if kern != 0 { kptr::<Pte>(kern).cast_const() } else { core::ptr::null() };
+        let kpdpt = if kpml4.is_null() { core::ptr::null() } else { kptr::<Pte>(pte_r(kpml4) & ADDR_MASK).cast_const() };
+        for &cr3 in &cr3s[..ns] {
+            let pml4 = kptr::<Pte>(cr3);
+            for l4 in 0..256usize {
+                let e4 = pte_r(pml4.add(l4));
+                if e4 & PTE_P == 0 || (!kpml4.is_null() && e4 == pte_r(kpml4.add(l4))) { continue; }
+                if nt < tb.len() { tb[nt] = e4 & ADDR_MASK; nt += 1; }
+                let pdpt = kptr::<Pte>(e4 & ADDR_MASK);
+                for l3 in 0..512usize {
+                    let e3 = pte_r(pdpt.add(l3));
+                    if e3 & PTE_P == 0 || e3 & PTE_PS != 0 { continue; }
+                    if l4 == 0 && !kpdpt.is_null() && e3 == pte_r(kpdpt.add(l3)) { continue; }
+                    if nt < tb.len() { tb[nt] = e3 & ADDR_MASK; nt += 1; }
+                    let pd = kptr::<Pte>(e3 & ADDR_MASK);
+                    for l2 in 0..512usize {
+                        let e2 = pte_r(pd.add(l2));
+                        if e2 & PTE_PS != 0 {
+                            if e2 & PTE_PRIV != 0 && e2 & PTE_LAZY == 0 && e2 & (PTE_P | PTE_PNONE) != 0 { leaves += 1; over |= !add(e2 & ADDR_MASK); }
+                            continue;
+                        }
+                        if e2 & PTE_P == 0 { continue; }
+                        if nt < tb.len() { tb[nt] = e2 & ADDR_MASK; nt += 1; }
+                        let pt = kptr::<Pte>(e2 & ADDR_MASK);
+                        for l1 in 0..512usize {
+                            let e1 = pte_r(pt.add(l1));
+                            if e1 & PTE_PRIV == 0 || e1 & PTE_LAZY != 0 || e1 & (PTE_P | PTE_PNONE) == 0 { continue; }
+                            leaves += 1; over |= !add(e1 & ADDR_MASK);
+                        }
+                    }
+                }
+            }
+        }
+        crate::println!("[audit] {} live spaces, {} private leaves, {} table frames{}", ns, leaves, nt, if over { " (the table OVERFLOWED)" } else { "" });
+        let mut bad = 0;
+        for h in 0..AU_N {
+            if k[h] == 0 { continue; }
+            let (f, n) = (k[h], c[h] as u64);
+            let rc = crate::mem::rc_get(f) as u64;
+            let handed = crate::mem::fc_handed(f);
+            let wrong = handed == Some(false) || (n >= 2 && rc < n);
+            if wrong && bad < 12 {
+                crate::println!("[audit] FRAME {:#x}: mapped {} times, refcount {}, handed out {:?}{}", f, n, rc, handed,
+                    if handed == Some(false) { " <-- MAPPED BUT FREE" } else { " <-- THE REFCOUNT IS LOWER THAN THE OWNERS" });
+                if let Some((sp, va, _)) = crate::sched::frame_mapped_elsewhere(f, 0) { crate::println!("[audit]   e.g. in the space {:#x} at {:#x}", sp, va); }
+            }
+            if wrong { bad += 1; }
+        }
+        let mut tbad = 0;
+        for i in 0..nt {
+            let t = tb[i];
+            let handed = crate::mem::fc_handed(t);
+            let mut h = ((t >> 12).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 48) as usize % AU_N;
+            let mut as_leaf = false;
+            for _ in 0..AU_N { if k[h] == 0 { break; } if k[h] == t { as_leaf = true; break; } h = (h + 1) % AU_N; }
+            let dup = tb[..i].contains(&t);
+            if handed == Some(false) || as_leaf || dup {
+                if tbad < 8 { crate::println!("[audit] TABLE FRAME {:#x}: handed out {:?}{}{}", t, handed, if as_leaf { ", ALSO MAPPED AS A USER PAGE" } else { "" }, if dup { ", IN TWO SPACES" } else { "" }); }
+                tbad += 1;
+            }
+        }
+        crate::println!("[audit] {} frame(s) and {} table(s) inconsistent", bad, tbad);
+    }
 }
 
 /// Handle a COW #PF at vaddr in the active AS: if the page is present+COW+RO —
 /// allocate a private copy, copy it, set RW and remove COW. true = it has been handled.
+/// Spurious write faults (a stale read-only translation of a page already writable) taken.
+pub static SPURIOUS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static SPUR_LAST: [core::sync::atomic::AtomicU64; 64] = [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+static SPUR_RUN: [core::sync::atomic::AtomicU64; 64] = [const { core::sync::atomic::AtomicU64::new(0) }; 64];
+static SPUR_TSC: [core::sync::atomic::AtomicU64; 64] = [const { core::sync::atomic::AtomicU64::new(0) }; 64];
 pub fn cow_fault(vaddr: u64) -> bool {
     let a = vaddr & !0xFFF;
     // A fast NON-SPLITTING check of the COW bit: not COW -> false at once (we do not touch
     // the kernel's large leaves at ordinary/wild write faults). A COW page is always 4K.
     // SAFETY: P1 + P2 — the walk that decides whether this fault is a COW one.
     let we = unsafe { walk_entry(a) };
+    // A STALE TRANSLATION, NOT A FAULT. The entry is already the user's, present and writable:
+    // another core made it so — an in-place un-COW (the last owner) or a copy — and this core
+    // still held the old read-only translation (a sibling thread, or a lazily kept CR3). Linux
+    // calls it a spurious fault: drop the translation and retry. Without this a multithreaded
+    // process died with SIGSEGV on its own writable page after a fork (`cowstale threads`,
+    // ARM64-PLAN §11 item 0). Eight in a row (within a millisecond each) at one address on one
+    // core is not staleness — it goes on as a fault.
+    if we & PTE_P != 0 && we & PTE_RW != 0 && we & PTE_US != 0 && we & PTE_COW == 0 && a < USER_TOP {
+        use core::sync::atomic::Ordering::Relaxed;
+        let me = crate::percpu::cpu_id().min(63);
+        // "in a row" is in TIME: the same page goes stale legitimately once per fork
+        let now = crate::tsc::rdtsc();
+        let close = now.wrapping_sub(SPUR_TSC[me].swap(now, Relaxed)) < crate::tsc::hz().max(1_000_000) / 1000;
+        let n = if SPUR_LAST[me].swap(a, Relaxed) == a && close { SPUR_RUN[me].fetch_add(1, Relaxed) + 1 } else { SPUR_RUN[me].store(0, Relaxed); 0 };
+        if n < 8 {
+            // SAFETY: P5 — this core's own translation of one page.
+            unsafe { mmu::flush_page(a); }
+            SPURIOUS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            return true;
+        }
+        return false;
+    }
     if we & PTE_P == 0 || we & PTE_COW == 0 || we & PTE_RW != 0 { return false; }
     // SAFETY: P1 + P2 + P3 + P4 — the copy — a fresh frame, the old page's bytes through the
     // identity map, then the entry; the CAS keeps two threads faulting on the same page
@@ -3100,6 +3262,19 @@ pub fn cow_fault(vaddr: u64) -> bool {
                         crate::mem::free_contig(np, 1);
                         return true;
                     }
+                    cow_note(a, phys, np);
+                    // THE OTHER CORES' TRANSLATIONS OF THIS PAGE GO BEFORE THE ORIGINAL MAY.
+                    // The entry now names the copy, but a core that holds this space — a sibling
+                    // thread, or a core that ran this process and then a kernel task without
+                    // reloading CR3 (the lazy switch) — still translates the page to the
+                    // ORIGINAL, read-only. Freed below at once, the original was handed out
+                    // and zeroed, and the process, back on that core with "the same CR3, no
+                    // reload", read its stack from it: PostgreSQL's postmaster returned into 0
+                    // on a c6i (and under TCG locally, ~1 boot in 5), and a reused page table
+                    // killed the machine (ARM64-PLAN §11 item 0). As `munmap` does: the local
+                    // flush, the shootdown to every core that may hold this space, then the free.
+                    mmu::flush_page(a);
+                    shootdown_range_user(a, 1);
                     // The other owners may have let go meanwhile (a child's own copy, an exit):
                     // then the original is nobody's and goes back to the allocator.
                     if crate::mem::rc_release(phys) { crate::mem::free_contig(phys, 1); }
@@ -3124,7 +3299,38 @@ pub static UNMAP_WALK_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::A
 pub static UNMAP_FLUSH_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static UNMAP_SHOOT_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// The last `unmap_proc` calls: the range, the task and core, the space (the fault report:
+/// "who removed this page of a live process?" — ARM64-PLAN §11 item 0).
+static UM_RING: [[core::sync::atomic::AtomicU64; 4]; 64] = [const { [const { core::sync::atomic::AtomicU64::new(0) }; 4] }; 64];
+static UM_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// A marker in the same ring (a fork: `what` = 1, the child's root in `pages`).
+pub fn um_mark(what: u64, val: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let i = (UM_N.fetch_add(1, Relaxed) % 64) as usize;
+    UM_RING[i][0].store(what, Relaxed); UM_RING[i][1].store(val, Relaxed);
+    UM_RING[i][2].store(crate::sched::current_id() as u64 & 0xFFFF | (crate::percpu::cpu_id() as u64) << 16, Relaxed);
+    UM_RING[i][3].store(current_cr3() & ADDR_MASK, Relaxed);
+}
+/// The whole ring, oldest first: (vaddr or marker, pages or value, task|core<<16|line<<24, cr3).
+pub fn um_dump(mut f: impl FnMut(u64, u64, u64, u64, u64)) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let n = UM_N.load(Relaxed);
+    for k in n.saturating_sub(64)..n {
+        let i = (k % 64) as usize;
+        f(k, UM_RING[i][0].load(Relaxed), UM_RING[i][1].load(Relaxed), UM_RING[i][2].load(Relaxed), UM_RING[i][3].load(Relaxed));
+    }
+}
+#[track_caller]
 pub fn unmap_proc(vaddr: u64, pages: u64) {
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let i = (UM_N.fetch_add(1, Relaxed) % 64) as usize;
+        UM_RING[i][0].store(vaddr, Relaxed); UM_RING[i][1].store(pages, Relaxed);
+        let t = crate::sched::current_id();
+        let sys = if t < crate::sched::NTASKS { crate::syscall::LAST_SYS[t].load(Relaxed) >> 48 } else { 0xFFFF };
+        UM_RING[i][2].store(t as u64 & 0xFFFF | (crate::percpu::cpu_id() as u64 & 0xFF) << 16 | (core::panic::Location::caller().line() as u64 & 0xFFFF) << 24 | (sys & 0xFFFF) << 40, Relaxed);
+        UM_RING[i][3].store(current_cr3() & ADDR_MASK, Relaxed);
+    }
     // A BREAKDOWN OF THE PRICE. `sysprof` on PostgreSQL showed a `munmap` of 9918 ns against
     // its own `mmap` of 983 — while both call THIS function. Which means it is not about
     // the call but about the fact that `munmap`'s pages REALLY exist: a walk with
@@ -3279,7 +3485,35 @@ unsafe fn free_pd(pd: u64) {
 /// Free the address space of a finished process: the private frames (COW/shared ones — by the
 /// refcount), the split GB0 tables, the private region's tables, the PDPT/PML4. It must NOT be called
 /// under this CR3 (it is called by the scheduler from another task, see sched::reap_dead_spaces).
+/// The last roots `free_address_space` freed, with the caller and the task (the fault report: "is
+/// this process running on a space already freed?" — ARM64-PLAN §11 item 0). One entry per
+/// process exit, nothing on a hot path.
+pub static FREED_ROOTS: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+static FREED_ROOT_LOC: [core::sync::atomic::AtomicPtr<core::panic::Location<'static>>; 16] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; 16];
+static FREED_ROOT_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Where `root` was freed lately: (file:line, the core, the order of the free) — or None.
+pub fn freed_root_find(root: u64, mut f: impl FnMut(&'static str, u32, u64, u64)) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let n = FREED_ROOT_N.load(Relaxed);
+    for k in 0..16u64.min(n) {
+        let i = ((n - 1 - k) % 16) as usize;
+        if FREED_ROOTS[i].load(Relaxed) & !0xFFF == root & !0xFFF {
+            // SAFETY: P1 — null or a `&'static Location` stored by `free_address_space`.
+            let Some(loc) = (unsafe { FREED_ROOT_LOC[i].load(Relaxed).as_ref() }) else { continue };
+            f(loc.file(), loc.line(), FREED_ROOTS[i].load(Relaxed) & 0xFFF, n - 1 - k);
+        }
+    }
+}
+#[track_caller]
 pub fn free_address_space(pml4: u64) {
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let k = (FREED_ROOT_N.fetch_add(1, Relaxed) % 16) as usize;
+        let core = crate::percpu::cpu_id() as u64 & 0xFFF;
+        FREED_ROOTS[k].store((pml4 & !0xFFF) | core, Relaxed);
+        FREED_ROOT_LOC[k].store(core::ptr::from_ref(core::panic::Location::caller()).cast_mut(), Relaxed);
+    }
     // THE WALK GOES UNDER THE REFERENCE KERNEL AS rather than under the current one.
     //
     // The tables are walked by their PHYSICAL addresses through the identity mapping. In

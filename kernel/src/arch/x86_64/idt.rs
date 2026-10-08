@@ -327,7 +327,29 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
                     f.rsp & !0xFFF, ph & !0xFFF, crate::mem::fc_handed(ph & !0xFFF), crate::mem::rc_get(ph & !0xFFF),
                     crate::mem::FC_DOUBLE_ALLOC.load(core::sync::atomic::Ordering::Relaxed),
                     crate::mem::FC_DOUBLE_FREE.load(core::sync::atomic::Ordering::Relaxed)),
-                None => crate::println!("[fault] the stack page {:#x} is NOT MAPPED in the process", f.rsp & !0xFFF),
+                None => {
+                    crate::println!("[fault] the stack page {:#x} is NOT MAPPED in the process", f.rsp & !0xFFF);
+                    let now = crate::paging::current_cr3() & !0xFFF;
+                    crate::println!("[fault] the CR3 {:#x}, the task's {:#x}", now, crate::sched::task_cr3(crate::sched::current_id()));
+                    crate::paging::um_dump(|k, a, p, w, cr3| {
+                        let (t, c, line, sys) = (w & 0xFFFF, (w >> 16) & 0xFF, (w >> 24) & 0xFFFF, (w >> 40) & 0xFFFF);
+                        if a == 1 { crate::println!("[um] #{} FORK by t{} on core {} (CR3 {:#x}) -> the child's root {:#x}", k, t, c, cr3, p); }
+                        else { crate::println!("[um] #{} unmap_proc({:#x}, {}) line {} by t{} on core {} sys {} CR3 {:#x}{}", k, a, p, line, t, c, sys, cr3,
+                            if f.rsp >= a && f.rsp < a + p * 4096 { "  <-- COVERS THE STACK" } else { "" }); }
+                    });
+                    for (i, (tbl, e)) in crate::paging::walk_path(f.rsp).iter().enumerate() {
+                        if *tbl == 0 { break; }
+                        // SAFETY: P1 — a read-only look at a table of the current space.
+                        let nz = (0..512).filter(|k| unsafe { core::ptr::read_volatile(crate::kaddr::kptr::<u64>(*tbl).add(*k)) } != 0).count();
+                        crate::println!("[fault]   level {}: the table {:#x} (handed out {:?}, {} non-zero entries) -> the entry {:#x}", 4 - i, tbl, crate::mem::fc_handed(*tbl), nz, e);
+                        let (hits, n) = crate::mem::freetrace_find(*tbl);
+                        for &(back, file, line, task) in &hits[..n] {
+                            crate::println!("[fault]     THAT TABLE FRAME WAS FREED {} frees ago, by {}:{} (task t{})", back, file, line, task);
+                        }
+                    }
+                    crate::paging::freed_root_find(now, |file, line, core, ord| crate::println!(
+                        "[fault]   THAT ROOT WAS FREED: {}:{} on core {} (the free #{})", file, line, core, ord));
+                }
             }
             if crate::mem::FREETRACE.load(core::sync::atomic::Ordering::Relaxed) {
                 if let Some(ph) = crate::paging::phys_of_in(cr3, f.rsp) {
@@ -336,9 +358,23 @@ extern "C" fn rust_exception(fp: *mut ExcFrame, fpu: u64) -> ! {
                     for &(back, file, line, task) in &hits[..n] {
                         crate::println!("[fault] THAT FRAME WAS FREED {} frees ago, by {}:{} (task t{}, this is t{})", back, file, line, task, crate::sched::current_id());
                     }
+                    // The frame as a COW copy: what it was copied FROM, and that source's frees.
+                    if let Some((va, src, task, at)) = crate::paging::cow_find(ph & !0xFFF) {
+                        let now = crate::mem::free_seq();
+                        crate::println!("[fault] it is a COW copy of {:#x} (the page {:#x}, made by t{} {} frees ago)", src, va, task, now.saturating_sub(at));
+                        let (sh, sn) = crate::mem::freetrace_find(src);
+                        if sn == 0 { crate::println!("[fault]   the source is not among the last frees"); }
+                        for &(back, file, line, t) in &sh[..sn] {
+                            crate::println!("[fault]   the SOURCE was freed {} frees ago ({} the copy), by {}:{} (task t{})", back,
+                                if back > now.saturating_sub(at) { "BEFORE" } else { "after" }, file, line, t);
+                        }
+                    }
                 }
             }
         }
+        if f.vec == 14 { crate::println!("[fault] the entry of {:#x}: {:#x} (P|RW|US|COW = {}|{}|{}|{})", cr2v, crate::paging::leaf_entry(cr2v).unwrap_or(0),
+            crate::paging::query(cr2v).0, crate::paging::query(cr2v).1, crate::paging::query(cr2v).2, crate::paging::is_cow(cr2v)); }
+        if crate::paging::FAULTAUDIT.load(core::sync::atomic::Ordering::Relaxed) { crate::paging::audit_spaces(); }
         let sig = match f.vec { 6 => 4, 0 | 16 | 19 => 8, 17 => 7, _ => 11 };
         // The crashed thread's stack goes INTO THE LOG, always. A core dump requires an FS and the knob
         // switched on, while the stack is needed on a machine where there is neither.

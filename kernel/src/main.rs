@@ -206,7 +206,9 @@ extern "C" fn rust_main(start_info: u64) -> ! {
     // 0xB8000 window on a machine without a VGA device is an extra risk in the most opaque zone
     // of the bring-up, where there is nothing to debug with.
     if cmdline::has(cmdline, "talaria.console", "vga") { vga::enable(); }
-    if cmdline::has(cmdline, "talaria.freetrace", "1") { mem::FREETRACE.store(true, core::sync::atomic::Ordering::Relaxed); }
+    if cmdline::has(cmdline, "talaria.freetrace", "1") || cmdline::has(cmdline, "talaria.freetrace", "2") { mem::FREETRACE.store(true, core::sync::atomic::Ordering::Relaxed); }
+    if cmdline::has(cmdline, "talaria.faultaudit", "1") { paging::FAULTAUDIT.store(true, core::sync::atomic::Ordering::Relaxed); }
+    if cmdline::has(cmdline, "talaria.freetrace", "2") { mem::BOUNCE_QUARANTINE.store(true, core::sync::atomic::Ordering::Relaxed); }
     if let Some(w) = cmdline::value(cmdline, "talaria.watchframe").and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()) {
         mem::WATCH.store(w & !0xFFF, core::sync::atomic::Ordering::Relaxed);
     }

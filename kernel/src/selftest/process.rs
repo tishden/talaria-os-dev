@@ -135,6 +135,18 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/chldrace", &[b"chldrace", b"500", mode], &[b"HOME=/"]); } }
             crate::suite::park()
         }
+        "cowstale" | "cowstalet" => {
+            // A COW copy must leave no core translating to the original, and a task must run on
+            // its own root (docs/ARM64-PLAN.md §11 item 0). `cowstale`: the parent caches a page
+            // on core 1, copies it on core 0, the child exits and the freed original is reused,
+            // then it reads the page back on core 1 — the switch stub had reloaded its dead
+            // child's root there; `cowstalet`: a sibling thread on the other core must see the
+            // writer's copy (a COW copy without a shootdown left it reading the original).
+            crate::smp::start_from_cmdline(cmdline);
+            let args: &[&[u8]] = if name == "cowstale" { &[b"cowstale", b"300"] } else { &[b"cowstale", b"200", b"threads"] };
+            if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/cowstale", args, &[b"HOME=/"]); } }
+            crate::suite::park()
+        }
         "sigtestlo" => {
             // The same binary linked at 0x20_0000 — on x86 the kernel image's own load address
             // (stage 7.4): the image runs at its high alias, a strict process space has none of

@@ -69,14 +69,14 @@ impl Bounce {
 impl Drop for Bounce { fn drop(&mut self) { bounce_quarantine(self.pa, self.pages, self.len); } }
 // THE BOUNCE QUARANTINE (ARM64-PLAN §11 item 0): a dropped bounce is filled with a canary and
 // kept for the next 16 drops before it is freed; a canary changed by then is a device write AFTER
-// the I/O was declared complete — said out loud, with the size. With `talaria.freetrace=1` only.
+// the I/O was declared complete — said out loud, with the size. With `talaria.freetrace=2` only.
 const BQ_N: usize = 16;
 const BQ_CANARY: u64 = 0xB0B0_CA7A_B0B0_CA7A;
 static mut BQ: [(u64, u64, usize); BQ_N] = [(0, 0, 0); BQ_N];
 static BQ_I: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static BQ_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 fn bounce_quarantine(pa: u64, pages: u64, len: usize) {
-    if !crate::mem::FREETRACE.load(core::sync::atomic::Ordering::Relaxed) { crate::mem::free_contig(pa, pages); return; }
+    if !crate::mem::BOUNCE_QUARANTINE.load(core::sync::atomic::Ordering::Relaxed) { crate::mem::free_contig(pa, pages); return; }
     let words = (pages * 4096 / 8) as usize;
     // SAFETY: the bounce's own frames, nobody else's until freed below.
     unsafe { for k in 0..words { core::ptr::write_volatile(crate::mem::kptr::<u64>(pa + k as u64 * 8), BQ_CANARY); } }
