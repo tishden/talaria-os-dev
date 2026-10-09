@@ -830,7 +830,8 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     the variable nobody had varied was varied: the core count. Five threads on two cores give
     p99 33 us; the same AMI on four cores gives 2.6 us, under Linux's 4.6 (MEASUREMENTS §10.11,
     `infra/aws/variants.sh`). The tail lives where a woken thread has no idle core and must
-    evict a futex waiter sleeping in `wfe` as its core's current task. **Before naming the
+    evict a futex waiter sleeping in `wfe` as its core's current task. (Wrong, 2026-10-09: the
+    core count mattered because `nanosleep` polled the cores — item 58.) **Before naming the
     mechanism, vary the resource it competes for.**
 48. **"The low memory is the shared mappings', and the cache ate half of it."** The first Graviton
     scoreboard's PostgreSQL bring-up gave the Talaria side a ceiling of 0: the postmaster had died at
@@ -962,6 +963,21 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     on a helper, raw and replayed. A local `kill -9` of QEMU never showed it — the host's page cache
     keeps everything the guest handed it; the local gate cuts the guest before it hands the data
     over. **A commit orders the data of every allocation it carries, not only the caller's.**
+58. **"Ask the workload which moments were slow."** Item 47 ended with a mechanism — a woken thread
+    with no idle core evicting a `wfe` sleeper — and every kernel histogram that should have shown it
+    missed the size of the effect. The kernel cannot know which of mdpipe's ticks were slow; the
+    workload can, so it says so (`prctl(PR_TALARIA_SLOW, t0, t1)`, `kernel/src/umark.rs`), and the
+    kernel folds every core's decisions inside those windows into "who held the cores, awake or
+    asleep". The first run on the Graviton named a thread nobody had looked at: `md_main`, which
+    sleeps a second at a time, held a core awake 13 % of the slow windows — it had run 85 339 times
+    in 30 s. `nanosleep` was a loop of 200-us coarse windows: a long sleep polled the clock 5000
+    times a second, a short one overslept to the next tick (~2 ms), and the generator paced by short
+    sleeps ran in bursts. One exact deadline for the whole term took the stage p99 from 36 us to 5.1
+    (Linux 4.9). A coarse whole term, tried first, removed the polling and LOOKED like a fix on the
+    default tier (p99 6.7) — while making `sync=hlt` three times worse, because it changed the
+    generator's shape; only the sleep's own accuracy (`kernel/user/sleeplat`) said why. **When the
+    kernel's counters cannot find a tail, let the workload mark it; and when a fix moves the number,
+    check it did not move the workload.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
