@@ -225,7 +225,104 @@ unsafe fn parse_fadt(t: u64) {
     // The DSDT: a 32-bit field @40, a 64-bit X_DSDT @140 (ACPI >= 2.0)
     let mut dsdt = rd32(t + 40) as u64;
     if len >= 148 { let x = rd64(t + 140); if x != 0 { dsdt = x; } }
-    if dsdt != 0 { parse_s5(dsdt); }
+    if dsdt != 0 { parse_s5(dsdt); parse_ged(dsdt); }
+}
+
+/// THE ARM64 POWER BUTTON is not the PM1a block (a hardware-reduced FADT has none): it is the
+/// Generic Event Device, `_HID "ACPI0013"`, whose `_CRS` names one interrupt; its `_EVT`
+/// method turns that interrupt into `Notify(PWRB, 0x80)`. QEMU's `virt` under edk2 has one
+/// (`system_powerdown`), and an EC2 Graviton's stop is delivered the same way — while the
+/// kernel did not listen, every stop of a Graviton instance was a power cut (MariaDB's B
+/// phase found no checkpoint in `ib_logfile0` after the stop/start, ARM64-PLAN §11 item 1, the
+/// very symptom x86 had before its button). Without an AML interpreter: the device is found by
+/// its `_HID` string, the interrupt by the first Extended Interrupt Descriptor (0x89) that
+/// follows within the device's body. Any GED interrupt is taken as the button — the only GED
+/// event a guest of ours is sent.
+static GED_INTID: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "aarch64")]
+static GED_EDGE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// What the tables name for a power button, for the boot line: the GED (`ACPI0013`), a PL061
+/// GPIO controller (`ARMH0061`, a button as its `_AEI` GpioInt), the button device itself
+/// (`PNP0C0C`). Bits 0/1/2.
+static BTN_SEEN: AtomicU32 = AtomicU32::new(0);
+/// THE OTHER WAY a firmware delivers the button on arm64: a PL061 GPIO controller
+/// (`_HID "ARMH0061"`, its registers in a Memory32Fixed of `_CRS`) and an `_AEI` with one
+/// GpioInt pin; `Notify(PWRB, 0x80)` runs when that pin's edge fires. QEMU gives this shape
+/// only to a device-tree boot (gpio-keys), the GED to an ACPI one; which one an EC2 Graviton
+/// uses the boot line says (`BTN_SEEN`). The pin's RAW interrupt status (GPIORIS) records the
+/// edge whether or not the controller's interrupt is unmasked, so it is polled as the GED's
+/// pending bit is, with nothing routed.
+static GPIO_BASE: AtomicU64 = AtomicU64::new(0);
+static GPIO_PIN: AtomicU32 = AtomicU32::new(u32::MAX);
+#[cfg(target_arch = "aarch64")]
+static GPIO_VA: AtomicU64 = AtomicU64::new(0);
+unsafe fn find(end: u64, from: u64, pat: &[u8]) -> Option<u64> {
+    let mut p = from;
+    while p + pat.len() as u64 <= end {
+        if rd8(p) == pat[0] && (1..pat.len()).all(|k| rd8(p + k as u64) == pat[k]) { return Some(p); }
+        p += 1;
+    }
+    None
+}
+unsafe fn parse_buttons(t: u64) {
+    let len = rd32(t + 4) as u64;
+    if !(36..=1 << 22).contains(&len) { return; }
+    let end = t + len;
+    // `EISAID("PNP0C0C")` is a DWord in AML: 0x0C, then 0x0C0CD041 little-endian
+    if find(end, t + 36, &[0x0C, 0x41, 0xD0, 0x0C, 0x0C]).is_some() { BTN_SEEN.fetch_or(4, Ordering::Relaxed); }
+    if let Some(g) = find(end, t + 36, b"ARMH0061") {
+        BTN_SEEN.fetch_or(2, Ordering::Relaxed);
+        if GPIO_BASE.load(Ordering::Relaxed) == 0 {
+            // the controller's registers: the first Memory32Fixed (0x86, length 9) after the _HID
+            let mut q = g + 8;
+            while q + 12 < end && q < g + 512 {
+                if rd8(q) == 0x86 && rd8(q + 1) == 9 && rd8(q + 2) == 0 {
+                    let base = rd32(q + 4) as u64;
+                    if base != 0 { GPIO_BASE.store(base, Ordering::Relaxed); }
+                    break;
+                }
+                q += 1;
+            }
+            // the button's pin: the first GpioInt descriptor (0x8C, connection type 0) after it
+            let mut q = g + 8;
+            while q + 23 < end && q < g + 4096 {
+                if rd8(q) == 0x8C && rd8(q + 4) == 0 {
+                    let off = (rd8(q + 14) as u64) | (rd8(q + 15) as u64) << 8;
+                    let dl = (rd8(q + 1) as u64) | (rd8(q + 2) as u64) << 8;
+                    if off >= 23 && off + 2 <= dl + 3 {
+                        let pin = (rd8(q + off) as u32) | (rd8(q + off + 1) as u32) << 8;
+                        if pin < 8 { GPIO_PIN.store(pin, Ordering::Relaxed); }
+                        break;
+                    }
+                }
+                q += 1;
+            }
+        }
+    }
+}
+unsafe fn parse_ged(t: u64) {
+    parse_buttons(t);
+    let len = rd32(t + 4) as u64;
+    if !(36..=1 << 22).contains(&len) || GED_INTID.load(Ordering::Relaxed) != 0 { return; }
+    let end = t + len;
+    let mut p = t + 36;
+    while p + 8 < end {
+        if rd8(p) == b'A' && sig(p) == *b"ACPI" && sig(p + 4) == *b"0013" {
+            BTN_SEEN.fetch_or(1, Ordering::Relaxed);
+            let mut q = p + 8;
+            while q + 9 < end && q < p + 1024 {
+                // 0x89, length (u16, >= 6), flags, the count (>= 1), the first INTID (u32)
+                if rd8(q) == 0x89 && (rd8(q + 1) as u16 | (rd8(q + 2) as u16) << 8) >= 6 && rd8(q + 4) >= 1 {
+                    let id = rd32(q + 5);
+                    if (32..1020).contains(&id) { GED_INTID.store(id, Ordering::Relaxed); }
+                    return;
+                }
+                q += 1;
+            }
+            return;
+        }
+        p += 1;
+    }
 }
 
 /// Get the SLP_TYP for S5 out of the DSDT. We have no full AML interpreter and do not
@@ -380,35 +477,59 @@ pub fn button_from_tail(cmdline: &str) {
 pub fn button_arm(wait_s: u64) {
     if wait_s == 0 { crate::println!("acpi: the power button is switched off (talaria.pwrbtn=0) — a stop from the outside will be a power cut"); return; }
     BTN_WAIT_NS.store(wait_s.saturating_mul(1_000_000_000), Ordering::Relaxed);
-    let evt = PM1A_EVT.load(Ordering::Relaxed);
-    let len = PM1_EVT_LEN.load(Ordering::Relaxed);
-    if evt == 0 || len < 4 {
-        crate::println!("acpi: there is no power button — the PM1a_EVT_BLK is not set (a microvm/without a FADT): a stop from the outside will be a power cut");
+    #[cfg(target_arch = "aarch64")]
+    {
+        let id = GED_INTID.load(Ordering::Relaxed);
+        if id != 0 {
+            BTN_ARMED.store(true, Ordering::Relaxed);
+            crate::println!("acpi: the power button is armed (the GED, INTID {}): a press -> a SIGTERM to the workload, {} s to leave, then sync and a power-off",
+                id, wait_s);
+            return;
+        }
+        let (gb, pin) = (GPIO_BASE.load(Ordering::Relaxed), GPIO_PIN.load(Ordering::Relaxed));
+        if gb != 0 && pin < 8 {
+            BTN_ARMED.store(true, Ordering::Relaxed);
+            crate::println!("acpi: the power button is armed (a PL061 GPIO at {:#x}, pin {}): a press -> a SIGTERM to the workload, {} s to leave, then sync and a power-off",
+                gb, pin, wait_s);
+            return;
+        }
+        let seen = BTN_SEEN.load(Ordering::Relaxed);
+        crate::println!("acpi: no power button found on arm64 (the tables name: GED {}, ARMH0061 {} (base {:#x}, pin {}), PNP0C0C {}) — a stop from the outside will be a power cut",
+            seen & 1, (seen >> 1) & 1, gb, if pin < 8 { pin as i64 } else { -1 }, (seen >> 2) & 1);
         return;
     }
-    let cnt = PM1A_CNT.load(Ordering::Relaxed);
-    let smi = SMI_CMD.load(Ordering::Relaxed);
-    let en_cmd = ACPI_ENABLE.load(Ordering::Relaxed);
-    let mut sci_en = cnt != 0 && unsafe { inw(cnt) } & 1 != 0;
-    // The firmware could have left the chipset in legacy mode: then the PM1 events are not
-    // generated. The transition is a write of ACPI_ENABLE into the SMI_CMD, the chipset sets the SCI_EN.
-    if !sci_en && cnt != 0 && smi != 0 && en_cmd != 0 {
-        unsafe { outb(smi, en_cmd as u8); }
-        let t0 = crate::tsc::rdtsc();
-        let lim = crate::tsc::hz().max(1) / 10; // 100 ms
-        while crate::tsc::rdtsc().wrapping_sub(t0) < lim {
-            if unsafe { inw(cnt) } & 1 != 0 { sci_en = true; break; }
-            core::hint::spin_loop();
+    #[cfg(target_arch = "x86_64")]
+    {
+        let evt = PM1A_EVT.load(Ordering::Relaxed);
+        let len = PM1_EVT_LEN.load(Ordering::Relaxed);
+        if evt == 0 || len < 4 {
+            crate::println!("acpi: there is no power button — the PM1a_EVT_BLK is not set (a microvm/without a FADT): a stop from the outside will be a power cut");
+            return;
         }
+        let cnt = PM1A_CNT.load(Ordering::Relaxed);
+        let smi = SMI_CMD.load(Ordering::Relaxed);
+        let en_cmd = ACPI_ENABLE.load(Ordering::Relaxed);
+        let mut sci_en = cnt != 0 && unsafe { inw(cnt) } & 1 != 0;
+        // The firmware could have left the chipset in legacy mode: then the PM1 events are not
+        // generated. The transition is a write of ACPI_ENABLE into the SMI_CMD, the chipset sets the SCI_EN.
+        if !sci_en && cnt != 0 && smi != 0 && en_cmd != 0 {
+            unsafe { outb(smi, en_cmd as u8); }
+            let t0 = crate::tsc::rdtsc();
+            let lim = crate::tsc::hz().max(1) / 10; // 100 ms
+            while crate::tsc::rdtsc().wrapping_sub(t0) < lim {
+                if unsafe { inw(cnt) } & 1 != 0 { sci_en = true; break; }
+                core::hint::spin_loop();
+            }
+        }
+        let en = evt + len / 2;
+        unsafe {
+            outw(evt, PWRBTN_BIT);                // clear a stale STS (a write of a one)
+            outw(en, inw(en) | PWRBTN_BIT);       // PWRBTN_EN
+        }
+        BTN_ARMED.store(true, Ordering::Relaxed);
+        crate::println!("acpi: the power button is armed (PM1a_EVT={:#x}, SCI_EN={}): a press -> a SIGTERM to the workload, {} s to leave, then sync and S5",
+            evt, if sci_en { 1 } else { 0 }, wait_s);
     }
-    let en = evt + len / 2;
-    unsafe {
-        outw(evt, PWRBTN_BIT);                // clear a stale STS (a write of a one)
-        outw(en, inw(en) | PWRBTN_BIT);       // PWRBTN_EN
-    }
-    BTN_ARMED.store(true, Ordering::Relaxed);
-    crate::println!("acpi: the power button is armed (PM1a_EVT={:#x}, SCI_EN={}): a press -> a SIGTERM to the workload, {} s to leave, then sync and S5",
-        evt, if sci_en { 1 } else { 0 }, wait_s);
 }
 
 /// Whether a regular stop has been requested (by the button or by a command): the paths "all the tasks have left"
@@ -436,6 +557,49 @@ pub fn button_tick() {
     }
     if !BTN_ARMED.load(Ordering::Relaxed) || now < BTN_NEXT_NS.load(Ordering::Relaxed) { return; }
     BTN_NEXT_NS.store(now + 250_000_000, Ordering::Relaxed);
+    #[cfg(target_arch = "aarch64")]
+    {
+        let id = GED_INTID.load(Ordering::Relaxed);
+        if id != 0 {
+            // The line is made edge-latched at the first tick, not at the arming: the tables are
+            // walked before the distributor's frame is known on some boots.
+            if !GED_EDGE.swap(true, Ordering::Relaxed) {
+                // SAFETY: the distributor is up — the tick runs on it.
+                unsafe { crate::arch::gic::spi_edge_latched(id); }
+                return;
+            }
+            if !crate::arch::gic::is_pending(id) { return; }
+            crate::arch::gic::clear_pending(id);
+            request_shutdown("the power button (ACPI GED)");
+            return;
+        }
+        let pin = GPIO_PIN.load(Ordering::Relaxed);
+        let gb = GPIO_BASE.load(Ordering::Relaxed);
+        if gb != 0 && pin < 8 {
+            const GPIOIS: u64 = 0x404; const GPIOIBE: u64 = 0x408; const GPIOIEV: u64 = 0x40C;
+            const GPIORIS: u64 = 0x414; const GPIOIC: u64 = 0x41C;
+            let mut va = GPIO_VA.load(Ordering::Relaxed);
+            let bit = 1u32 << pin;
+            // SAFETY: the PL061's registers, mapped through the devices' window at the first tick;
+            // byte-wide registers read and written as words (the PL061 is a 32-bit APB slave).
+            unsafe {
+                if va == 0 {
+                    va = crate::arch::mmio_va(gb);
+                    GPIO_VA.store(va, Ordering::Relaxed);
+                    let r = |o: u64| core::ptr::read_volatile(crate::mem::devptr::<u32>(va + o));
+                    let w = |o: u64, v: u32| core::ptr::write_volatile(crate::mem::devptr::<u32>(va + o), v);
+                    // an edge (not a level), one edge, the rising one; the interrupt stays masked
+                    w(GPIOIS, r(GPIOIS) & !bit); w(GPIOIBE, r(GPIOIBE) & !bit); w(GPIOIEV, r(GPIOIEV) | bit);
+                    w(GPIOIC, bit);
+                    return;
+                }
+                if core::ptr::read_volatile(crate::mem::devptr::<u32>(va + GPIORIS)) & bit == 0 { return; }
+                core::ptr::write_volatile(crate::mem::devptr::<u32>(va + GPIOIC), bit);
+            }
+            request_shutdown("the power button (a PL061 GPIO pin)");
+            return;
+        }
+    }
     let evt = PM1A_EVT.load(Ordering::Relaxed);
     let sts = unsafe { inw(evt) };
     if sts & PWRBTN_BIT == 0 { return; }
@@ -447,8 +611,8 @@ pub fn button_tick() {
 /// under the marker "in the tick", so that waiting for the device does not try to yield the core.
 pub fn shutdown_now(why: &str) -> ! {
     SHUTDOWN_AT_NS.store(u64::MAX, Ordering::Relaxed);
-    crate::println!("acpi: {} — a sync of the FS and a power-off (ACPI S5{})", why,
-        if can_poweroff() { "" } else { ", the FADT/_S5 were not parsed — a blind attempt" });
+    crate::println!("acpi: {} — a sync of the FS and a power-off ({})", why,
+        if cfg!(not(target_arch = "x86_64")) { "PSCI SYSTEM_OFF" } else if can_poweroff() { "ACPI S5" } else { "ACPI S5, the FADT/_S5 were not parsed — a blind attempt" });
     sync_fs();
     crate::trace::flush();
     poweroff();
@@ -541,7 +705,7 @@ pub fn init(rsdp: u64) {
                     // `\_S5` does not always live in the DSDT: some firmwares (including
                     // the Nitro hypervisor — checked on a c6i.large: the PM1a_CNT was found,
                     // but the sleep type was not) move it into an SSDT. We look there too.
-                    b"SSDT" => parse_s5(t),
+                    b"SSDT" => { parse_s5(t); parse_ged(t); }
                     _ => {}
                 }
             }
