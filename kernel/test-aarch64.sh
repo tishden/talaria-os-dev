@@ -636,6 +636,8 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
       assert 'acpi: the power button \(ACPI GED\) — a SIGTERM to the processes \(1\)' 'uefi-pwrbtn: the press is seen by polling the GED interrupt'"'"'s pending bit'
       assertnot 'STILL ALIVE|pwrbtn: FAIL'                                    'uefi-pwrbtn: the machine went out both times, and the second boot found the file written without an fsync'
       assertcount 'pwrbtn: PERSISTED OK' 2                                   'uefi-pwrbtn: both second boots read the file written without an fsync back'
+      assert 'orderedcut: committed .*new blocks written first [1-9]'          'uefi-ordered: another file'"'"'s fsync wrote the new file'"'"'s freshly allocated blocks before its metadata commit'
+      assert 'orderedv: ALL OK'                                               'uefi-ordered: after a power cut the new file'"'"'s data are on the disk with its committed map (ext2 CNEW)'
       assertcount 'power-off \(PSCI SYSTEM_OFF\)' 2                           'uefi-pwrbtn: the power-off names the way it is made (PSCI, not an x86 S5)' 
       LOG=$L0
     fi

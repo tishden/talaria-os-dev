@@ -134,6 +134,16 @@ static mut SB: [u8; 1024] = [0; 1024];
 static mut CACHE_BASE: u64 = 0;       // the identity address of the cache's area (NC * BSZ)
 static mut CTAG: [u32; NC] = [0; NC]; // the block's number + 1 (0 = empty)
 static mut CDIRTY: [bool; NC] = [false; NC];
+/// THE SLOT HOLDS A FRESHLY ALLOCATED DATA BLOCK not yet written: its allocation (the block map,
+/// the bitmap, the size) is metadata that the next transaction will journal, whoever's fsync
+/// commits it. Before any metadata transaction such blocks go to the disk — ext4's `ordered`:
+/// otherwise a power cut after the commit leaves a file whose map points at blocks that were
+/// never written. MariaDB's redo log rebuilt at its first start was exactly that on EC2 (both
+/// machines): `ib_logfile0`'s new inode was committed by another file's fsync while its 32 MiB
+/// stayed in the cache — the kernel has no background flush — and the hard stop read zeros
+/// ("a redo log created before MariaDB 10.2.2", ARM64-PLAN §11 item 1). An overwrite of an
+/// existing block is not marked: its old content is still a consistent file.
+static mut CNEW: [bool; NC] = [false; NC];
 // §8.3: the owner of a dirty slot is the inode whose DATA lie in it (0 = the metadata:
 // the inodes, the bitmaps, the GDT, the indirect blocks). fsync(fd) writes only the slots
 // of its own inode + the metadata rather than the whole cache.
@@ -702,7 +712,7 @@ unsafe fn cblk_mode(bn: u32, read: bool) -> *mut u8 {
             STATS_RD += 1;
         }
         dcnt_del(slot);
-        core::ptr::write_volatile(addr_of_mut!(CTAG[slot]), bn + 1); CDIRTY[slot] = false; COWN[slot] = 0; CJRN[slot] = false; CJOLD[slot] = false;
+        core::ptr::write_volatile(addr_of_mut!(CTAG[slot]), bn + 1); CDIRTY[slot] = false; CNEW[slot] = false; COWN[slot] = 0; CJRN[slot] = false; CJOLD[slot] = false;
     }
     p
 }
@@ -804,7 +814,7 @@ unsafe fn writeback_slot(slot: usize) {
     for i in 0..k {
         let s = slot + i;
         dcnt_del(s);
-        CDIRTY[s] = false;
+        CDIRTY[s] = false; CNEW[s] = false;
         if i > 0 { COWN[s] = 0; CJRN[s] = false; CJOLD[s] = false; }
     }
     let d = crate::tsc::rdtsc().wrapping_sub(t0);
@@ -846,6 +856,7 @@ enum Sel {
     Data(u32),      // the data of one inode (the ordered mode before a commit)
     DataAll,        // the data of all the files
     DataAged(u32),  // the data of all the files OLDER than the threshold (in units of dstamp)
+    DataNew,        // the freshly allocated data blocks of all the files (`CNEW`: before a metadata commit)
     Journaled,      // the metadata that already lie in the journal (a checkpoint)
     Own(u32),       // the inode's data + the metadata (an fsync without the journal)
 }
@@ -886,7 +897,7 @@ unsafe fn writeback(sel: Sel, cause: WbC) -> usize {
     //     they are DN_DATA - JP_DATA (the dirty data minus those that have not seen the journal).
     let need = if !fscnt() { DIRTY_N > 0 } else { left || match sel {
         Sel::Data(ino) => ino == 0 && DIRTY_N > DN_DATA,
-        Sel::DataAll | Sel::DataAged(_) => false,
+        Sel::DataAll | Sel::DataAged(_) | Sel::DataNew => false,
         Sel::All | Sel::Own(_) => DIRTY_N > DN_DATA,
         Sel::Journaled => DN_DATA > JP_DATA,
     } };
@@ -1195,6 +1206,7 @@ unsafe fn writeback_unlocked(sel: Sel, max_chunks: usize, chunk: usize, cause: W
             // a flush by AGE: only what has lain longer than the threshold
             Sel::DataAged(thr) => COWN[s] != 0 && aged(aged_now, CDIRTIME[s], thr),
             Sel::Data(ino) | Sel::Own(ino) => COWN[s] != 0 && COWN[s] == ino,
+            Sel::DataNew => COWN[s] != 0 && CNEW[s],
             // a checkpoint: the committed metadata (CJRN) may be put in place
             // without the FS lock — a copy is taken under the lock and equals the version in
             // the journal; the full journal (16 MB) under the lock would cost 130+ ms of the FS.
@@ -1246,7 +1258,7 @@ unsafe fn writeback_unlocked(sel: Sel, max_chunks: usize, chunk: usize, cause: W
                 if COWN[s] != 0 { let a = age_of(now, CDIRTIME[s]); age_sum += a as u64; if a > age_max { age_max = a; } }
                 core::ptr::copy_nonoverlapping(crate::mem::kptr::<u8>(CACHE_BASE).add(s * BSZ), crate::mem::kptr::<u8>(buf).add(k * BSZ), BS);
                 dcnt_del(s);
-                CDIRTY[s] = false; COWN[s] = 0; CJRN[s] = false; CJOLD[s] = false;
+                CDIRTY[s] = false; CNEW[s] = false; COWN[s] = 0; CJRN[s] = false; CJOLD[s] = false;
                 core::ptr::write_volatile(addr_of_mut!(CWB[s]), true);
                 slots[k] = s as u32;
                 let lba = (bn as usize) * SPB;
@@ -1311,6 +1323,7 @@ unsafe fn writeback_locked(sel: Sel, cause: WbC) -> usize {
             Sel::Data(ino) => COWN[s] == ino,
             Sel::DataAll => COWN[s] != 0,
             Sel::DataAged(thr) => COWN[s] != 0 && aged(now, CDIRTIME[s], thr),
+            Sel::DataNew => COWN[s] != 0 && CNEW[s],
             Sel::Journaled => CJRN[s],
             Sel::Own(ino) => COWN[s] == ino || COWN[s] == 0,
         };
@@ -1336,7 +1349,7 @@ unsafe fn writeback_locked(sel: Sel, cause: WbC) -> usize {
             }
             if COWN[s] != 0 { let a = age_of(now, CDIRTIME[s]); age_sum += a as u64; if a > age_max { age_max = a; } age_k += 1; }
             dcnt_del(s);
-            CDIRTY[s] = false; COWN[s] = 0; CJRN[s] = false; CJOLD[s] = false;
+            CDIRTY[s] = false; CNEW[s] = false; COWN[s] = 0; CJRN[s] = false; CJOLD[s] = false;
             STATS_WR += 1; written += 1;
         }
         if nr >= reqs.len() - 1 { if !crate::fs::blk_write_many(&reqs[..nr]) { crate::println!("ext2: an error of the group write"); } nr = 0; }
@@ -1973,7 +1986,7 @@ pub fn cache_relocate(node: u8) -> bool {
         let new = match crate::mem::alloc_contig_node(pages, node) { Some(b) => b, None => return false };
         if crate::acpi::node_of_phys(new) != node { crate::mem::free_contig(new, pages); return false; }
         CACHE_BASE = new;
-        for i in 0..ncache() { CTAG[i] = 0; CDIRTY[i] = false; } // we do not move the content — it will be reread
+        for i in 0..ncache() { CTAG[i] = 0; CDIRTY[i] = false; CNEW[i] = false; } // we do not move the content — it will be reread
         dcnt_reset();
         crate::mem::free_contig(old, pages);
         crate::println!("ext2: the block cache has been moved onto the node {} ({:#x} -> {:#x}, {} MB)",
@@ -2049,7 +2062,7 @@ pub fn cache_resize(mb: usize) -> bool {
         CACHE_BASE = new;
         CACHE_N.store(want, core::sync::atomic::Ordering::SeqCst);
         CACHE_SETS.store(want / WAYS, core::sync::atomic::Ordering::SeqCst);
-        for i in 0..want { CTAG[i] = 0; CDIRTY[i] = false; COWN[i] = 0; }
+        for i in 0..want { CTAG[i] = 0; CDIRTY[i] = false; CNEW[i] = false; COWN[i] = 0; }
         dcnt_reset();
         crate::mem::free_contig(old, oldpages);
         crate::println!("ext2: the block cache from the manifest: {} -> {} MB ({} slots)",
@@ -2126,7 +2139,7 @@ pub fn mount() -> bool {
         if DEFER_BUF == 0 && WB_BUF != 0 {
             if let Some(b) = crate::mem::alloc_any((WB_BLOCKS * BSZ / 4096) as u64) { DEFER_BUF = b; }
         }
-        for i in 0..ncache() { CTAG[i] = 0; CDIRTY[i] = false; }
+        for i in 0..ncache() { CTAG[i] = 0; CDIRTY[i] = false; CNEW[i] = false; }
         for h in 0..MAXOPEN { OF_INO[h] = 0; }
         ACTIVE = true;
         dcnt_reset();
@@ -2352,7 +2365,7 @@ unsafe fn free_block(bn: u32) {
     // a record that got into the cache under this number is no longer valid
     if let Some(slot) = find_slot(bn) {
         dcnt_del(slot);
-        CTAG[slot] = 0; CDIRTY[slot] = false; COWN[slot] = 0; CJRN[slot] = false; CJOLD[slot] = false;
+        CTAG[slot] = 0; CDIRTY[slot] = false; CNEW[slot] = false; COWN[slot] = 0; CJRN[slot] = false; CJOLD[slot] = false;
     }
 }
 /// Allocate an inode (in the group goal_group if possible). 0 = there is none.
@@ -2573,10 +2586,12 @@ unsafe fn ino_pwrite(ino: u32, inb: &mut [u8; 128], off: u64, src: *const u8, le
         let pos = off + done as u64;
         let fb = pos / BS as u64; let bo = (pos % BS as u64) as usize;
         let n = (BS - bo).min(len - done);
+        let before = added;
         let b = bmap(ino, inb, fb, true, &mut added);
         if b == 0 { if done == 0 { return ENOSPC; } break; }
         core::ptr::copy_nonoverlapping(src.add(done), cblk(b).add(bo), n);
         cflush_own(b, ino);  // §8.3: the slot belongs to this inode -> a per-file fsync
+        if added != before { if let Some(sl) = find_slot(b) { CNEW[sl] = true; } } // see `CNEW`
         done += n;
     }
     let end = off + done as u64;
@@ -4446,7 +4461,7 @@ unsafe fn jrn_replay(start: usize) {
     // The block cache IS STALE: the mounting managed to read the superblock, the GDT and the inode
     // table (for the journal's inode) BEFORE the replay, while the replay wrote straight to the disk.
     // Without a flush of the cache the pre-crash version of the metadata is visible further on.
-    for i in 0..ncache() { CTAG[i] = 0; CDIRTY[i] = false; COWN[i] = 0; CJRN[i] = false; CJOLD[i] = false; }
+    for i in 0..ncache() { CTAG[i] = 0; CDIRTY[i] = false; CNEW[i] = false; COWN[i] = 0; CJRN[i] = false; CJOLD[i] = false; }
     dcnt_reset();
     let mut sb2 = [0u8; 1024];
     if crate::fs::blk_read(2, &mut sb2) { (*core::ptr::addr_of_mut!(SB)).copy_from_slice(&sb2); }
@@ -4612,6 +4627,15 @@ pub fn jrn_commit(ino: u32) -> i64 {
         // transaction). The phase "the data" from this moment measures the submission, the wait
         // sits in "the descriptor+the copies"; the deferred portions are counted separately.
         if !with_data && ino != 0 && !early_data { data_n = jrn_data_phase(ino, true); }
+        // ORDERED (see `CNEW`): the metadata about to be journaled may hold the allocations of
+        // OTHER files; their freshly allocated blocks go to the disk first, synchronously.
+        if !with_data {
+            let t0 = crate::tsc::rdtsc();
+            let n = writeback(Sel::DataNew, WbC::Fsync);
+            data_n += n;
+            ORDERED_NEW.fetch_add(n as u64, core::sync::atomic::Ordering::Relaxed);
+            ph_note(1, t0);
+        }
         let mut journaled = 0usize;
         if with_data && jrn_pending(JSel::Both) <= cap {
             journaled += jrn_txn(JSel::Both, cap); // everything fits — one transaction, as before
@@ -4649,6 +4673,8 @@ pub fn jrn_commit(ino: u32) -> i64 {
 }
 
 pub static JRN_BYPASS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Freshly allocated data blocks of other files written before a metadata commit (`CNEW`).
+pub static ORDERED_NEW: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 // ══ STEP 2 OF SESSION 40: THE JOURNAL IS NOT BUSY FOR THE TIME OF A FOREIGN DATA FLUSH ═══
 //
 // WHAT WAS MEASURED. Session 39's instrument broke the wait for a foreign transaction down by THE HOLDER's

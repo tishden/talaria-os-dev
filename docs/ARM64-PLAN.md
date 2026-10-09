@@ -2496,10 +2496,18 @@ order of work:
    notifies PWRB (QEMU's does), a PL061's pin is the hex of the `_Exx`/`_Lxx` method that notifies
    PWRB, its base the Memory32Fixed inside the same Device (the scopes from the PkgLengths);
    checked in Python on the probe's bytes, then on EC2: "a PL061 GPIO at 0x9030000, pin 3", the
-   stop in 19 s, MariaDB ready on the next boot. STILL OPEN: the hard cut itself — EC2's forced
-   power-off two minutes after MariaDB was ready left `ib_logfile0` unreadable (the redo log the
-   first start had just rebuilt), where a local `kill -9` of QEMU never did (the host's cache
-   keeps what the guest wrote) — a durability question for `powercut-ec2.sh`, on both machines. What the item said before:
+   stop in 19 s, MariaDB ready on the next boot; the whole A/B then ran its B phase
+   (`ec2ab-mysql-20261009-083319`). THE HARD CUT ITSELF was a real data-loss bug, on both
+   machines: a probe (`--keep-disk`, `talaria.pwrbtn=0`, `stop --force`, the volume read on a helper
+   — raw by `debugfs`, then replayed by `e2fsck`) showed the journal had committed the new
+   `ib_logfile0`'s inode and block map while its 32 MiB were zeros on the disk — the same on a
+   `c6i.xlarge`. `jrn_commit(ino)` wrote only the fsync'd file's data before journaling ALL the
+   pending metadata, which held other files' allocations, and the kernel has no background flush.
+   Fixed as ext4's `ordered`: a cache slot holding a freshly allocated data block is marked
+   (`CNEW`), and before any metadata transaction those blocks are written, whoever's file (an
+   overwrite of an existing block is not marked — its old content is a consistent file). Gate
+   `orderedcut`/`orderedv` on both machines (a new file without an fsync, another file's fsync,
+   `kill -9`, the second boot reads it back): without the fix 16 of 16 pages lost, with it intact. What the item said before:
    **The databases under strict on the EC2 scoreboard.** The A/B of 2026-10-07 (`run-remote-ab.sh
    <wl> "talaria.dmap=strict"`) gave no judgeable point, and the stand, not the kernel, was why:
    an AMI built before the worktree had `services/*/build` (fixed: `mk-ami.sh` refuses a tree that

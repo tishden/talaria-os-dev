@@ -732,6 +732,22 @@ for m in pwrbtn pwrbtnign; do
   assert "ext2: a JBD2 journal — .* start 0," "$m: the journal after the button is CLEAN (the checkpoint has been done, there is no replay)"
   stopq $q
 done
+# ORDERED ACROSS FILES (ext2 `CNEW`, ARM64-PLAN §11 item 1): a new file written without an fsync,
+# another file's fsync commits the metadata, then a POWER CUT (kill -9: what the guest never handed
+# the device is gone), then the second boot reads the file back. Before the fix the new file's map
+# was committed while its data stayed in the cache — 16 of 16 pages read as zeros (MariaDB's
+# rebuilt redo log after an EC2 hard stop, both machines).
+cp /img/disk_ext2.img /tmp/ord.img
+qemu-system-x86_64 -M q35 -enable-kvm -cpu "$CPU" -smp 2 -m 512 -display none -no-reboot \
+  -kernel "/w/$K" -append "console=ttyS0 talaria.test=orderedcut talaria.pci=1" \
+  -drive id=d0,file=/tmp/ord.img,format=raw,if=none,cache=none -device nvme,drive=d0,serial=tal001 -serial file:/tmp/o.log >/tmp/q.log 2>&1 & q=$!
+assert_slow "orderedcut: committed .*new blocks written first [1-9]" "orderedcut: another file's fsync wrote the new file's freshly allocated blocks before its metadata commit"
+kill -9 $q; wait $q 2>/dev/null
+qemu-system-x86_64 -M q35 -enable-kvm -cpu "$CPU" -smp 2 -m 512 -display none -no-reboot \
+  -kernel "/w/$K" -append "console=ttyS0 talaria.test=orderedv talaria.pci=1" \
+  -drive id=d0,file=/tmp/ord.img,format=raw,if=none,cache=none -device nvme,drive=d0,serial=tal001 -serial file:/tmp/o.log >/tmp/q.log 2>&1 & q=$!
+assert_slow "orderedv: ALL OK" "orderedv: after the power cut the file's 64 KiB are on the disk (the journal replayed its map AND its data were there)"
+stopq $q
 q=$(bootdn "talaria.mode=proc" /img/disk_ext2.img); sleep 3
 assert "sigtest: ALL OK" "proc-mode: a process by /cell.manifest (the launch path of PostgreSQL/MariaDB/MongoDB) with a NIC"; stopq $q
 # dyn/glibc: a SKIP without the third-party artefacts (the ld-musl/glibc .so — user/README.md)

@@ -952,6 +952,16 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     failing in the first run under TCG before the fix). **A value that orders an action — "load
     this root", "flush this range" — is consumed by the code that performs it, not left for the
     next caller to inherit.**
+57. **"The journal's order is a promise about every file the transaction names."** Talaria's
+    `fsync(fd)` wrote that file's data, then journaled every pending metadata change — among them
+    another file's freshly allocated block map. With no background flush that file's data could sit
+    in the cache for hours; a power cut after the commit left the map pointing at blocks never
+    written. It surfaced as MariaDB refusing to start after an EC2 stop ("a redo log created before
+    10.2.2": the redo log its first start had rebuilt, 32 MiB of zeros), was mistaken first for a
+    missing power button (real too, on arm64), and was named only by reading the stopped volume
+    on a helper, raw and replayed. A local `kill -9` of QEMU never showed it — the host's page cache
+    keeps everything the guest handed it; the local gate cuts the guest before it hands the data
+    over. **A commit orders the data of every allocation it carries, not only the caller's.**
 
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
