@@ -651,8 +651,24 @@ pub fn wait_window() {
     if !THREADED.load(Ordering::Relaxed) { core::hint::spin_loop(); return; }
     crate::sync::wait_on_coarse(POLL_WORD.as_ptr() as *const u32, 0, crate::tsc::mono_ns() + POLL_WINDOW_NS);
 }
-/// Sleep until the moment `until_ns` of the monotonic clock: between the checks we give up THE CORE
-/// (`wait_window`) rather than only the cycles. -EINTR at a signal.
+/// Sleep until the moment `until_ns` of the monotonic clock, giving up THE CORE rather than only
+/// the cycles. -EINTR at a signal.
+///
+/// ONE WAIT UNTIL THE TERM, NOT A POLL. This used to be a loop of `wait_window`s — 200 us each —
+/// so a `nanosleep(1 s)` woke 5000 times a second, took a core each time to read the clock and went
+/// back to sleep. `examples/mdpipe` on a two-core Graviton (ARM64-PLAN §11 item 2b): its control
+/// thread, which sleeps a second at a time, ran 85 339 times in 30 s (113 452 with
+/// `talaria.wakepreempt=0`, 6 s of a core), and during the slow ticks the cores were held awake by
+/// it 13 % of the time (`umark`). And the windows were coarse — each one served by the tick — so a
+/// SHORT sleep overslept to the next tick: `nanosleep(50 us)` slept ~2 ms (`kernel/user/sleeplat`,
+/// p50 overshoot 1947 us under KVM), and mdpipe's generator, which paces its ticks by such sleeps,
+/// woke rarely and pushed its backlog in bursts — the workload's shape was not Linux's. Now the
+/// whole term goes to the wait tier as an EXACT deadline: the tick serves a far one, the core's
+/// timer a near one, a core with other work parks the sleeper until the term (overshoot p50 25 us,
+/// p99 32, with or without a neighbour on the core). Only the term is changed, not the tier: a
+/// coarse whole term was tried too — it kept the 2 ms oversleep. A signal or the process's death
+/// still end the sleep: the scheduler makes a waiter with a pending signal ready
+/// (`sync::blocked_for_sched`), and the loop re-checks both.
 fn sleep_until_mono(until_ns: u64) -> i64 {
     let me = crate::sched::current_id();
     while crate::tsc::mono_ns() < until_ns {
@@ -662,7 +678,8 @@ fn sleep_until_mono(until_ns: u64) -> i64 {
         // stop it (`stop_if_dead`). Otherwise a thread in a `sleep(1)` held its
         // core for up to a second, and the wait "the sisters have left the cores" ran into the ceiling.
         if !crate::sched::task_alive(me) { return -4; }
-        wait_window(); // the same contract: there is somebody to run — give up the quantum rather than hold the core in a hlt
+        if !THREADED.load(Ordering::Relaxed) { core::hint::spin_loop(); continue; }
+        crate::sync::wait_on(POLL_WORD.as_ptr() as *const u32, 0, Some(until_ns));
     }
     0
 }
@@ -1457,6 +1474,8 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
         }
         157 => { // prctl(option, arg2, ...)
             let t = crate::sched::current_id();
+            // A slow interval named by the workload (`umark`, ARM64-PLAN §11 item 2b).
+            if f.a1 == crate::umark::PR_TALARIA_SLOW { return crate::umark::mark(f.a2, f.a3) as u64; }
             if f.a1 == 15 && f.a2 != 0 { // PR_SET_NAME: the thread's name (pthread_setname_np)
                 // The name is not a decoration of the log: the manifest lays the threads out
                 // over the cores by it (`pin=rx*:dedicated`). So it is decided right here

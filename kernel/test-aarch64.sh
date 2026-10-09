@@ -302,7 +302,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     [ $rc = 0 ] && [ -s "$REPO/$TD/$name.img" ]
   }
   if command -v mkfs.ext2 >/dev/null 2>&1 \
-     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace cowstale \
+     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace cowstale umarkt sleeplat \
      && mkimg ms 64M '' mapshared && mkimg core 32M '' crashme \
      && mkimg coremt 32M 'binary=/crashme\nargs=crashme mt\nrestart=0\n' crashme \
      && mkimg crashr 32M 'binary=/crashme\nargs=crashme mt\nrestart=1\n' crashme \
@@ -336,6 +336,18 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     run 300 "talaria.test=cowstalet" ext2
     assert 'cowstale: ALL OK 200 threads'                                     'cowstalet: a sibling thread on the other core sees the writer'"'"'s COW copy (shootdown before the free; a stale read-only translation is a spurious fault)'
     assertnot "$BAD|\[fault\]"                                              'cowstalet: no fault'
+    run 120 "talaria.test=umarkt" ext2
+    assert 'umarkt: ALL OK 50'                                                'umarkt: prctl(PR_TALARIA_SLOW) takes 50 named intervals, refuses an empty and an inverted one (ARM64-PLAN §11 item 2b)'
+    assert 'slow intervals marked by the workload: 50 '                       'umarkt: the stat block counts the 50 marks'
+    # Four cores here: a core's whole window is 25 % of the core-time. Under TCG `wfe` does not
+    # sleep (QEMU runs it as a yield), so the marking thread's sleep is a spin and is not judged
+    # asleep — x86's test.sh and a Graviton (variants-umark-c7g) judge that part.
+    assert 'held by .*\(um_hog\) (2[2-5])\.[0-9]% \(asleep 0\.[0-9]\)'   'umarkt: a thread spinning on the other core holds it the whole interval, awake'
+    assert 'held by .*\(um_main\) (2[0-5])\.[0-9]%'                         'umarkt: the marking thread holds its own core for its interval'
+    for m in sleeplat sleeplath; do
+      run 120 "talaria.test=$m" ext2
+      assert 'sleeplat: OK'                                                   "$m: nanosleep(50 us) x 2000, the median overshoot under 500 us$( [ $m = sleeplath ] && echo ', a thread spinning on the sleeper'"'"'s core'): one exact deadline, not 200-us windows served by the tick (ARM64-PLAN §11 item 2b)"
+    done
     run 150 "talaria.test=mbench" ext2
     assert 'RESULT mbench syscall [0-9]+ ns'                                  'mbench: the syscall primitive is timed (the number is for the stand)'
     assert 'mbench: ALL OK'                                                   'mbench: the primitives of the hot loop with the binary that goes to Linux'

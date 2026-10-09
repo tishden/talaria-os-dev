@@ -15,7 +15,7 @@ IMG=disk-crash.img ./qfiled.sh "pull /core.mdpipe out/core.mdpipe" && gdb mdpipe
 
 | File | Purpose |
 |---|---|
-| `mdpipe.cpp` | the workload; arguments `--secs --rate --workers --rounds --out --crash-at` |
+| `mdpipe.cpp` | the workload; arguments `--secs --rate --workers --rounds --out --crash-at --mark-us` |
 | `Makefile` | `all`, `check`, `run`, `crash`, `prof`, `clean` |
 | `qrun.sh` | QEMU `microvm` in docker; serial carries the kernel log and the operator console |
 | `qgdb.sh` | QEMU `-M pc` for live debugging: COM2 on `127.0.0.1:1234`, an NVMe disk |
