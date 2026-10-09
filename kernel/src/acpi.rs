@@ -264,43 +264,108 @@ unsafe fn find(end: u64, from: u64, pat: &[u8]) -> Option<u64> {
     }
     None
 }
+/// The end of the AML object whose op (`DeviceOp` 5B 82, `MethodOp` 14) is at `op` and whose
+/// PkgLength follows it: the encoding is a lead byte whose top two bits count the extra bytes.
+unsafe fn pkg_end(op: u64, oplen: u64) -> u64 {
+    let q = op + oplen;
+    let lead = rd8(q) as u64;
+    let n = lead >> 6;
+    let len = if n == 0 { lead & 0x3F } else {
+        let mut l = lead & 0x0F;
+        for i in 0..n { l |= (rd8(q + 1 + i) as u64) << (4 + 8 * i); }
+        l
+    };
+    q + len
+}
+/// The Device that holds `at` (a `_HID` string inside it): the nearest DeviceOp before it whose
+/// scope reaches past it — (its start, its end).
+unsafe fn device_of(t: u64, at: u64) -> Option<(u64, u64)> {
+    let mut p = at;
+    while p > t + 36 && at - p < 4096 {
+        p -= 1;
+        if rd8(p) == 0x5B && rd8(p + 1) == 0x82 {
+            let e = pkg_end(p, 2);
+            if e > at { return Some((p, e)); }
+        }
+    }
+    None
+}
+/// Does [from, to) hold `Notify(PWRB, …)` — the NotifyOp (0x86) and the name `PWRB`?
+unsafe fn notifies_pwrb(from: u64, to: u64) -> bool { find(to, from, &[0x86, b'P', b'W', b'R', b'B']).is_some() }
 unsafe fn parse_buttons(t: u64) {
     let len = rd32(t + 4) as u64;
     if !(36..=1 << 22).contains(&len) { return; }
     let end = t + len;
-    // `EISAID("PNP0C0C")` is a DWord in AML: 0x0C, then 0x0C0CD041 little-endian
-    if find(end, t + 36, &[0x0C, 0x41, 0xD0, 0x0C, 0x0C]).is_some() { BTN_SEEN.fetch_or(4, Ordering::Relaxed); }
-    if let Some(g) = find(end, t + 36, b"ARMH0061") {
+    // `EISAID("PNP0C0C")` is a DWord in AML: 0x0C, then 0x0C0CD041 little-endian; or a string
+    if find(end, t + 36, &[0x0C, 0x41, 0xD0, 0x0C, 0x0C]).is_some() || find(end, t + 36, b"PNP0C0C\0").is_some() { BTN_SEEN.fetch_or(4, Ordering::Relaxed); }
+    let mut from = t + 36;
+    while let Some(g) = find(end, from, b"ARMH0061") {
+        from = g + 8;
         BTN_SEEN.fetch_or(2, Ordering::Relaxed);
-        if GPIO_BASE.load(Ordering::Relaxed) == 0 {
-            // the controller's registers: the first Memory32Fixed (0x86, length 9) after the _HID
-            let mut q = g + 8;
-            while q + 12 < end && q < g + 512 {
-                if rd8(q) == 0x86 && rd8(q + 1) == 9 && rd8(q + 2) == 0 {
-                    let base = rd32(q + 4) as u64;
-                    if base != 0 { GPIO_BASE.store(base, Ordering::Relaxed); }
+        if GPIO_PIN.load(Ordering::Relaxed) != u32::MAX { continue; }
+        let Some((ds, de)) = device_of(t, g) else { continue };
+        // THE BUTTON'S PIN is named by the event method that notifies PWRB: `_Exx` (an edge) or
+        // `_Lxx` (a level), xx the pin in hex — an EC2 Graviton's GPO0 has `_E03` -> PWRB and
+        // `_E04` -> SLPB (the sleep button), so "the first GpioInt" would be luck.
+        let mut q = ds;
+        let mut pin = u32::MAX;
+        while q + 8 < de {
+            if rd8(q) == 0x14 {
+                let n = (rd8(q + 1) >> 6) as u64;
+                let nm = q + 2 + n;
+                let me = pkg_end(q, 1).min(de);
+                if rd8(nm) == b'_' && (rd8(nm + 1) == b'E' || rd8(nm + 1) == b'L') && notifies_pwrb(nm + 4, me) {
+                    let h = |c: u8| match c { b'0'..=b'9' => Some((c - b'0') as u32), b'A'..=b'F' => Some((c - b'A' + 10) as u32), _ => None };
+                    if let (Some(a), Some(b)) = (h(rd8(nm + 2)), h(rd8(nm + 3))) { pin = a * 16 + b; }
                     break;
                 }
-                q += 1;
             }
-            // the button's pin: the first GpioInt descriptor (0x8C, connection type 0) after it
-            let mut q = g + 8;
-            while q + 23 < end && q < g + 4096 {
-                if rd8(q) == 0x8C && rd8(q + 4) == 0 {
-                    let off = (rd8(q + 14) as u64) | (rd8(q + 15) as u64) << 8;
-                    let dl = (rd8(q + 1) as u64) | (rd8(q + 2) as u64) << 8;
-                    if off >= 23 && off + 2 <= dl + 3 {
-                        let pin = (rd8(q + off) as u32) | (rd8(q + off + 1) as u32) << 8;
-                        if pin < 8 { GPIO_PIN.store(pin, Ordering::Relaxed); }
-                        break;
-                    }
-                }
-                q += 1;
+            q += 1;
+        }
+        if pin >= 8 { continue; }
+        // the controller's registers: the Memory32Fixed (0x86, length 9) of its _CRS
+        let mut q = ds;
+        while q + 12 < de {
+            if rd8(q) == 0x86 && rd8(q + 1) == 9 && rd8(q + 2) == 0 && rd32(q + 4) != 0 {
+                GPIO_BASE.store(rd32(q + 4) as u64, Ordering::Relaxed);
+                GPIO_PIN.store(pin, Ordering::Relaxed);
+                break;
             }
+            q += 1;
         }
     }
 }
+/// `talaria.acpidump=1`: the bytes around every `ACPI0013`/`ARMH0061`/`PNP0C0C` of a table, as
+/// hex, for reading a firmware's power button by hand (an EC2 Graviton's stop was not heard
+/// through the GED's first interrupt — ARM64-PLAN §11 item 1).
+pub static ACPIDUMP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+unsafe fn dump_around(t: u64, at: u64, what: &str) {
+    let len = rd32(t + 4) as u64;
+    let (lo, hi) = (at.saturating_sub(256).max(t), (at + 1536).min(t + len));
+    crate::println!("acpidump: {} {} at +{:#x} of a {}-byte table, the bytes +{:#x}..+{:#x}:", core::str::from_utf8(&sig(t)).unwrap_or("?"), what, at - t, len, lo - t, hi - t);
+    let mut p = lo;
+    while p < hi {
+        let mut line = [0u8; 16 * 3 + 1];
+        let mut n = 0;
+        for k in 0..16 { if p + k >= hi { break; } let b = rd8(p + k);
+            line[n] = b"0123456789abcdef"[(b >> 4) as usize]; line[n + 1] = b"0123456789abcdef"[(b & 15) as usize]; line[n + 2] = b' '; n += 3; }
+        crate::println!("acpidump: +{:05x} {}", p - t, core::str::from_utf8(&line[..n]).unwrap_or(""));
+        p += 16;
+    }
+}
+unsafe fn acpidump(t: u64) {
+    if !ACPIDUMP.load(Ordering::Relaxed) { return; }
+    let len = rd32(t + 4) as u64;
+    if !(36..=1 << 22).contains(&len) { return; }
+    let end = t + len;
+    for (pat, what) in [(&b"ACPI0013"[..], "ACPI0013 (GED)"), (&b"ARMH0061"[..], "ARMH0061 (PL061)"), (&[0x0Cu8, 0x41, 0xD0, 0x0C, 0x0C][..], "PNP0C0C (the button, EISAID)"), (&b"PNP0C0C\0"[..], "PNP0C0C (the button)")] {
+        let mut from = t + 36;
+        let mut k = 0;
+        while let Some(p) = find(end, from, pat) { dump_around(t, p, what); from = p + 1; k += 1; if k >= 3 { break; } }
+    }
+}
 unsafe fn parse_ged(t: u64) {
+    acpidump(t);
     parse_buttons(t);
     let len = rd32(t + 4) as u64;
     if !(36..=1 << 22).contains(&len) || GED_INTID.load(Ordering::Relaxed) != 0 { return; }
@@ -309,6 +374,13 @@ unsafe fn parse_ged(t: u64) {
     while p + 8 < end {
         if rd8(p) == b'A' && sig(p) == *b"ACPI" && sig(p + 4) == *b"0013" {
             BTN_SEEN.fetch_or(1, Ordering::Relaxed);
+            // A GED is the power button only if its `_EVT` notifies PWRB: QEMU's does, an EC2
+            // Graviton's `GED1` carries 32 PCI hot-plug interrupts (Notify PCI0.RDxx) and is
+            // not one — taking its first interrupt left the real button (a PL061 pin) unheard.
+            match device_of(t, p) {
+                Some((ds, de)) if notifies_pwrb(ds, de) => {}
+                _ => { p += 8; continue; }
+            }
             let mut q = p + 8;
             while q + 9 < end && q < p + 1024 {
                 // 0x89, length (u16, >= 6), flags, the count (>= 1), the first INTID (u32)
