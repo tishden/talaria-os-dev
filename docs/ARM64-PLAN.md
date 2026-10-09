@@ -2476,8 +2476,17 @@ order of work:
    which moves the instance to another host): arm64 PostgreSQL and MongoDB p50/p99 within ±11 %
    (one ceiling point apart, with B's generator then still missing `netidle=1`), x86 MariaDB B 4-25 %
    SLOWER on every point (the host move's size, not the tables'), x86 MongoDB median B/A 0.96. Strict
-   costs nothing measurable. arm64 MariaDB's B gave no point (its server stopped answering under
-   `dmap=1` — no console was kept then; to repeat). What the item said before:
+   costs nothing measurable. arm64 MariaDB's B gave no point — repeated 2026-10-09
+   (`ec2ab-mysql-20261009-014542`) with the consoles kept: not `dmap=1` at all. B begins with a
+   stop/start, and after it InnoDB found no checkpoint in `ib_logfile0` ("created before MariaDB
+   10.2.2", the server exits) — the symptom x86 had before its power button: the arm64 kernel
+   did not listen to the stop (a hardware-reduced FADT has no PM1 block), so every Graviton stop
+   was a power cut a few minutes later, and A's first start had just rebuilt the redo log
+   (`Resizing redo log from 96 MiB to 32 MiB`). Fixed: the button on arm64 is the ACPI Generic
+   Event Device (`ACPI0013` in the DSDT/an SSDT, its `_CRS` interrupt found without an AML
+   interpreter), its SPI made edge-latched and its pending bit polled from the tick as x86 polls
+   PM1a; gate `uefi-pwrbtn` under edk2 (`kernel/test-aarch64-pwr.sh`: both paths, the unsynced
+   file read back). The EC2 B phase is to repeat on it. What the item said before:
    **The databases under strict on the EC2 scoreboard.** The A/B of 2026-10-07 (`run-remote-ab.sh
    <wl> "talaria.dmap=strict"`) gave no judgeable point, and the stand, not the kernel, was why:
    an AMI built before the worktree had `services/*/build` (fixed: `mk-ami.sh` refuses a tree that

@@ -627,6 +627,17 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
       bootu 120 "talaria.pci=1 talaria.test=its" "$TD/ext2.img"
       assert 'its: ALL CHECKS PASSED'                                         'uefi-its: MSI-X through the ITS the MADT names'
       assertnot '\[trap\]|PANIC|its: FAILURE'                                'uefi-its: no trap, no failed check'
+      # The power button of an EC2 Graviton's stop: the ACPI GED, pressed through QMP.
+      L0=$LOG; LOG="$REPO/$TD/pwr.out"
+      docker run --rm -e TD="$TD" -v "$REPO:/w" -w /w talaria-qemu-aarch64 sh kernel/test-aarch64-pwr.sh > "$LOG" 2>&1
+      assert 'acpi: the power button is armed \(the GED, INTID [0-9]+\)'     'uefi-pwrbtn: the GED found in the DSDT, its interrupt polled (ARM64-PLAN §11 item 1: a Graviton stop was a power cut)'
+      assert 'pwrbtn: QEMU went out [0-9]+s after the press'                 'uefi-pwrbtn: the press -> a SIGTERM -> the process left -> sync -> PSCI SYSTEM_OFF'
+      assert 'pwrbtnign: QEMU went out [0-9]+s after the press'              'uefi-pwrbtnign: the SIGTERM ignored -> the deadline -> a sync from the tick -> off'
+      assert 'acpi: the power button \(ACPI GED\) — a SIGTERM to the processes \(1\)' 'uefi-pwrbtn: the press is seen by polling the GED interrupt'"'"'s pending bit'
+      assertnot 'STILL ALIVE|pwrbtn: FAIL'                                    'uefi-pwrbtn: the machine went out both times, and the second boot found the file written without an fsync'
+      assertcount 'pwrbtn: PERSISTED OK' 2                                   'uefi-pwrbtn: both second boots read the file written without an fsync back'
+      assertcount 'power-off \(PSCI SYSTEM_OFF\)' 2                           'uefi-pwrbtn: the power-off names the way it is made (PSCI, not an x86 S5)' 
+      LOG=$L0
     fi
   else
     echo "== UEFI on arm64: SKIPPED — no fresh stub (kernel/uefi-stub/build.sh aarch64 after the kernel build) =="

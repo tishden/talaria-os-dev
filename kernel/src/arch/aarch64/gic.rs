@@ -186,6 +186,27 @@ pub fn is_pending(intid: u32) -> bool {
         else { r32(GICD.load(Ordering::Relaxed) + GICD_ISPENDR + 4 * (intid / 32) as u64) & (1 << (intid & 31)) != 0 }
     }
 }
+const GICD_ICPENDR: u64 = 0x280;
+const GICD_ICFGR: u64 = 0xC00;
+/// Configure SPI `intid` as edge-triggered and drop a pending state left from before: an
+/// edge LATCHES the pending bit at the distributor even while the SPI stays disabled, so a
+/// device's pulse can be polled for without a handler (the ACPI GED's power button,
+/// `acpi::button_tick`).
+pub unsafe fn spi_edge_latched(intid: u32) {
+    let d = GICD.load(Ordering::Relaxed);
+    if d == 0 || intid < 32 { return; }
+    let r = d + GICD_ICFGR + 4 * (intid / 16) as u64;
+    let sh = 2 * (intid % 16) + 1;
+    w32(r, r32(r) | (1 << sh));
+    w32(d + GICD_ICPENDR + 4 * (intid / 32) as u64, 1 << (intid & 31));
+}
+/// Clear SPI `intid`'s pending state (the polled edge has been seen).
+pub fn clear_pending(intid: u32) {
+    let d = GICD.load(Ordering::Relaxed);
+    if d == 0 || intid < 32 { return; }
+    // SAFETY: the distributor's frame, mapped; a write-1-to-clear of one bit.
+    unsafe { w32(d + GICD_ICPENDR + 4 * (intid / 32) as u64, 1 << (intid & 31)); }
+}
 /// Is `intid` active (acknowledged, not yet ended)?
 pub fn is_active(intid: u32) -> bool {
     unsafe {
