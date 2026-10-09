@@ -2507,7 +2507,13 @@ order of work:
    (`CNEW`), and before any metadata transaction those blocks are written, whoever's file (an
    overwrite of an existing block is not marked — its old content is a consistent file). Gate
    `orderedcut`/`orderedv` on both machines (a new file without an fsync, another file's fsync,
-   `kill -9`, the second boot reads it back): without the fix 16 of 16 pages lost, with it intact. What the item said before:
+   `kill -9`, the second boot reads it back): without the fix 16 of 16 pages lost, with it intact.
+   The arm64 MariaDB A/B on both fixes (`ec2ab-mysql-20261009-083319`, `c7g.xlarge`): A against
+   AL2023 (p50/p99/p99.9 us) `pk` at 3343 req/s 62/75/87 vs 66/87/112, at 30087 65/84/95 vs
+   58/3060/9962; `select1` at 4481 50/62/73 vs 48/63/74, at 40329 54/71/83 vs 43/1737/6804 —
+   Linux's median lower at the top rates, every tail Talaria's. B (`dmap=1`, after the stop/start
+   that moves the instance) ran every point: `pk` p50 66-67 against A's 62-65, p99 within ±2 % —
+   the host move's size again (x86 MariaDB's B was 4-25 % slower the same way). Item 1 is closed. What the item said before:
    **The databases under strict on the EC2 scoreboard.** The A/B of 2026-10-07 (`run-remote-ab.sh
    <wl> "talaria.dmap=strict"`) gave no judgeable point, and the stand, not the kernel, was why:
    an AMI built before the worktree had `services/*/build` (fixed: `mk-ami.sh` refuses a tree that
