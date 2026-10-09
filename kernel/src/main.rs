@@ -320,6 +320,7 @@ pub fn boot_shared(start_info: u64, mut cmdline: &'static str, tsc_hz: u64, earl
     // every phase (`trace::mark`) appends to the trace, so that after a hang the disk
     // holds the log up to exactly the last point passed.
     // ACPI: rsdp_paddr from start_info (+32) — the UEFI stub/QEMU; 0 -> the fallbacks
+    acpi::ACPIDUMP.store(cmdline::flag(cmdline, "talaria.acpidump"), core::sync::atomic::Ordering::Relaxed);
     acpi::init(unsafe { *mem::kptr::<u64>(start_info + 32) });
     // The power button (stop-instances / system_powerdown): a SIGTERM to the workload,
     // a deadline to exit, a sync, S5. Without this an instance stop is a power cut.

@@ -2486,9 +2486,20 @@ order of work:
    Event Device (`ACPI0013` in the DSDT/an SSDT, its `_CRS` interrupt found without an AML
    interpreter), its SPI made edge-latched and its pending bit polled from the tick as x86 polls
    PM1a; gate `uefi-pwrbtn` under edk2 (`kernel/test-aarch64-pwr.sh`: both paths, the unsynced
-   file read back). An EC2 Graviton names the GED too (a `c7g.xlarge`'s boot line: "the GED,
-   INTID 48"); the PL061 branch (`ARMH0061` + an `_AEI` GpioInt, the other shape a firmware may
-   use) has met no machine yet — untested. The EC2 B phase is to repeat on it. What the item said before:
+   file read back). ON A GRAVITON THE GED IS NOT THE BUTTON: the first EC2 B phase with it failed
+   the same way, and a one-instance probe (ready -> a regular stop -> start) showed the stop
+   taking 254 s — EC2's timeout, then the power cut. `talaria.acpidump=1` (the tables' button
+   devices as hex) read a `c7g.xlarge`'s DSDT: its `GED1` carries 32 interrupts (INTID 48-79)
+   whose `_EVT` notifies the PCI slots (hot-plug), and the button is `GPO0`, a PL061 (`ARMH0061`
+   at 0x0903_0000) whose `_AEI` has `_E03` -> `Notify(PWRB)` and `_E04` -> `Notify(SLPB)`. The
+   choice is now by the AML's meaning, not the first match: a GED counts only if its body
+   notifies PWRB (QEMU's does), a PL061's pin is the hex of the `_Exx`/`_Lxx` method that notifies
+   PWRB, its base the Memory32Fixed inside the same Device (the scopes from the PkgLengths);
+   checked in Python on the probe's bytes, then on EC2: "a PL061 GPIO at 0x9030000, pin 3", the
+   stop in 19 s, MariaDB ready on the next boot. STILL OPEN: the hard cut itself — EC2's forced
+   power-off two minutes after MariaDB was ready left `ib_logfile0` unreadable (the redo log the
+   first start had just rebuilt), where a local `kill -9` of QEMU never did (the host's cache
+   keeps what the guest wrote) — a durability question for `powercut-ec2.sh`, on both machines. What the item said before:
    **The databases under strict on the EC2 scoreboard.** The A/B of 2026-10-07 (`run-remote-ab.sh
    <wl> "talaria.dmap=strict"`) gave no judgeable point, and the stand, not the kernel, was why:
    an AMI built before the worktree had `services/*/build` (fixed: `mk-ami.sh` refuses a tree that

@@ -264,6 +264,7 @@ pub const MODES: &[&str] = &[
 
 /// All the kernel's knobs. The order is alphabetical, so that a duplicate is visible to the eye.
 pub const KNOBS: &[Knob] = &[
+    once("talaria.acpidump", Kind::Flag, "print the ACPI tables' power-button devices (the GED, a PL061) as hex at boot"),
     once("talaria.apcr4mask", Kind::Num, "the CR4 bits that are NOT cloned onto APs (bisecting)"),
     once("talaria.appprof", Kind::Flag, "the app stage per thread (read->write) into the stat block"),
     once("talaria.cell", Kind::Word(&["identity"]), "a mode=cell workload in the kernel's identity AS"),
