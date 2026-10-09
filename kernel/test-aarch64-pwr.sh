@@ -34,3 +34,14 @@ for m in ${MODES:-pwrbtn pwrbtnign}; do
   kill $Q 2>/dev/null; wait $Q 2>/dev/null
   grep -a "pwrbtn: PERSISTED\|pwrbtn: FAIL\|a JBD2 journal" /w/$TD/pwr-$m-v.log | cut -c1-150 | sed 's/^/   /'
 done
+# ORDERED ACROSS FILES (ext2 `CNEW`): a new file without an fsync, another file's fsync, a POWER CUT
+# (kill -9), the second boot reads the file back (kernel/test.sh has the same pair on x86).
+cp /w/kernel/target/a64-disks/ext2.img /tmp/pwr.img; rm -f /tmp/qmp.sock
+boot orderedcut /w/$TD/ord-cut.log
+t=0; until grep -aq "orderedcut: committed" /w/$TD/ord-cut.log || [ $t -gt 240 ]; do sleep 1; t=$((t+1)); done
+sleep 1; kill -9 $Q; wait $Q 2>/dev/null
+grep -a "orderedcut:" /w/$TD/ord-cut.log | cut -c1-150
+rm -f /tmp/qmp.sock; boot orderedv /w/$TD/ord-v.log
+t=0; until grep -aq "orderedv:" /w/$TD/ord-v.log || [ $t -gt 240 ]; do sleep 1; t=$((t+1)); done
+kill $Q 2>/dev/null; wait $Q 2>/dev/null
+grep -a "orderedv:" /w/$TD/ord-v.log | cut -c1-150

@@ -54,6 +54,45 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/sigtest", &[b"sigtest", b"sleep"], &[b"HOME=/"]); } }
             crate::suite::park()
         }
+        "orderedcut" => {
+            // ORDERED MODE ACROSS FILES (ext2 `CNEW`, ARM64-PLAN §11 item 1): a new file's 64 KiB
+            // written WITHOUT an fsync, then ANOTHER file's fsync commits the metadata — the new
+            // file's inode and block map among it. The gate then kills the machine (a power cut:
+            // what the guest never handed the device is gone) and `orderedv` reads the file back.
+            // Before the fix the map was committed while the data stayed in the cache: zeros.
+            if crate::fs::init() {
+                let mut pat = [0u8; 4096];
+                let h = crate::ext2::open(b"/ordered.dat", 0o1101, 0o644);
+                for k in 0..16u32 {
+                    for (i, b) in pat.iter_mut().enumerate() { *b = (k as usize * 31 + i * 7) as u8 | 1; }
+                    crate::ext2::write(h, pat.as_ptr(), pat.len());
+                }
+                crate::ext2::close(h);
+                let g = crate::ext2::open(b"/other.dat", 0o1101, 0o644);
+                crate::ext2::write(g, b"x".as_ptr(), 1);
+                let r = crate::ext2::fsync(g);
+                crate::ext2::close(g);
+                println!("orderedcut: committed (the other file's fsync {}, new blocks written first {})", r,
+                    crate::ext2::ORDERED_NEW.load(core::sync::atomic::Ordering::Relaxed));
+            }
+            crate::suite::park()
+        }
+        "orderedv" => {
+            if crate::fs::init() {
+                let h = crate::ext2::open(b"/ordered.dat", 0, 0);
+                let mut buf = [0u8; 4096];
+                let mut bad = if h < 0 { 1 } else { 0 };
+                for k in 0..16u32 {
+                    if h < 0 { break; }
+                    let n = crate::ext2::read(h, buf.as_mut_ptr(), buf.len());
+                    if n != 4096 || buf.iter().enumerate().any(|(i, &b)| b != ((k as usize * 31 + i * 7) as u8 | 1)) { bad += 1; }
+                }
+                if h >= 0 { crate::ext2::close(h); }
+                if bad == 0 { println!("orderedv: ALL OK — the file's 64 KiB survived the cut"); }
+                else { println!("orderedv: FAIL — {} of 16 pages lost after the cut (open {})", bad, h); }
+            }
+            crate::suite::park()
+        }
         "pwrbtnv" => {
             // The second boot after the button: the file is in place AND the journal is clean (start 0 —
             // without a replay: the sync before S5 made a checkpoint).
