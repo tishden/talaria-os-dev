@@ -554,6 +554,7 @@ pub fn dump() {
     // that means a frame woke the owner (the card's line works); with the ceiling — that means
     // there was nobody to wake it and the waiter slept through the insurance (see netsys::wait_frame).
     crate::netprof::dump_app();   // `talaria.appprof=1`: the read->write stage per thread
+    crate::umark::dump();         // the slow intervals a workload marked (prctl PR_TALARIA_SLOW)
     // The pull of a ready thread by a waiter (`talaria.wakepull=1`): how many readers
     // moved to the spinner, and why the rest were not taken.
     {   use core::sync::atomic::Ordering::Relaxed as R;

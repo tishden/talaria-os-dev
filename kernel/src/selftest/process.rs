@@ -186,6 +186,23 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/cowstale", args, &[b"HOME=/"]); } }
             crate::suite::park()
         }
+        "umarkt" => {
+            // The slow-interval instrument (`umark`, ARM64-PLAN §11 item 2b): a hog spinning on
+            // core 1, the main thread names its 2 ms sleeps on core 0; the `stat:` block at the
+            // end must give core 1 to the hog (awake) and core 0 to the main thread (asleep).
+            crate::smp::start_from_cmdline(cmdline);
+            if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/umarkt", &[b"umarkt", b"50"], &[b"HOME=/"]); } }
+            crate::suite::park()
+        }
+        "sleeplat" | "sleeplath" => {
+            // nanosleep's accuracy (ARM64-PLAN §11 item 2b): 2000 sleeps of 50 us, the median
+            // overshoot under 500 us — a sleep served by the tick (200-us coarse windows until
+            // the term) overslept to it, ~2 ms. `sleeplath`: a thread spins on the sleeper's core.
+            crate::smp::start_from_cmdline(cmdline);
+            let mode: &[u8] = if name == "sleeplat" { b"-" } else { b"hog" };
+            if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/sleeplat", &[b"sleeplat", b"50", b"2000", mode, b"500"], &[b"HOME=/"]); } }
+            crate::suite::park()
+        }
         "sigtestlo" => {
             // The same binary linked at 0x20_0000 — on x86 the kernel image's own load address
             // (stage 7.4): the image runs at its high alias, a strict process space has none of

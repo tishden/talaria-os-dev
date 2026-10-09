@@ -123,6 +123,7 @@ mod filed;    // uploading/downloading files over TCP (an rsync-alike)
 mod imds;
 use arch::ioapic;
 mod netprof;
+mod umark;    // a slow interval named by the workload: who held the cores (prctl PR_TALARIA_SLOW)
 mod netsys;
 mod netcfg;   // addresses, routes, DHCP: the network configuration as a model rather than three variables
 mod routes;

@@ -15,6 +15,8 @@
 //   --out PATH      the result file (default /mdpipe.log)
 //   --crash-at N    at tick N, dereference an instrument that does not exist (for the
 //                   post-mortem chapter: SIGSEGV -> core dump -> gdb bt)
+//   --mark-us N     name every stage over N us to the kernel (Talaria's `stat:` block then
+//                   says who held the cores during the slow ticks; a no-op on Linux)
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -151,6 +153,12 @@ static int                   g_rounds  = 24;
 static std::atomic<uint64_t> back_cnt{0};
 static std::atomic<uint64_t> back_max{0};
 static long                  g_crash_at = -1;
+// `--mark-us N`: a stage over N us is named to the kernel — `prctl(PR_TALARIA_SLOW, t_enq, t_done)`,
+// and Talaria's `stat:` block says who held the cores during the slow ticks (ARM64-PLAN §11 item 2b).
+// Linux answers EINVAL to the unknown option: the same binary runs on both, the call is counted.
+static const int             PR_TALARIA_SLOW = 0x54414c01;
+static uint64_t              g_mark_ns = 0;
+static std::atomic<uint64_t> marked{0};
 
 static void worker(int id) {
     char nm[16];
@@ -173,6 +181,10 @@ static void worker(int id) {
             while (d > prev && !back_max.compare_exchange_weak(prev, d)) {}
         } else {
             lat[id].add(t_done - t.t_enq);
+            if (g_mark_ns && t_done - t.t_enq >= g_mark_ns) {
+                prctl(PR_TALARIA_SLOW, (unsigned long)t.t_enq, (unsigned long)t_done, 0, 0);
+                marked.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         if ((processed.fetch_add(1) % 4096) == 0) sink.push(t);
     }
@@ -234,6 +246,7 @@ int main(int argc, char **argv) {
         else if (a == "--rounds")   g_rounds = atoi(val("24"));
         else if (a == "--out")      out     = val("/mdpipe.log");
         else if (a == "--crash-at") g_crash_at = atol(val("-1"));
+        else if (a == "--mark-us")  g_mark_ns = strtoull(val("0"), nullptr, 10) * 1000ull;
     }
     if (workers < 1) workers = 1;
 
@@ -282,6 +295,9 @@ int main(int argc, char **argv) {
     std::printf("mdpipe: stage latency, ns: p50=%u p90=%u p99=%u p99.9=%u max=%u\n",
                 pct(all, 0.50), pct(all, 0.90), pct(all, 0.99), pct(all, 0.999),
                 all.empty() ? 0 : all.back());
+    if (g_mark_ns)
+        std::printf("mdpipe: stages over %llu us named to the kernel: %llu\n",
+                    (unsigned long long)(g_mark_ns / 1000), (unsigned long long)marked.load());
     std::printf("mdpipe: OK\n");
     std::fflush(stdout);
     return 0;

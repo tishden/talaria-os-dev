@@ -2537,8 +2537,32 @@ order of work:
    interrupts) reorders the contestants, where on EC2 the Linux generator was the faster. The client
    path is measured on EC2 only: phase B with `AB_ROLES=loadgen` and `talaria.sysprof=1
    talaria.stat=<ms>` on the generator (the periodic counter block needs no console input);
-   (b) the wfe tier's mdpipe tail at `smp=2` (oversubscription; only `wakepreempt=0` helps) — a per-tick
-   instrument (who is on the core when a tick is slow); (c) redis's rare 0.3-0.9 ms outliers at low
+   (b) the wfe tier's mdpipe tail at `smp=2` — **closed 2026-10-09: it was `nanosleep`.** The
+   per-tick instrument was built (`kernel/src/umark.rs`): the workload names a slow interval itself,
+   `prctl(PR_TALARIA_SLOW, t0_ns, t1_ns)` (mdpipe's `--mark-us N`; Linux answers EINVAL), and the
+   `stat:` block folds every core's scheduler decisions inside the windows into "who held the cores",
+   with the part each holder spent ASLEEP as the core's current task (the cores' sleep intervals
+   kept from the first mark on); gate `umarkt` on both machines (a hog spinning on core 1 holds it
+   awake, the marking thread its own core asleep). Its first run on a `c7g.large`
+   (`variants-umark-c7g`, the default `wfe(monitor)`, p99 36.0 us against Linux's 5.7): during the
+   20 283 slow ticks the cores were held by `md_gen` 36 % and `md_main` 13 % AWAKE — and `md_main`,
+   which sleeps a second at a time, had run 85 339 times in 30 s (113 452 and 6 s of a core with
+   `wakepreempt=0`). `nanosleep` was a loop of 200-us coarse `wait_window`s: a long sleep woke 5000
+   times a second to read the clock, and a short one overslept to the next tick
+   (`kernel/user/sleeplat`: `nanosleep(50 us)` overshoot p50 1947 us under KVM), so mdpipe's
+   generator, paced by such sleeps, pushed its ticks in bursts. Fix: the whole term is one EXACT
+   deadline of the wait tier (the tick serves a far one, the core's timer a near one, a core with
+   other work parks the sleeper; overshoot p50 25 us, p99 32, with or without a neighbour); a
+   coarse whole term was tried and kept the 2-ms oversleep (its `sync=hlt` p99 6.7 -> 20.5, the
+   generator's shape changed). Gates `sleeplat`/`sleeplath` on both machines. On the `c7g.large`
+   (`variants-exactsleep-c7g`, p50/p99/p99.9 us, max): default 4.4/5.1/7.9, 7.1 ms (before
+   1.7/36.0/41.8, 1.8 ms); `sync=hlt` 5.2/6.2/8.9, 0.26 ms; `wakepreempt=0` 4.3/5.1/7.4, 44 us;
+   Linux in the same hour 3.7/4.9/5.4, 0.40 ms. The median rose because the generator now paces
+   like Linux's (no bursts). What is left of it: the default's maximum — `ready->cpu` has ~150 waits
+   of 0.5-1 ms and a few over 1 ms (the worst 7.07 ms: a ready worker on core 1 behind its sibling,
+   the core's current task), gone with `wakepreempt=0` (max 44 us): under the 150-us threshold of
+   preempting on a wakeup a busy core is only kicked, and the woken one waits for that core's next
+   tick — the next instrument is that wait, not the threshold's value; (c) redis's rare 0.3-0.9 ms outliers at low
    rates; (d) PostgreSQL `pk`'s ceiling, measured under the Linux generator too; (e) the lazy FP save
    (17 ns of a 130 ns svc — last).
 3. **Stage 6's tails.** The low allocator takes one RAM region (the others below 4 GiB stay

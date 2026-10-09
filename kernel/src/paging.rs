@@ -1681,6 +1681,7 @@ pub fn halt_enter() {
     let me = crate::percpu::cpu_id();
     if me < 64 { HALTED[me].store(true, core::sync::atomic::Ordering::SeqCst); }
     crate::sched::halt_acct_enter(me); // the sleep's time belongs neither to the task nor to the core
+    crate::umark::halt_in(me);         // a slow interval's instrument: the core's sleeps (off until a mark)
 }
 /// Remove the mark (right after the `hlt`) — and extinguish the TLB if during the sleep
 /// a neighbour removed mappings without calling (see `TLB_LAZY`). The order "remove
@@ -1695,6 +1696,7 @@ pub fn halt_exit() {
         if lazy_tlb_take() { unsafe { flush_tlb(); } }
     }
     crate::sched::halt_acct_exit(me);
+    crate::umark::halt_out(me);
 }
 /// Does the core `cpu` stand in `hlt`.
 #[inline]
