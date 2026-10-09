@@ -2486,7 +2486,9 @@ order of work:
    Event Device (`ACPI0013` in the DSDT/an SSDT, its `_CRS` interrupt found without an AML
    interpreter), its SPI made edge-latched and its pending bit polled from the tick as x86 polls
    PM1a; gate `uefi-pwrbtn` under edk2 (`kernel/test-aarch64-pwr.sh`: both paths, the unsynced
-   file read back). The EC2 B phase is to repeat on it. What the item said before:
+   file read back). An EC2 Graviton names the GED too (a `c7g.xlarge`'s boot line: "the GED,
+   INTID 48"); the PL061 branch (`ARMH0061` + an `_AEI` GpioInt, the other shape a firmware may
+   use) has met no machine yet — untested. The EC2 B phase is to repeat on it. What the item said before:
    **The databases under strict on the EC2 scoreboard.** The A/B of 2026-10-07 (`run-remote-ab.sh
    <wl> "talaria.dmap=strict"`) gave no judgeable point, and the stand, not the kernel, was why:
    an AMI built before the worktree had `services/*/build` (fixed: `mk-ami.sh` refuses a tree that
