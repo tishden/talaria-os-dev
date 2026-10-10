@@ -2536,7 +2536,14 @@ order of work:
    `vhost=on`, in a Linux VM 21 k/s (p50 425 us) — the local virtual NIC (virtio kicks, vhost,
    interrupts) reorders the contestants, where on EC2 the Linux generator was the faster. The client
    path is measured on EC2 only: phase B with `AB_ROLES=loadgen` and `talaria.sysprof=1
-   talaria.stat=<ms>` on the generator (the periodic counter block needs no console input);
+   talaria.stat=<ms>` on the generator (the periodic counter block needs no console input).
+   Done 2026-10-09 (`ec2ab-redis-20261009-202439`, `c7g.xlarge`, the generator's console kept):
+   `recvfrom` 704.5 M calls at 4275 ns each (3012 s of kernel time over the run), `sendto`
+   188.4 M at 1997 ns — 3.7 `recvfrom` per `sendto`, so most receives are polls of an empty
+   socket (EAGAIN), each paying the full path; the next step is that ratio (where tlgen polls,
+   what an empty receive costs, whether a readiness wait replaces it), not the per-call price.
+   B itself is not a performance point: the profile doubled the Talaria p99 (55.8 -> 127 us at
+   21 k/s);
    (b) the wfe tier's mdpipe tail at `smp=2` — **closed 2026-10-09: it was `nanosleep`.** The
    per-tick instrument was built (`kernel/src/umark.rs`): the workload names a slow interval itself,
    `prctl(PR_TALARIA_SLOW, t0_ns, t1_ns)` (mdpipe's `--mark-us N`; Linux answers EINVAL), and the
