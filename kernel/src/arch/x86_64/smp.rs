@@ -812,6 +812,32 @@ pub fn retune_timer(period_ns: u64) {
 /// How many times the tick's period was reconfigured (for `stat:`): a large number is
 /// a sign of chatter, and that costs writes into the LAPIC.
 pub static RETUNES: AtomicU64 = AtomicU64::new(0);
+/// Ticks pulled nearer by `tick_sooner` (the deferred preemption at a wakeup, `sched::DEFER_STAY`).
+pub static TICK_PULLS: AtomicU64 = AtomicU64::new(0);
+
+/// Pull THIS core's next tick to `ns` from now if it stands further: a one-shot for `ns`, the
+/// periodic mode comes back with that tick (`TIMER_ONESHOT` -> `timer_tick_reload`, as the
+/// slice's remainder after a borrowed deadline). Nothing while the LVT is borrowed or there is
+/// no tick on this core — then false: the caller has no tick to wait for (a dedicated core) and
+/// must act now. True when the tick is nearer anyway (the current count is read).
+pub fn tick_sooner(ns: u64) -> bool {
+    let c = crate::percpu::cpu_id().min(MAXCPU - 1);
+    let lhz = LAPIC_HZ.load(Ordering::Relaxed);
+    if lhz == 0 || my_timer_slot().load(Ordering::Relaxed) == 0 || TIMER_REM[c].load(Ordering::Relaxed) != 0 { return false; }
+    let want = ((lhz as u128 * ns as u128 / 1_000_000_000u128) as u64).clamp(16, u32::MAX as u64) as u32;
+    // SAFETY: the LAPIC's registers of THIS core (the current count, then the one-shot), as in
+    // `lapic_timer_restore`.
+    let left = unsafe { lapic_read(0x390) };
+    if left != 0 && left <= want { return true; }
+    TIMER_ONESHOT[c].store(1, Ordering::Relaxed);
+    unsafe {
+        lapic_write(0x3E0, 0x3);
+        lapic_write(0x320, crate::idt::TIMER_VECTOR as u32); // one-shot
+        lapic_write(0x380, want);
+    }
+    TICK_PULLS.fetch_add(1, Ordering::Relaxed);
+    true
+}
 
 /// A self-test of the timer's calibration (`talaria.test=slice`).
 ///

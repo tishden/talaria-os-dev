@@ -2617,9 +2617,49 @@ order of work:
    of 0.5-1 ms and a few over 1 ms (the worst 7.07 ms: a ready worker on core 1 behind its sibling,
    the core's current task), gone with `wakepreempt=0` (max 44 us): under the 150-us threshold of
    preempting on a wakeup a busy core is only kicked, and the woken one waits for that core's next
-   tick — the next instrument is that wait, not the threshold's value; (c) redis's rare 0.3-0.9 ms outliers at low
-   rates; (d) PostgreSQL `pk`'s ceiling, measured under the Linux generator too; (e) the lazy FP save
-   (17 ns of a 130 ns svc — last).
+   tick — the next instrument is that wait, not the threshold's value. **Named and fixed
+   2026-10-21.** The instrument first: `umark` kept the FIRST six marks, so the 7-ms stage was
+   among 295 marks and the six printed were 16-60 us; it now keeps the six LONGEST since the
+   previous block, each core's decisions inside the window (the first and the last when more than
+   fit) and each core's SLEEPS overlapping it (`slept [+31..+93]`), and the worst `ready->cpu`'s
+   decision tail prints from 0.5 ms (was 10). Its first run (`variants-rqwait-c7g`, the default
+   kernel, max 492 us): every one of the six longest stages (425-491 us) had the same shape on core
+   1 — `[-4 yield t3->t1 rotation
+   from:futex] [+408 yield t1->t2 rotation from:the fs]` or `[+490 tick t1->t2 rotation]`: a worker
+   gave up the core, the rotation gave it to md_sink, and the other worker, woken 4 us later, stood
+   ready until md_sink's slice ENDED (a tick or the FS), 400-490 us; md_sink had run under the
+   150-us threshold at the wake, so the waker only kicked, and nobody looked again when it passed
+   the threshold. The knob's promise ("a woken one waits at most the threshold") did not hold: it
+   waited up to the slice. Fix: a wakeup against a RUNNING occupant younger than the threshold sends
+   the hint with a resched IPI (as the over-threshold case does) and the core's scheduler, seeing a
+   young occupant, STAYS but pulls its own tick to the moment the occupant reaches the threshold
+   (`smp::tick_sooner`: a one-shot, the period returns with that tick; `stay:young` in the
+   decisions, `deferred preemptions:` in `stat:`); a core without a tick (dedicated, the timer lent
+   out) switches at once. Gate `wakedef` on both machines (a cell on two cores: a spinning hog and a
+   futex waiter on core 1, the main thread wakes it 1000 times at a random phase of the slice;
+   under KVM p99 414 us, max 499 before → p99 87-99, max 201-472; under TCG the mechanism's counters
+   and no lost wakeup — the emulation's latencies are its own). On the `c7g.large`
+   (`variants-wakedef-c7g`, three instances of the default kernel, mdpipe 30 s): max 297 / 155 /
+   121 us against 492 and 7070 before, p99 4.84-5.00, p99.9 7.04-7.24 (Linux in the earlier hour
+   4.9 / 5.4, max 400); the longest stages are now the threshold itself — `[+18 tick t2->t2
+   stay:young h:t3] [+133 tick t2->t3 hint h:t3]`, 112-134 us. Two things the instrument named and
+   this item leaves: (1) the one 296-us stage of the three runs is the OTHER class — core 1's
+   occupant was a worker ASLEEP in its futex wait and the core slept in four 62-us pieces
+   (`slept [+31..+93] [+94..+156] [+156..+218] [+218..+281]`) while the woken sibling stood ready,
+   until the sleeper's own wake rotated (`[+295 yield t2->t3 rotation from:futex]`): the
+   doorbell/word sleeper woke four times and went back to sleep over a ready neighbour; the 7-ms
+   maximum of 2026-10-09 (the occupant t3 asleep as the core's task, one switch in 7 ms) is the same
+   shape with a longer period, rare (once in 90 s of runs here) and now caught whole by the kept
+   intervals when it happens — the next step on the mdpipe tail; (2) the ~150 `ready->cpu` waits
+   of 0.5-1 ms per run are md_main's: a parked sleeper with an exact deadline on a core whose tick
+   went LONG (2 ms, `idleslice`) wakes at the long tick (`[-14005 tick t4->t4 stay:nobody] …
+   [-1999 …] [-0 tick t4->t0 rotation]`, every 2 ms) — a timed sleep behind a running neighbour is
+   late by up to the long tick; harmless for mdpipe (a 1-s sleep), to be weighed for `nanosleep`
+   under load. Also met, not chased: in `talaria.test=` mode the APs are the legacy dedicated ones
+   (no tick), and a thread that moves itself there with `sched_setaffinity` from the BSP starves a
+   second thread placed on that core; the gates boot such tests as a cell. (c) redis's rare
+   0.3-0.9 ms outliers at low rates; (d) PostgreSQL `pk`'s ceiling, measured under the Linux
+   generator too; (e) the lazy FP save (17 ns of a 130 ns svc — last).
 3. **Stage 6's tails.** The low allocator takes one RAM region (the others below 4 GiB stay
    unused — on x86 the 640 KB under 1 MB); the workload cannot use RAM beyond the identity ceiling
    yet (the identity modes need a check of their own first); the `alloc_contig` callers that are not

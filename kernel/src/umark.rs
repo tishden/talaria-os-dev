@@ -11,15 +11,18 @@
 //!
 //! What the kernel keeps. For every mark: the scheduler's decisions of EVERY core inside
 //! [t0, t1] (the rings of `sched::STRACE`), folded into "who was on the cores" — the cycles each
-//! task (or nobody) held a core during slow intervals, summed over all the marks; the first
-//! `KEEP` marks are kept whole, decision by decision. The `stat:` block prints both.
+//! task (or nobody) held a core during slow intervals, summed over all the marks; the `KEEP`
+//! LONGEST marks since the previous block are kept whole — each core's decisions inside the
+//! window (the first and the last when there are more than fit) and each core's sleeps that
+//! overlap it. The `stat:` block prints both. (The first `KEEP` marks were kept at first: a
+//! c7g.large run named 295 stages, the 7-ms one among them, and printed six of 16-60 us.)
 //!
 //! Its limits. The occupant is the task the scheduler put on the core; a futex waiter sleeping
 //! in `wfe`/`mwait` as its core's current task counts as occupying it — which is exactly one of
 //! the candidates — and a ring of 128 decisions per core covers a window of a few milliseconds
 //! at most (an older start is reported as `cut`). The price: nothing until a process calls it;
 //! a call walks the rings of the online cores (128 records each).
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use crate::sched::{SchedEv, SEV0, NTASKS, MAXCPU};
 
 /// The option number: "TAL" + 1; no Linux option is near it.
@@ -29,6 +32,8 @@ const KEEP: usize = 6;
 /// Cores kept per mark, decisions per core.
 const KCPU: usize = 4;
 const KEV: usize = 12;
+/// Sleep segments kept per core in a kept mark (the longest overlaps with the window).
+const KSL: usize = 4;
 /// The occupant index for "nobody" (the pickup loop / an idle core).
 const IDLE: usize = 255;
 
@@ -50,7 +55,7 @@ static OCC_SLEEP: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 // THE CORES' SLEEPS. `paging::halt_enter/exit` bracket every sleep of a core; once the first mark
 // came (`ARMED`), each core keeps its last `NSL` sleep intervals, so a mark can subtract a sleeping
 // occupant's sleep from its holding. Before that the price is one Relaxed load per sleep.
-const NSL: usize = 32;
+const NSL: usize = 128;
 static ARMED: AtomicBool = AtomicBool::new(false);
 static SL_T0: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU];
 static SL_POS: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU];
@@ -85,12 +90,18 @@ fn slept_in(c: usize, s: u64, e: u64) -> u64 {
 }
 
 struct Kept {
-    claim: AtomicBool, used: AtomicBool,
-    t: u8, cpu: u8, us: u32, t0: u64,
-    n: [u8; KCPU], ev: [[SchedEv; KEV]; KCPU],
+    /// 0 free, 1 taken (by the writer or the printer), 2 ready.
+    st: AtomicU8,
+    us: AtomicU32,
+    t: u8, cpu: u8, t0: u64,
+    /// Decisions kept per core; `more` — how many in the middle were dropped (the first and the
+    /// last `KEV/2` stay: how the window began and how it ended).
+    n: [u8; KCPU], more: [u16; KCPU], ev: [[SchedEv; KEV]; KCPU],
+    /// The core's sleeps overlapping the window, us from `t0` (a start may be negative).
+    nsl: [u8; KCPU], sl: [[(i32, i32); KSL]; KCPU],
 }
-const K0: Kept = Kept { claim: AtomicBool::new(false), used: AtomicBool::new(false), t: 0, cpu: 0, us: 0, t0: 0,
-    n: [0; KCPU], ev: [[SEV0; KEV]; KCPU] };
+const K0: Kept = Kept { st: AtomicU8::new(0), us: AtomicU32::new(0), t: 0, cpu: 0, t0: 0,
+    n: [0; KCPU], more: [0; KCPU], ev: [[SEV0; KEV]; KCPU], nsl: [0; KCPU], sl: [[(0, 0); KSL]; KCPU] };
 static mut KEPT: [Kept; KEEP] = [K0; KEEP];
 
 /// A monotonic nanosecond stamp as a counter value (`wallclock::mono_ns` is the counter over its rate).
@@ -108,20 +119,37 @@ pub fn mark(t0_ns: u64, t1_ns: u64) -> i64 {
     MARKS.fetch_add(1, Ordering::Relaxed);
     MARK_CYC.fetch_add(b - a, Ordering::Relaxed);
     let ncpu = crate::smp::nr_cpus().clamp(1, MAXCPU);
-    // The slot for the whole record, if one is free (a mark is not refused for want of a slot).
+    // The slot for the whole record: a free one, else the shortest kept one when this interval
+    // is longer (a mark is not refused for want of a slot). Taking a slot is a CAS on its state,
+    // so two cores marking at once and the printer never hold the same one.
+    let us_new = ((b - a) * 1_000_000 / hz).min(u32::MAX as u64) as u32;
     let mut slot: Option<&mut Kept> = None;
     for k in 0..KEEP {
-        // SAFETY: only the place is taken here; the claim below makes the slot this core's.
+        // SAFETY: the state is an atomic in a static; the slot's body is touched only by whoever
+        // moved its state 0/2 -> 1.
         let p = unsafe { core::ptr::addr_of_mut!(KEPT[k]) };
-        // SAFETY: the claim is an atomic in a static.
-        if unsafe { (*p).claim.swap(true, Ordering::Acquire) } { continue; }
-        // SAFETY: claimed: nobody else writes it, the printer reads it only after `used`.
-        slot = Some(unsafe { &mut *p });
-        break;
+        if unsafe { (*p).st.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed) }.is_ok() { slot = Some(unsafe { &mut *p }); break; }
+    }
+    if slot.is_none() {
+        let mut best = (u32::MAX, KEEP);
+        for k in 0..KEEP {
+            // SAFETY: atomics in a static, read only.
+            let p = unsafe { core::ptr::addr_of_mut!(KEPT[k]) };
+            if unsafe { (*p).st.load(Ordering::Relaxed) } == 2 {
+                let u = unsafe { (*p).us.load(Ordering::Relaxed) };
+                if u < best.0 { best = (u, k); }
+            }
+        }
+        if best.1 < KEEP && us_new > best.0 {
+            // SAFETY: as above — the body is ours only after the 2 -> 1 exchange.
+            let p = unsafe { core::ptr::addr_of_mut!(KEPT[best.1]) };
+            if unsafe { (*p).st.compare_exchange(2, 1, Ordering::Acquire, Ordering::Relaxed) }.is_ok() { slot = Some(unsafe { &mut *p }); }
+        }
     }
     if let Some(s) = slot.as_deref_mut() {
         s.t = me.min(255) as u8; s.cpu = crate::percpu::cpu_id().min(255) as u8;
-        s.us = ((b - a) * 1_000_000 / hz).min(u32::MAX as u64) as u32; s.t0 = a;
+        s.us.store(us_new, Ordering::Relaxed); s.t0 = a;
+        s.n = [0; KCPU]; s.more = [0; KCPU]; s.nsl = [0; KCPU];
     }
     // 1.5 KB on the syscall's stack: a window of a slow interval holds a few dozen decisions.
     let mut buf = [SEV0; 64];
@@ -129,9 +157,15 @@ pub fn mark(t0_ns: u64, t1_ns: u64) -> i64 {
         let n = crate::sched::strace_take(c, a, 1, &mut buf);
         if let Some(s) = slot.as_deref_mut() {
             if c < KCPU {
-                let k = n.min(KEV);
-                s.ev[c][..k].copy_from_slice(&buf[..k]);
-                s.n[c] = k as u8;
+                if n <= KEV { s.ev[c][..n].copy_from_slice(&buf[..n]); s.n[c] = n as u8; }
+                else {
+                    // More than fit: how the window began and how it ended.
+                    let h = KEV / 2;
+                    s.ev[c][..h].copy_from_slice(&buf[..h]);
+                    s.ev[c][h..KEV].copy_from_slice(&buf[n - (KEV - h)..n]);
+                    s.n[c] = KEV as u8; s.more[c] = (n - KEV) as u16;
+                }
+                s.nsl[c] = sleeps_in(c, a, b, now, hz, &mut s.sl[c]) as u8;
             }
         }
         // Fold the window: the occupant before the first decision inside it is that decision's
@@ -159,8 +193,37 @@ pub fn mark(t0_ns: u64, t1_ns: u64) -> i64 {
         }
         add_occ(c, occ, at, b.max(at), me);
     }
-    if let Some(s) = slot { s.used.store(true, Ordering::Release); }
+    if let Some(s) = slot { s.st.store(2, Ordering::Release); }
     0
+}
+
+/// The core `c`'s sleeps overlapping [s, e) — the `KSL` longest overlaps, in the order of their
+/// starts, as us from `s`; a sleep still going ends at `now`. Returns how many.
+fn sleeps_in(c: usize, s: u64, e: u64, now: u64, hz: u64, out: &mut [(i32, i32); KSL]) -> usize {
+    let mut ovl = [0u64; KSL];
+    let mut n = 0usize;
+    let us = |v: u64| -> i32 {
+        if v >= s { ((v - s).saturating_mul(1_000_000) / hz).min(i32::MAX as u64) as i32 }
+        else { -(((s - v).saturating_mul(1_000_000) / hz).min(i32::MAX as u64) as i32) }
+    };
+    let mut put = |x: u64, y: u64| {
+        if y <= x || y <= s || x >= e { return; }
+        let o = y.min(e) - x.max(s);
+        if n == KSL && o <= ovl[KSL - 1] { return; }
+        let mut i = if n == KSL { KSL - 1 } else { n };
+        while i > 0 && ovl[i - 1] < o { ovl[i] = ovl[i - 1]; out[i] = out[i - 1]; i -= 1; }
+        ovl[i] = o; out[i] = (us(x), us(y));
+        if n < KSL { n += 1; }
+    };
+    for k in 0..NSL {
+        let y = SL[c][k].1.load(Ordering::Acquire);
+        let x = SL[c][k].0.load(Ordering::Relaxed);
+        if y != 0 && x != 0 { put(x, y); }
+    }
+    let t0 = SL_T0[c].load(Ordering::Relaxed);
+    if t0 != 0 { put(t0, now); }
+    for i in 1..n { let mut j = i; while j > 0 && out[j - 1].0 > out[j].0 { out.swap(j - 1, j); j -= 1; } }
+    n
 }
 
 /// The core `c` was held by `t` over [s, e).
@@ -199,18 +262,22 @@ pub fn dump() {
     }
     crate::println!();
     let w: [u64; 16] = core::array::from_fn(|i| WHY[i].load(Ordering::Relaxed));
-    crate::println!("stat:   decisions inside: {} (ticks {}): hint {} hint-rejected {} rotation {} stay:lock {} stay:nobody {} stay:taken {} steal {} stay:ran-little {} stay:request {}; a window older than the ring {}",
-        w.iter().sum::<u64>(), TICKS.load(Ordering::Relaxed), w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], CUT.load(Ordering::Relaxed));
+    crate::println!("stat:   decisions inside: {} (ticks {}): hint {} hint-rejected {} rotation {} stay:lock {} stay:nobody {} stay:taken {} steal {} stay:ran-little {} stay:request {} stay:young {}; a window older than the ring {}",
+        w.iter().sum::<u64>(), TICKS.load(Ordering::Relaxed), w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], CUT.load(Ordering::Relaxed));
     let hzr = crate::tsc::hz().max(1);
     for k in 0..KEEP {
-        // SAFETY: the slot is read after its `used` (Acquire), set by the writer last.
+        // SAFETY: the slot's body is read only after its state went 2 -> 1 here (Acquire
+        // against the writer's Release of the 2).
         let d = unsafe { &mut *core::ptr::addr_of_mut!(KEPT[k]) };
-        if !d.used.load(Ordering::Acquire) { continue; }
-        crate::println!("stat:   a slow interval of t{}({}) on core {}: {} us; each core's decisions:", d.t, crate::obs::comm(d.t as usize), d.cpu, d.us);
+        if d.st.compare_exchange(2, 1, Ordering::Acquire, Ordering::Relaxed).is_err() { continue; }
+        crate::println!("stat:   a slow interval of t{}({}) on core {}: {} us; each core's decisions and sleeps (us from the start):",
+            d.t, crate::obs::comm(d.t as usize), d.cpu, d.us.load(Ordering::Relaxed));
         for c in 0..KCPU {
-            if d.n[c] == 0 { continue; }
+            if d.n[c] == 0 && d.nsl[c] == 0 { continue; }
             crate::print!("stat:     core {}:", c);
-            for e in &d.ev[c][..d.n[c] as usize] {
+            if d.n[c] == 0 { crate::print!(" no decision"); }
+            for (j, e) in d.ev[c][..d.n[c] as usize].iter().enumerate() {
+                if d.more[c] != 0 && j == KEV / 2 { crate::print!(" ...{} more...", d.more[c]); }
                 let dt = e.tsc.wrapping_sub(d.t0);
                 let (sg, u) = if dt < (1u64 << 62) { ("+", dt.saturating_mul(1_000_000) / hzr) } else { ("-", d.t0.wrapping_sub(e.tsc).saturating_mul(1_000_000) / hzr) };
                 crate::print!(" [{}{} {} t{}->t{} {}", sg, u, if e.why & 0x80 != 0 { "tick" } else { "yield" }, e.from, e.to, why_name(e.why));
@@ -218,15 +285,18 @@ pub fn dump() {
                 if e.why & 0x80 == 0 && e.rip != 0 { crate::print!(" from:{}", crate::sched::YO_NAMES[(e.rip as usize).min(crate::sched::YO_NAMES.len() - 1)]); }
                 crate::print!("]");
             }
+            if d.nsl[c] != 0 {
+                crate::print!("; slept");
+                for sl in &d.sl[c][..d.nsl[c] as usize] { crate::print!(" [{:+}..{:+}]", sl.0, sl.1); }
+            }
             crate::println!();
         }
-        // Printed: the slot goes back for a later interval (the next block shows newer ones).
-        d.used.store(false, Ordering::Relaxed);
-        d.claim.store(false, Ordering::Release);
+        // Printed: the slot goes back (the next block shows the longest since this one).
+        d.st.store(0, Ordering::Release);
     }
 }
 
 fn why_name(w: u8) -> &'static str {
     match w & 0x7f { 1 => "hint", 2 => "hint-rejected", 3 => "rotation", 4 => "stay:lock", 5 => "stay:nobody",
-        6 => "stay:taken", 7 => "steal", 8 => "stay:ran-little", 9 => "stay:request", _ => "?" }
+        6 => "stay:taken", 7 => "steal", 8 => "stay:ran-little", 9 => "stay:request", 10 => "stay:young", _ => "?" }
 }

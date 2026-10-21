@@ -994,6 +994,21 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     its parts, time the gate, and judge the gate by the bytes the call can WRITE, not by the
     length the process ASKED for.**
 
+60. **A threshold is a promise only if someone looks again when it is reached.** The wakeup
+    preemption rule said "a woken thread waits for a computing one at most 150 us", and the code
+    checked it ONCE, at the wake: under the threshold the core was kicked and the woken one left
+    to the slice's tick — up to 500 us, three times the promise, and exactly mdpipe's worst
+    stages on a Graviton (425-491 us, every one a worker behind a sibling that had just got the
+    core). Nothing in the percentiles pointed at the rule: p99 was fine, and the 7-ms maximum
+    looked like a different animal. What found it was the instrument's SELECTION: `umark` kept
+    the first six marked stages, all short; keeping the six longest, with each core's decisions
+    and sleeps inside the window, printed the mechanism in one line (`[-4 yield t3->t1 …]
+    [+408 yield t1->t2 …]`). The fix is the second look — the core's tick is pulled to the moment
+    the occupant reaches the threshold — and the maximum fell from 492 us to 121-297. **When a
+    rule is "no more than X", find the code path that acts when X passes; if there is none, the
+    rule is "no more than the next tick". And an instrument that keeps the FIRST N samples of a
+    rare event keeps the wrong ones: keep the worst.**
+
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
 * **The gate's image is part of the gate.** The dev box's `talaria-qemu-aarch64` was

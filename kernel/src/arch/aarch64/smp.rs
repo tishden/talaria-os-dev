@@ -27,6 +27,8 @@ pub static IPI_PV: AtomicU64 = AtomicU64::new(0);
 /// IPIs sent (the SGI path; the name is the x86 counter's).
 pub static IPI_ICR: AtomicU64 = AtomicU64::new(0);
 pub static RETUNES: AtomicU64 = AtomicU64::new(0);
+/// Ticks pulled nearer by `tick_sooner` (the deferred preemption at a wakeup, `sched::DEFER_STAY`).
+pub static TICK_PULLS: AtomicU64 = AtomicU64::new(0);
 /// The counter's frequency plays the timer's (the generic timer counts the same clock).
 pub static LAPIC_HZ: AtomicU64 = AtomicU64::new(0);
 
@@ -208,6 +210,21 @@ pub fn lapic_timer_restore() {
         return;
     }
     timer::arm(p);
+}
+/// Pull THIS core's next tick to `ns` from now if it stands further: the compare value moves,
+/// the period comes back with that tick (`TIMER_ONESHOT` -> `timer_tick_reload`). Nothing while
+/// the timer is borrowed for a deadline or absent — then false: the caller has no tick to wait
+/// for (a dedicated core) and must act now. True when the tick is nearer anyway.
+pub fn tick_sooner(ns: u64) -> bool {
+    let c = me();
+    if TIMER_PERIOD[c].load(Ordering::Relaxed) == 0 || TIMER_REM[c].load(Ordering::Relaxed) != 0 { return false; }
+    let want = timer::ticks_for_ns(ns);
+    let left = timer::compare_value().wrapping_sub(cpu::counter());
+    if left >= (1u64 << 62) || left <= want { return true; } // already due, or nearer than asked
+    TIMER_ONESHOT[c].store(1, Ordering::Relaxed);
+    timer::arm_ticks(want);
+    TICK_PULLS.fetch_add(1, Ordering::Relaxed);
+    true
 }
 /// Reconfigure this core's period if it must become a different one (the same guards as
 /// on x86: not while borrowed, not more often than four base periods).

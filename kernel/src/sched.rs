@@ -1566,7 +1566,7 @@ pub static RQ_MAX_CTX: AtomicU64 = AtomicU64::new(0);
 /// in the kernel). The ring `STRACE` knows that; we take its tail at a new worst one
 /// longer than `RQ_MAX_EV_US`. The low 8 bits of `RQ_MAX_EV_N_GOT` are how many records there are,
 /// the higher ones are the cycle of the taking (the negative offsets are printed from it).
-pub const RQ_MAX_EV_US: u64 = 10_000;
+pub const RQ_MAX_EV_US: u64 = 500;
 pub const RQ_MAX_EV_N: usize = 8;
 pub static mut RQ_MAX_EV: [SchedEv; RQ_MAX_EV_N] = [SEV0; RQ_MAX_EV_N];
 pub static RQ_MAX_EV_N_GOT: AtomicU64 = AtomicU64::new(0);
@@ -3310,7 +3310,20 @@ pub const SW_STAY_MIN: u8 = 8;
 /// 9 we stayed: the task HAS A REQUEST IN PROGRESS, while the only candidate is a network waiter
 /// (`talaria.reqfirst=`, see `REQFIRST_NS`).
 pub const SW_STAY_REQ: u8 = 9;
+/// 10 we stayed: a woken task is hinted, but the occupant is YOUNGER than the wakeup-preemption
+/// threshold and running — the tick is pulled to the threshold (`DEFER_STAY`, `smp::tick_sooner`).
+pub const SW_STAY_YOUNG: u8 = 10;
 pub const SW_TICK: u8 = 0x80;
+/// DEFERRED PREEMPTION AT A WAKEUP (ARM64-PLAN §11 item 2b). `talaria.wakepreempt=` promises
+/// that a woken task waits for a computing one at most the threshold (150 us). It did not: the
+/// waker, finding the occupant younger than that, only kicked the core and nobody looked again,
+/// so the woken one waited for the slice's tick — up to 500 us (mdpipe's worst stages on a
+/// c7g.large, 425-491 us, every one a worker ready behind md_sink that had just got the core;
+/// `wakedef` under KVM: p99 414 us, max 499). Now the waker sends the hint with a resched IPI,
+/// and this entry, seeing a young occupant, stays but pulls the core's tick to the moment the
+/// occupant reaches the threshold; that tick applies the hint. The counters: how many times
+/// the entry deferred, and how many ticks were pulled (`smp::TICK_PULLS`).
+pub static DEFER_STAY: AtomicU64 = AtomicU64::new(0);
 /// `talaria.tickmin=<ns>` — THE MINIMUM RUN BEFORE A ROTATION BY A TICK. Session 32:
 /// a core's timer is periodic (100 us with a live network waiter), and the tick came in
 /// an arbitrary phase of a request: the analyses "the thread was taken off the core in the middle of read->write"
@@ -3669,6 +3682,20 @@ fn ap_schedule(cpu: usize, cur_rsp: u64) -> u64 {
     let hint_ok = hint < n && hint != cur && CPU_OF[hint].load(Ordering::SeqCst) as usize == cpu
         && !not_ready(hint) && !crate::sync::blocked_for_sched(hint);
     if hint_ok { HINT_USED.fetch_add(1, Ordering::Relaxed); }
+    // A hinted wakeup against a RUNNING occupant younger than the threshold: we stay and pull the
+    // tick to the threshold (see `DEFER_STAY`). A sleeping occupant is left at once, as before.
+    if hint_ok && hw_tick && !crate::sync::blocked_for_sched(cur) {
+        let thr = crate::sync::wake_preempt_thr();
+        let ran = ran_ns_on(cpu);
+        // A core without a tick (dedicated, or the timer lent out) cannot defer: it switches now.
+        if thr != 0 && ran < thr && crate::smp::tick_sooner(thr - ran) {
+            DEFER_STAY.fetch_add(1, Ordering::Relaxed);
+            // The hint goes back for the pulled tick; a newer one set meanwhile wins.
+            let _ = HINT[cpu.min(MAXCPU - 1)].0.compare_exchange(usize::MAX, hint, Ordering::SeqCst, Ordering::SeqCst);
+            strace_note(cpu, cur, cur, tk | SW_STAY_YOUNG, hint);
+            return stay(cur, cur_rsp);
+        }
+    }
     // A tick without a hint caught a task that has been running for less than `talaria.tickmin` —
     // we leave it (see `TICKMIN_NS`). A hint is stronger than the threshold.
     if hw_tick && !hint_ok && tickmin_stay(cpu) { strace_note(cpu, cur, cur, tk | SW_STAY_MIN, hint); return stay(cur, cur_rsp); }
