@@ -999,6 +999,16 @@ a send and a receive per request on the load node), which the scoreboard's rule 
 own generator" charged to the server. That client path is the next thing to measure; the
 scoreboard's verdicts on the servers stand as they were taken.
 
+Named and fixed 2026-10-21 (ARM64-PLAN §11 item 2a, `results/ec2ab-redis-20261021-143739`): the
+generator's ceiling was the PRICE of its empty `recvfrom` — the syscall gate validated tlgen's
+whole 1 MiB receive buffer page by page, four table levels per page (256 walks, ~3 us), before
+the handler could answer EAGAIN. The check now descends once per 4K table and is capped at what
+the descriptor can deliver (`Len::ArgCap`): `recvfrom` on the Graviton 4274 → 455 ns per call, the
+Talaria generator's closed-loop ceiling 85-89 k → 103-116 k req/s (Linux's 125-141), every
+ladder median and p99 up to 77-86 k req/s under Linux's, the top rung 92-104 k against 77-80 k.
+Gate `gatecost` (an empty read with a 4 KiB and a 1 MiB buffer must cost the same): `c7g.large`
+Talaria 207 / 207 ns, Linux 217 / 216.
+
 ## 11. Reproducing any of this
 
 ```sh

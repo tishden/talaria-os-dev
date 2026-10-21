@@ -203,6 +203,14 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/sleeplat", &[b"sleeplat", b"50", b"2000", mode, b"500"], &[b"HOME=/"]); } }
             crate::suite::park()
         }
+        "gatecost" => {
+            // The pointer check's price by the asked LENGTH (ARM64-PLAN §11 item 2a): an empty
+            // non-blocking pipe read with 4 KiB and 1 MiB buffers (the kernel writes nothing), the
+            // same at a file's end. Page-by-page it was 20x (3 us per 1 MiB under KVM, the empty
+            // receive of tlgen on a Graviton); now the pipe's cap and one descent per table.
+            if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/gatecost", &[b"gatecost", b"200000", b"3", b"8"], &[b"HOME=/"]); } }
+            crate::suite::park()
+        }
         "sigtestlo" => {
             // The same binary linked at 0x20_0000 — on x86 the kernel image's own load address
             // (stage 7.4): the image runs at its high alias, a strict process space has none of

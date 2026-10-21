@@ -979,6 +979,21 @@ cores): a host that steals a vCPU for 10 ms is the cheapest race detector there 
     kernel's counters cannot find a tail, let the workload mark it; and when a fix moves the number,
     check it did not move the workload.**
 
+59. **The price of a syscall is the price of its arguments' CHECK before the price of its work.**
+    The Talaria generator's `recvfrom` cost 4.3 us on a Graviton against 0.7 us inside the stack
+    (the lock's own accounting said so), and an empty receive — most of them — barely touched
+    the stack at all (`pollgap` cancelled 638 M idle passes). The rest was `uaccess::gate`:
+    tlgen asks `recv` for 1 MiB on every poll, and the pointer check walked the page tables
+    for each of the 256 pages before the handler ran, to validate a buffer the kernel then
+    wrote nothing into. Linux validates nothing up front — it copies and faults — so the length
+    costs it nothing. A microgate (`kernel/user/gatecost`: 4 KiB against 1 MiB reads of an empty
+    pipe, same binary on both OSes) put the number on it in a minute: 153 against 2997 ns.
+    Two fixes, both about asking LESS of the check: one descent per table, not per page (the
+    table's entries are consecutive words), and no further than the descriptor can deliver (a
+    pipe's ring, a socket's receive buffer). **When a syscall's kernel time does not add up from
+    its parts, time the gate, and judge the gate by the bytes the call can WRITE, not by the
+    length the process ASKED for.**
+
 Two that were the STAND's, not the kernel's, and cost an hour each:
 
 * **The gate's image is part of the gate.** The dev box's `talaria-qemu-aarch64` was

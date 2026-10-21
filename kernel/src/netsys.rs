@@ -2914,6 +2914,11 @@ pub fn is_tcp(fd: i64) -> bool { ready() && tcp_slot(fd).is_some() }
 pub fn is_udp(fd: i64) -> bool { ready() && udp_slot(fd).is_some() }
 pub fn is_epoll(fd: i64) -> bool { fd >= EP_BASE && ((fd - EP_BASE) as usize) < NE && unsafe { EP_USED[(fd - EP_BASE) as usize] } }
 pub fn is_sock(fd: i64) -> bool { is_tcp(fd) || is_udp(fd) }
+/// The most one `read`/`recvfrom` from this socket can deliver: a TCP receive buffer, one
+/// UDP datagram. `uaccess` checks the process's buffer only that far (ARM64-PLAN §11 item 2a).
+pub fn read_cap(fd: i64) -> Option<usize> {
+    if is_tcp(fd) { Some(RXB_SZ) } else if is_udp(fd) { Some(65536) } else { None }
+}
 
 /// HOW MANY SOCKETS WERE ACCEPTED AND HOW MANY CLOSED. The difference answers the question
 /// that is otherwise settled by going through hypotheses: "the slots have run out" is an honest

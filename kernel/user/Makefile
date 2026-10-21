@@ -14,7 +14,7 @@ LDF  := -static -no-pie -Wl,-Ttext-segment=0x10000000
 # C (musl-gcc), the binary's name = the name of the .c
 CBINS := connect_test efault epsrv execmt fastapp fastflood forksrv fputest fsbig fsinfo fsread fsyncconc futexlat \
          forktls idleshoot mapshared mbench memhog memrace memtest migregs mixwait mtsrv netshoot pthreads schedapi schedbal schedpin schedspread \
-         piperace rqwait shmrace sigtest smp2 smp4 srv stealbal sysbench tcp_bench tickcmd udp_ping userver wvsock chldrace cowstale umarkt sleeplat
+         piperace rqwait shmrace sigtest smp2 smp4 srv stealbal sysbench tcp_bench tickcmd udp_ping userver wvsock chldrace cowstale umarkt sleeplat gatecost
 # C with a source name that does not match
 mhello_SRC  := mh.c
 mprintf_SRC := mp.c

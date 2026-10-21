@@ -289,6 +289,7 @@ pub fn pipe_get_nonblock(h: i64) -> bool { let (i, e) = pidx(h); unsafe { PNB[i]
 pub fn pipe_read(h: i64, buf: *mut u8, len: usize) -> i64 {
     let (i, e) = pidx(h);
     if e != 0 { return -9; }
+    if len == 0 { return 0; } // as Linux: nothing asked, nothing to wait for (an empty non-blocking pipe said EAGAIN)
     loop {
         // The snapshot of the sequence is taken BEFORE the check of the data: a write
         // that came between the check and the falling asleep is then not lost — the word is already

@@ -54,11 +54,23 @@ def cmd(c):
 # The stub answers `?` once it stands (it does not speak first: gdb opens with qSupported,
 # and a stop reply crossing it would be taken for the answer). Until the kernel reaches the
 # stub the bytes may be eaten by the console, so `?` is repeated, as gdb repeats a packet.
+# A reset here is the stand's, not the stub's: docker's port proxy accepts the connection
+# and RESETS it when QEMU does not listen yet (under a loaded host the 3 s the gate waits
+# were not enough — ten FAILs of one block at the first packet). Reconnect and ask again.
 s.settimeout(2)
+resets = 0
 while True:
     try:
         print("first: " + cmd("?"))
         break
+    except ConnectionResetError:
+        resets += 1
+        if resets > 60:
+            sys.exit("rsp-probe: the line keeps resetting on :%d" % port)
+        time.sleep(0.5)
+        buf = b""
+        s = socket.create_connection(("127.0.0.1", port), timeout=30)
+        s.settimeout(2)
     except socket.timeout:
         pass
 # A repeated `?` the stub found queued is answered twice: the spare answers go, or they

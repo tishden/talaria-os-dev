@@ -68,6 +68,13 @@ pub enum Len {
     Arg(u8),
     /// Another argument times an element size (`poll` fds, `epoll_wait` events).
     ArgMul(u8, u32),
+    /// Another argument's value, but no more than the first argument's descriptor can
+    /// deliver (`Mem::read_cap`): a `read` of 1 MiB from a pipe or a socket writes at most
+    /// the pipe's ring or the socket's receive buffer, so only that much of the buffer must
+    /// be the process's. Checking the whole asked length cost 3 us per EMPTY receive on a
+    /// Graviton (tlgen asks for 1 MiB on every poll; ARM64-PLAN §11 item 2a); Linux checks
+    /// nothing up front and faults on the bytes it writes.
+    ArgCap(u8),
     /// A NUL-terminated string (paths, names).
     Str,
 }
@@ -89,7 +96,7 @@ const fn wr(arg: u8, len: Len) -> Ptr { Ptr { arg, len, write: true, opt: false 
 const fn rd_opt(arg: u8, len: Len) -> Ptr { Ptr { arg, len, write: false, opt: true } }
 const fn wr_opt(arg: u8, len: Len) -> Ptr { Ptr { arg, len, write: true, opt: true } }
 
-use Len::{Arg, ArgMul, Fixed, Str};
+use Len::{Arg, ArgCap, ArgMul, Fixed, Str};
 
 // Sizes of the structures the kernel reads or writes. They are x86-64's except the two
 // an arm64 process sees in another layout (`arch::aarch64::abi` translates them at the
@@ -130,7 +137,8 @@ macro_rules! t {
 /// `nested` handles".
 pub fn sig(nr: u64) -> &'static [Ptr] {
     match nr {
-        0 | 17 => t![wr(2, Arg(3))],                                   // read, pread64
+        0 => t![wr(2, ArgCap(3))],                                     // read (a pipe or a socket caps it)
+        17 => t![wr(2, Arg(3))],                                       // pread64
         1 | 18 => t![rd(2, Arg(3))],                                   // write, pwrite64
         2 | 21 | 76 | 80 | 83 | 84 | 87 | 90 | 92 | 94 => t![rd(1, Str)], // open access truncate chdir mkdir rmdir unlink chmod chown lchown
         4 | 6 => t![rd(1, Str), wr(2, Fixed(STAT))],                   // stat, lstat
@@ -145,7 +153,7 @@ pub fn sig(nr: u64) -> &'static [Ptr] {
         42 | 49 => t![rd(2, Arg(3))],                                  // connect, bind
         43 | 288 | 51 | 52 => t![wr_opt(2, Fixed(SOCKADDR)), wr_opt(3, Fixed(SOCKLEN))], // accept accept4 getsockname getpeername
         44 => t![rd(2, Arg(3)), rd_opt(5, Fixed(SOCKADDR))],           // sendto
-        45 => t![wr(2, Arg(3)), wr_opt(5, Fixed(SOCKADDR)), wr_opt(6, Fixed(SOCKLEN))], // recvfrom
+        45 => t![wr(2, ArgCap(3)), wr_opt(5, Fixed(SOCKADDR)), wr_opt(6, Fixed(SOCKLEN))], // recvfrom (the socket caps it)
         53 => t![wr(4, Fixed(8))],                                     // socketpair
         54 => t![rd_opt(4, Arg(5))],                                   // setsockopt
         61 => t![wr_opt(2, Fixed(4)), wr_opt(4, Fixed(RUSAGE))],       // wait4
@@ -220,6 +228,9 @@ pub trait Mem {
     fn read_u32(&self, addr: u64) -> u32;
     /// Byte at `addr` — only called for addresses `ok` accepted.
     fn read_u8(&self, addr: u64) -> u8;
+    /// The most a `read` can write through the process's descriptor `fd` (a pipe's ring, a
+    /// socket's receive buffer), or None when the whole asked length may be filled (a file).
+    fn read_cap(&self, _fd: u64) -> Option<u64> { None }
 }
 
 /// Longest string a path-like argument may have (PATH_MAX, with the NUL).
@@ -248,6 +259,7 @@ fn ptr_ok<M: Mem>(m: &M, p: &Ptr, a: &Args) -> bool {
         Fixed(n) => n as u64,
         Arg(i) => a.get(i),
         ArgMul(i, sz) => match a.get(i).checked_mul(sz as u64) { Some(n) => n, None => return false },
+        ArgCap(i) => match m.read_cap(a.get(1)) { Some(c) => a.get(i).min(c), None => a.get(i) },
         Str => {
             if addr == 0 { return p.opt; }
             return str_ok(m, addr);
@@ -386,6 +398,14 @@ impl Mem for Live {
         // loads.
         unsafe { core::ptr::read_volatile(uptr::<u8>(addr)) }
     }
+    /// The gate runs before the fd translation, so `fd` is the process's number. The caps
+    /// are the owners' own constants (`netsys::read_cap`, `proc::pipe_capacity`): the handler
+    /// copies into the buffer through those same bounded rings, never past them.
+    fn read_cap(&self, fd: u64) -> Option<u64> {
+        let h = crate::proc::tr(fd);
+        if crate::proc::pipe_is(h) { return Some(crate::proc::pipe_capacity() as u64); }
+        crate::netsys::read_cap(h).map(|c| c as u64)
+    }
 }
 
 /// Entry point from the syscall path: `Some(-EFAULT)` refuses the call.
@@ -408,6 +428,7 @@ mod tests {
     struct Fake {
         pages: BTreeMap<u64, bool>, // page base -> writable
         bytes: RefCell<BTreeMap<u64, u8>>,
+        cap: Option<u64>,           // what a `read` through any fd can deliver (None: everything)
     }
 
     impl Fake {
@@ -440,6 +461,7 @@ mod tests {
         }
         fn read_u32(&self, a: u64) -> u32 { self.read_u64(a) as u32 }
         fn read_u8(&self, a: u64) -> u8 { *self.bytes.borrow().get(&a).unwrap_or(&0xAA) }
+        fn read_cap(&self, _fd: u64) -> Option<u64> { self.cap }
     }
 
     const RW: u64 = 0x1000_0000; // 64 KiB read-write
@@ -452,6 +474,23 @@ mod tests {
     #[test]
     fn read_into_owned_buffer_is_allowed() {
         assert!(check(&mem(), 0, &args(&[3, RW, 4096])));
+    }
+
+    #[test]
+    fn read_is_checked_only_as_far_as_the_descriptor_can_fill() {
+        // A 1 MiB buffer whose tail is unmapped: refused for a file (the whole length may be
+        // written), accepted for a pipe whose ring is 4 KiB — the kernel never writes past it.
+        // The cap never grows the extent, and recvfrom (45) is capped the same way.
+        let mut m = mem();
+        assert!(!check(&m, 0, &args(&[3, RW, 1 << 20])));
+        assert!(!check(&m, 45, &args(&[3, RW, 1 << 20])));
+        m.cap = Some(4096);
+        assert!(check(&m, 0, &args(&[3, RW, 1 << 20])));
+        assert!(check(&m, 45, &args(&[3, RW, 1 << 20])));
+        assert!(!check(&m, 0, &args(&[3, RW + 0x10000 - 0x800, 4096]))); // the capped extent still runs off
+        assert!(!check(&m, 17, &args(&[3, RW, 1 << 20])));                // pread64: a file, uncapped
+        m.cap = Some(1 << 30);
+        assert!(!check(&m, 0, &args(&[3, RW, 1 << 20])));
     }
 
     #[test]
@@ -617,7 +656,7 @@ mod tests {
             for p in sig(nr) {
                 assert!((1..=6).contains(&p.arg), "nr {nr}: arg {}", p.arg);
                 match p.len {
-                    Len::Arg(i) | Len::ArgMul(i, _) => {
+                    Len::Arg(i) | Len::ArgCap(i) | Len::ArgMul(i, _) => {
                         assert!((1..=6).contains(&i) && i != p.arg, "nr {nr}: len arg {i}")
                     }
                     Len::Fixed(n) => assert!(n > 0, "nr {nr}: zero size"),
