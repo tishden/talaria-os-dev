@@ -65,7 +65,7 @@ fi
 # kernel/user/*.
 (cd "$REPO/kernel" && python3 mkfs.py "$IMG/disk.img" >/dev/null) || echo "mkfs.py: disk.img was not built (no kernel/user/mhello?)"
 # The ext2 image for the tests of the RW FS and of the process model (it is recreated: the tests write onto the disk)
-E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/sigtest-lo" "$REPO/kernel/user/chldrace" "$REPO/kernel/user/cowstale" "$REPO/kernel/user/umarkt" "$REPO/kernel/user/sleeplat" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
+E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/sigtest-lo" "$REPO/kernel/user/chldrace" "$REPO/kernel/user/cowstale" "$REPO/kernel/user/umarkt" "$REPO/kernel/user/sleeplat" "$REPO/kernel/user/gatecost" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
 # the symlinks in the image: a "fast" one (the target inside the inode) to a file and to a directory —
 # exactly what the launch with the runtime from Ubuntu stumbled over (/lib64/ld-linux… is a symlink)
 mkdir -p "$E2/dir"; echo inside > "$E2/dir/inside.txt"
@@ -596,6 +596,10 @@ for m in sleeplat sleeplath; do
   assert "sleeplat: OK" "proc: $m — nanosleep(50 us) x 2000, the median overshoot under 500 us$( [ $m = sleeplath ] && echo ', a thread spinning on the sleeper'"'"'s core'): the whole term is one exact deadline, not 200-us windows served by the tick (~2 ms; ARM64-PLAN §11 item 2b)"
   stopq $q
 done
+q=$(bootd "talaria.test=gatecost" /img/disk_ext2.img); sleep 2
+assert "gatecost: OK" "proc: gatecost — a read's buffer is checked only as far as the pipe or socket can fill it, and a file's whole buffer with one descent per table: 1 MiB costs under 3x a 4 KiB read on a pipe, under 8x at a file's end (page by page it was 20x: tlgen's empty receive, 3 us; ARM64-PLAN §11 item 2a)"
+assert "pipe, ns per call: 0 B [0-9]+, 4 KiB [0-9]+, 64 KiB [0-9]+, 1 MiB [0-9]+, 1 MiB untouched [0-9]+ \(x 200000, wrong answers 0\)" "proc: gatecost — every read of the empty pipe answers EAGAIN, a 0-byte one answers 0 (as Linux)"
+stopq $q
 BOOTD_SMP=1
 q=$(bootd "talaria.test=sigtestlo" /img/disk_ext2.img); sleep 2
 assert "sigtest: ALL OK" "proc: sigtest LINKED AT 0x200000 — the kernel image's own load address (ARM64-PLAN §10.16 stage 7.4): the image runs at its high alias, a process space has none of its identity"

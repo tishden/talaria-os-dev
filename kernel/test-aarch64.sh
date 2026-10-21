@@ -302,7 +302,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     [ $rc = 0 ] && [ -s "$REPO/$TD/$name.img" ]
   }
   if command -v mkfs.ext2 >/dev/null 2>&1 \
-     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace cowstale umarkt sleeplat \
+     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace cowstale umarkt sleeplat gatecost \
      && mkimg ms 64M '' mapshared && mkimg core 32M '' crashme \
      && mkimg coremt 32M 'binary=/crashme\nargs=crashme mt\nrestart=0\n' crashme \
      && mkimg crashr 32M 'binary=/crashme\nargs=crashme mt\nrestart=1\n' crashme \
@@ -348,6 +348,9 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
       run 120 "talaria.test=$m" ext2
       assert 'sleeplat: OK'                                                   "$m: nanosleep(50 us) x 2000, the median overshoot under 500 us$( [ $m = sleeplath ] && echo ', a thread spinning on the sleeper'"'"'s core'): one exact deadline, not 200-us windows served by the tick (ARM64-PLAN §11 item 2b)"
     done
+    run 150 "talaria.test=gatecost" ext2
+    assert 'gatecost: OK'                                                     'gatecost: a read of 1 MiB costs under 3x a 4 KiB one on a pipe (the buffer is checked only as far as the pipe or socket can fill it), under 8x at a file end (one descent per table, not per page; ARM64-PLAN §11 item 2a)'
+    assert 'wrong answers 0\)'                                                'gatecost: every read of the empty pipe answers EAGAIN, a 0-byte one answers 0 (as Linux)'
     run 150 "talaria.test=mbench" ext2
     assert 'RESULT mbench syscall [0-9]+ ns'                                  'mbench: the syscall primitive is timed (the number is for the stand)'
     assert 'mbench: ALL OK'                                                   'mbench: the primitives of the hot loop with the binary that goes to Linux'

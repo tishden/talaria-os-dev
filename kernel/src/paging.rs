@@ -1048,24 +1048,6 @@ unsafe fn walk_entry(vaddr: u64) -> u64 {
     e
 }
 
-/// Leaf entry for `vaddr` and the size of the address span it covers (4 KiB,
-/// 2 MiB or 1 GiB). A non-present entry above the last level covers its whole
-/// span: nothing inside it is mapped.
-/// # Safety
-/// P1 + P2, as `walk_entry`.
-unsafe fn walk_leaf(vaddr: u64) -> (u64, u64) {
-    const SPAN: [u64; 4] = [1 << 39, 1 << 30, 1 << 21, 1 << 12];
-    let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize,
-               ((vaddr >> 21) & 0x1FF) as usize, ((vaddr >> 12) & 0x1FF) as usize];
-    let mut tbl = cr3_root();
-    let mut e = pte_r(tbl.add(idx[0]));
-    for lvl in 1..4 {
-        if e & PTE_P == 0 || e & PTE_PS != 0 { return (e, SPAN[lvl - 1]); }
-        tbl = kptr::<Pte>(e & ADDR_MASK);
-        e = pte_r(tbl.add(idx[lvl]));
-    }
-    (e, SPAN[3])
-}
 
 /// End of the canonical lower half: ring 3 never owns an address at or above it.
 pub const USER_TOP: u64 = 1 << 47;
@@ -1087,20 +1069,59 @@ pub fn user_range_ok(addr: u64, len: u64, write: bool) -> bool {
     if len == 0 { return true; }
     let end = match addr.checked_add(len) { Some(e) => e, None => return false };
     if end > USER_TOP { return false; }
+    // ONE DESCENT PER TABLE, NOT PER PAGE. The check used to walk the four levels for every
+    // 4K page of the range: a `recv` asking for 1 MiB (tlgen's TL_RBUF, on every poll of an
+    // empty socket) paid 256 walks — 3 us on a c7g, the whole difference between its 4.3-us
+    // empty receive and the 0.7 us it spent in the stack (ARM64-PLAN §11 item 2a). Linux pays
+    // nothing for the length (it copies and faults). Now the walk stops at the 4K table and
+    // reads its consecutive entries in place up to the table's 2 MiB boundary; a 2M/1G leaf
+    // or a missing table still answers for its whole span at once. `kernel/user/gatecost`.
     let mut a = addr;
     while a < end {
         // SAFETY: P1 + P2 — a read-only walk of the CURRENT address space — the caller is the
         // syscall path, which runs in the process's own CR3.
-        let (e, span) = unsafe { walk_leaf(a) };
-        if e & PTE_P != 0 {
-            if e & PTE_US == 0 { return false; }
-            if write && e & PTE_RW == 0 && e & PTE_COW == 0 { return false; }
-        } else if e & PTE_LAZY == 0 || e & PTE_PNONE != 0 || (write && e & LAZY_W == 0) {
-            return false;
+        let (e, span, tbl) = unsafe { walk_leaf_tbl(a) };
+        match tbl {
+            None => { if !leaf_ok(e, write) { return false; } a = (a & !(span - 1)) + span; }
+            Some(t) => {
+                let lim = ((a & !((1u64 << 21) - 1)) + (1 << 21)).min(end); // this table's reach
+                let mut i = ((a >> 12) & 0x1FF) as usize;
+                while a < lim {
+                    // SAFETY: P1 — `t` is the live 4K table of this 2 MiB region, `i` its index.
+                    if !leaf_ok(unsafe { pte_r(t.add(i)) }, write) { return false; }
+                    i += 1; a = (a & !0xFFF) + 0x1000;
+                }
+            }
         }
-        a = (a & !(span - 1)) + span;
     }
     true
+}
+/// One entry's verdict for `user_range_ok`: present — the process's, writable if asked (a COW
+/// page is written through the fault); absent — a lazy mark that is not PROT_NONE, writable
+/// if asked.
+#[inline(always)]
+fn leaf_ok(e: u64, write: bool) -> bool {
+    if e & PTE_P != 0 { e & PTE_US != 0 && !(write && e & PTE_RW == 0 && e & PTE_COW == 0) }
+    else { e & PTE_LAZY != 0 && e & PTE_PNONE == 0 && !(write && e & LAZY_W == 0) }
+}
+/// The leaf entry for `vaddr` and the size of the span it answers for (4 KiB, 2 MiB or
+/// 1 GiB; a non-present entry above the last level covers its whole span: nothing inside
+/// it is mapped), and the 4K table itself when the walk reached one: the caller then reads
+/// its neighbouring entries without descending again.
+/// # Safety
+/// P1 + P2, as `walk_entry`.
+unsafe fn walk_leaf_tbl(vaddr: u64) -> (u64, u64, Option<*mut Pte>) {
+    const SPAN: [u64; 4] = [1 << 39, 1 << 30, 1 << 21, 1 << 12];
+    let idx = [((vaddr >> 39) & 0x1FF) as usize, ((vaddr >> 30) & 0x1FF) as usize,
+               ((vaddr >> 21) & 0x1FF) as usize, ((vaddr >> 12) & 0x1FF) as usize];
+    let mut tbl = cr3_root();
+    let mut e = pte_r(tbl.add(idx[0]));
+    for lvl in 1..4 {
+        if e & PTE_P == 0 || e & PTE_PS != 0 { return (e, SPAN[lvl - 1], None); }
+        tbl = kptr::<Pte>(e & ADDR_MASK);
+        e = pte_r(tbl.add(idx[lvl]));
+    }
+    (e, SPAN[3], Some(tbl))
 }
 
 /// A page's rights (for introspection/tests): (present, writable, user, exec).

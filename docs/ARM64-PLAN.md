@@ -2543,7 +2543,55 @@ order of work:
    socket (EAGAIN), each paying the full path; the next step is that ratio (where tlgen polls,
    what an empty receive costs, whether a readiness wait replaces it), not the per-call price.
    B itself is not a performance point: the profile doubled the Talaria p99 (55.8 -> 127 us at
-   21 k/s);
+   21 k/s). **Read again 2026-10-21: the per-call price IS the ceiling, and it was the pointer
+   check.** The reports' `syscalls` block (the same tlgen, both generators) says the ratio is
+   the rate's: at 21 k/s the Talaria generator polled 8.4 times per request and the Linux one
+   72 — Linux's empty receive is cheap, so it spins faster; at the closed-loop ceiling the
+   Talaria generator was down to ONE empty receive per request (3.0 syscalls, 85-88 k/s) while
+   the Linux one made 8 (9.8 syscalls, 124-139 k/s). Three syscalls at 4.3 + 2.0 + 4.3 us are
+   the 11.7 us per request of the Talaria ceiling. And the generator's console says where the
+   4.3 us went: the stack's lock was held 671 s over the run against 3012 s of `recvfrom`
+   kernel time (0.63 us per take), and 638 M idle passes were cancelled by `pollgap` — the
+   empty receive barely touched the stack. The rest was `uaccess::gate`: tlgen's `recv` asks
+   for `TL_RBUF` = 1 MiB on every poll, and `user_range_ok` walked the four levels for every
+   4K page of it — 256 walks per call. A new gate, `kernel/user/gatecost` (an empty
+   non-blocking pipe read 200 000 times with 4 KiB and 1 MiB buffers, the kernel writing
+   nothing; then the same at a file's end), under KVM on the dev box: 4 KiB 153 ns, 1 MiB
+   2997 ns — the 3 us the Graviton was missing; Linux with the same binary 516 and 530
+   (it checks nothing up front and faults on the bytes it writes). Two fixes: (1) the check
+   descends once per 4K TABLE and reads its consecutive entries in place up to the 2 MiB
+   boundary (a 2M/1G leaf or a missing table still answers for its whole span at once) —
+   `walk_leaf_tbl`, `leaf_ok`; (2) `read`/`recvfrom` from a pipe or a socket are checked only
+   as far as the descriptor can deliver (`Len::ArgCap`, `Mem::read_cap`: the pipe's ring,
+   the TCP receive buffer, one UDP datagram — the handlers copy through those same bounded
+   rings and never past them; a file keeps the whole length). After: pipe 4 KiB 158 ns,
+   1 MiB 160 (1.0x); a file's end 4 KiB 277, 1 MiB 571 (2.1x — the walk's own price, 256
+   entries read in place). Found on the way and fixed: `read(fd, buf, 0)` on an empty
+   non-blocking pipe answered EAGAIN where Linux answers 0. Gate `gatecost` on both machines
+   (the ratios: under 3x on the pipe, under 8x at a file's end; every answer EAGAIN, the 0-byte
+   one 0), a host unit test of the cap (`uaccess::tests`). On a `c7g.large`
+   (`variants-gatecost-c7g`, the same binary on AL2023 in the same hour; ns per call): the pipe
+   4 KiB / 1 MiB Talaria 207 / 207, Linux 217 / 216 — the empty receive of a Graviton is now a
+   200-ns syscall; a file's end Talaria 327 / 870 (the 256 entries read and decoded in place),
+   Linux 206 / 205. The same redis A/B on a `c7g.xlarge` with this kernel
+   (`results/ec2ab-redis-20261021-143739`, 2026-10-21; A = the scoreboard's phases on both sides,
+   B = `sysprof=1 stat=5000` on the Talaria generator only): the generator's `recvfrom` fell from
+   4274 ns per call to **455** (5.02 G calls in the hour, 2287 s of the kernel; `sendto` 2280 ns,
+   242 M calls — the sends did not change, the empty polls got cheap and so got more frequent:
+   20.7 receives per send against 3.7, 4.85 G idle passes of the stack cancelled). The
+   closed-loop ceiling of the Talaria generator (three probes, median, req/s): ping 85.7-88.8 k
+   at a 0 % spread (the hard per-call wall) → 102.9 k at a 35 % spread (89.7 / 102.9 / 138.9);
+   get 85.6 → 114.4, set 85.6 → 105.3, mixed 85.4 → 115.7; under the profile (B) 124.4 / 108.7 /
+   113.9 / 103.3. Linux's generator in the same hour 141.1 / 128.2 / 124.6 / 126.6 — the gap
+   from 0.62-0.65x to 0.73-0.91x, and a scattered ceiling now, not a wall: what is left is no
+   longer the price of a call. The ladder itself (A, service latency vs Linux at the same rate):
+   every Talaria median and p99 under Linux's up to the fourth rung (ping 77 k: p50 42.5 vs 53.8,
+   p99 56.0 vs 96.2; get 86 k: 41.9 vs 45.0, 56.0 vs 96.9), the top rung 92.5-104 k req/s against
+   77-80 k before. Left on the generator, pre-existing (the 2026-10-09 run showed it at 66.6 k):
+   from the fourth rung up the Talaria generator stalls once per run for a whole second (max
+   1.000 s, 100-350 k requests behind it at a debt p99 of 1.6 us; `the ring lied 1` in its
+   stat) — the open loop's debt, not the service latency, and the next thing to name on the
+   client path (`talaria.sysprof` is not the instrument: B doubles the p99, 56 → 115 us);
    (b) the wfe tier's mdpipe tail at `smp=2` — **closed 2026-10-09: it was `nanosleep`.** The
    per-tick instrument was built (`kernel/src/umark.rs`): the workload names a slow interval itself,
    `prctl(PR_TALARIA_SLOW, t0_ns, t1_ns)` (mdpipe's `--mark-us N`; Linux answers EINVAL), and the
