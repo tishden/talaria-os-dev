@@ -895,6 +895,17 @@ and count nothing. PMCEID0 = 0x0000027079ff0f3f, PMCEID1 = 0x000000001e30a07f. W
 fix the boot line is `LLC-miss=1:0x17` and `top` shows 13-17 M misses per 10 s (7.1-7.6 per
 thousand instructions) over mdpipe, where it showed 0.
 
+**The default's maximum (2026-10-21, ARM64-PLAN §11 item 2b, `variants-rqwait-c7g` /
+`variants-wakedef-c7g`).** After the exact `nanosleep` the default tier's p99 was 5.1 us but its
+maximum 0.5-7 ms. The slow-interval instrument, made to keep the LONGEST marked stages with each
+core's decisions and sleeps, showed every one of the six longest (425-491 us) as a worker ready
+behind md_sink, which had just got the core and ran to the END OF ITS SLICE: the wakeup found it
+younger than the 150-us preemption threshold, kicked the core and nobody re-checked. With the
+tick pulled to the threshold on such a wakeup (`stay:young`), three 30-s runs of the default
+kernel on a `c7g.large`: max 297 / 155 / 121 us (492 and 7070 before), p99 4.84-5.00, p99.9
+7.04-7.24 us; Linux the day before 3.7 / 4.9 / 5.4, max 400. `wakedef` under KVM (a futex waiter
+behind a spinning hog on one core, 1000 wakes): p99 414 → 87-99 us, max 499 → 201-472.
+
 ### 10.12. The KVM stand on the session's branch (2026-10-05)
 
 `kvm-stand-aarch64.sh` on `c7g.metal` from `4a69b13` (`arm64-s64`: the cache-counter fix and

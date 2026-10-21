@@ -302,8 +302,9 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     [ $rc = 0 ] && [ -s "$REPO/$TD/$name.img" ]
   }
   if command -v mkfs.ext2 >/dev/null 2>&1 \
-     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace cowstale umarkt sleeplat gatecost \
+     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace cowstale umarkt sleeplat gatecost wakedef \
      && mkimg ms 64M '' mapshared && mkimg core 32M '' crashme \
+     && mkimg wd 32M 'binary=/wakedef\nargs=wakedef 1000 5000 20000\nenv=HOME=/\nrestart=0\n' wakedef \
      && mkimg coremt 32M 'binary=/crashme\nargs=crashme mt\nrestart=0\n' crashme \
      && mkimg crashr 32M 'binary=/crashme\nargs=crashme mt\nrestart=1\n' crashme \
      && mkimg forkap 32M 'binary=/crashme\nargs=crashme forkap\n' crashme \
@@ -344,10 +345,18 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     # asleep — x86's test.sh and a Graviton (variants-umark-c7g) judge that part.
     assert 'held by .*\(um_hog\) (2[2-5])\.[0-9]% \(asleep 0\.[0-9]\)'   'umarkt: a thread spinning on the other core holds it the whole interval, awake'
     assert 'held by .*\(um_main\) (2[0-5])\.[0-9]%'                         'umarkt: the marking thread holds its own core for its interval'
+    assert "a slow interval of t[0-9]+\(um_main\) on core [0-9]+: (19|20|21)[0-9]{2} us; each core's decisions and sleeps" 'umarkt: the kept intervals are the longest marked ones (the 2-ms sleeps), decision by decision'
     for m in sleeplat sleeplath; do
       run 120 "talaria.test=$m" ext2
       assert 'sleeplat: OK'                                                   "$m: nanosleep(50 us) x 2000, the median overshoot under 500 us$( [ $m = sleeplath ] && echo ', a thread spinning on the sleeper'"'"'s core'): one exact deadline, not 200-us windows served by the tick (ARM64-PLAN §11 item 2b)"
     done
+    # A cell on two cores (`talaria.smp=2` first wins over the harness's 4): the hog and the waiter
+    # share core 1. Under TCG the latencies are the emulation's (p50 50-60 us, p99 ~700), so the
+    # limits here are loose and the gate is the mechanism — the counters and no lost wakeup; the
+    # timing is judged by x86 under KVM (p99 under 250 us) and by a Graviton.
+    run 200 "talaria.mode=cell talaria.smp=2" wd
+    assert 'wakedef: OK'                                                      'wakedef: a thread woken behind a RUNNING sibling on the other core runs every time (lost 0) — the core pulls its tick to the preemption threshold instead of waiting for the slice end (ARM64-PLAN §11 item 2b)'
+    assert 'deferred preemptions: wakeups against a young occupant [1-9][0-9]*, the scheduler stayed for the threshold [1-9][0-9]*, ticks pulled [1-9][0-9]*' 'wakedef: the stat block counts the deferred wakeups, the stays and the pulled ticks'
     run 150 "talaria.test=gatecost" ext2
     assert 'gatecost: OK'                                                     'gatecost: a read of 1 MiB costs under 3x a 4 KiB one on a pipe (the buffer is checked only as far as the pipe or socket can fill it), under 8x at a file end (one descent per table, not per page; ARM64-PLAN §11 item 2a)'
     assert 'wrong answers 0\)'                                                'gatecost: every read of the empty pipe answers EAGAIN, a 0-byte one answers 0 (as Linux)'

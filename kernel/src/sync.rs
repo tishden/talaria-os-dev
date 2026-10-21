@@ -919,6 +919,17 @@ pub static NOBODY_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Not a share of the slice but a number: see the analysis in `wake_addr`.
 pub static WAKE_PREEMPT_NS: AtomicU64 = AtomicU64::new(150_000);
 
+/// The threshold as the wake path applies it: the knob, but never more than half the slice.
+pub fn wake_preempt_thr() -> u64 {
+    WAKE_PREEMPT_NS.load(Ordering::Relaxed).min(crate::smp::effective_slice_ns() / 2)
+}
+/// An IPI reschedule with a DEFERRED hint: the core runs a task younger than the threshold, so
+/// its scheduler keeps it and pulls its tick to the moment it reaches the threshold
+/// (`sched::ap_schedule`, `smp::tick_sooner`). Before that the core was only kicked and the
+/// woken one waited for the END OF THE SLICE: mdpipe's worst stages on a c7g.large, 425-491 us,
+/// were all a worker ready behind md_sink that had just got the core (ARM64-PLAN §11 item 2b).
+pub static WK_RESCHED_YOUNG: AtomicU64 = AtomicU64::new(0);
+
 /// `talaria.wakepreempt=<ns>` — after how long a woken thread is entitled to preempt
 /// a computing one. A knob rather than a constant: this is the DIRECT price of the wakeup's tail, and
 /// different workloads pay it differently. A woken one waits exactly up to this
@@ -1065,8 +1076,9 @@ fn wake_impl(addr: u64, maxn: usize, leader: usize, allow_switch: bool) -> usize
             // is more profitable to keep at 500 us, while the `LIKE` filter over a table comes out
             // at Linux's level (7-8 ms against 9.5-10) only when one has to wait
             // no longer than ~150 us; half a slice (250 us) was already not enough.
-            let thr = WAKE_PREEMPT_NS.load(Ordering::Relaxed).min(crate::smp::effective_slice_ns() / 2);
-            let busy_long = !idle_ish && crate::sched::ran_ns_on(c) >= thr;
+            let thr = wake_preempt_thr();
+            let ran = crate::sched::ran_ns_on(c);
+            let busy_long = !idle_ish && ran >= thr;
             // A CORE ON A LONG TICK CANNOT BE WAITED FOR. It thinned its tick exactly
             // because there was nobody to preempt there — while we are right now
             // making a task ready. Without a call it would wait until the next
@@ -1088,15 +1100,26 @@ fn wake_impl(addr: u64, maxn: usize, leader: usize, allow_switch: bool) -> usize
                 crate::sched::hint_set_on(c, t);
                 crate::smp::send_ipi(crate::smp::apic_of(c), crate::idt::TIMER_VECTOR as u8);
             } else if !store_woke {
-                WK_KICK.fetch_add(1, Ordering::Relaxed);
-                if on_cpu == t as u64 { KICK_SELF.fetch_add(1, Ordering::Relaxed); }
-                else if (on_cpu as usize) < NTASKS {
+                let other = on_cpu != t as u64 && (on_cpu as usize) < NTASKS;
+                if other {
                     KICK_ON[on_cpu as usize].fetch_add(1, Ordering::Relaxed);
-                    let r = crate::sched::ran_ns_on(c);
-                    if r != u64::MAX { KICK_ON_RAN[on_cpu as usize].fetch_add(r.min(1 << 40), Ordering::Relaxed); }
+                    if ran != u64::MAX { KICK_ON_RAN[on_cpu as usize].fetch_add(ran.min(1 << 40), Ordering::Relaxed); }
                     if WADDR[on_cpu as usize].load(Ordering::Relaxed) != 0 && WOKEN[on_cpu as usize].load(Ordering::Relaxed) == 0 { KICK_ON_SLEEPING.fetch_add(1, Ordering::Relaxed); }
                 }
-                kick(c as u32); // it sleeps on the word itself — a write/a call is enough
+                // THE OCCUPANT IS YOUNGER THAN THE THRESHOLD and really running: a deferred
+                // preemption — the hint and the resched IPI as for `busy_long`, and that core's
+                // scheduler, finding the occupant young, keeps it and pulls its tick to the
+                // threshold (see `WK_RESCHED_YOUNG`). A kick alone left the woken one waiting
+                // for the slice's end.
+                if other && !idle_ish && ran != u64::MAX && thr != 0 {
+                    WK_RESCHED_YOUNG.fetch_add(1, Ordering::Relaxed);
+                    crate::sched::hint_set_on(c, t);
+                    crate::smp::send_ipi(crate::smp::apic_of(c), crate::idt::TIMER_VECTOR as u8);
+                } else {
+                    WK_KICK.fetch_add(1, Ordering::Relaxed);
+                    if on_cpu == t as u64 { KICK_SELF.fetch_add(1, Ordering::Relaxed); }
+                    kick(c as u32); // it sleeps on the word itself — a write/a call is enough
+                }
             }
             else { WK_STORE.fetch_add(1, Ordering::Relaxed); }
         }

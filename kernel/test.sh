@@ -65,7 +65,7 @@ fi
 # kernel/user/*.
 (cd "$REPO/kernel" && python3 mkfs.py "$IMG/disk.img" >/dev/null) || echo "mkfs.py: disk.img was not built (no kernel/user/mhello?)"
 # The ext2 image for the tests of the RW FS and of the process model (it is recreated: the tests write onto the disk)
-E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/sigtest-lo" "$REPO/kernel/user/chldrace" "$REPO/kernel/user/cowstale" "$REPO/kernel/user/umarkt" "$REPO/kernel/user/sleeplat" "$REPO/kernel/user/gatecost" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
+E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/sigtest-lo" "$REPO/kernel/user/chldrace" "$REPO/kernel/user/cowstale" "$REPO/kernel/user/umarkt" "$REPO/kernel/user/sleeplat" "$REPO/kernel/user/gatecost" "$REPO/kernel/user/wakedef" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
 # the symlinks in the image: a "fast" one (the target inside the inode) to a file and to a directory —
 # exactly what the launch with the runtime from Ubuntu stumbled over (/lib64/ld-linux… is a symlink)
 mkdir -p "$E2/dir"; echo inside > "$E2/dir/inside.txt"
@@ -109,6 +109,12 @@ rm -rf "$T"
 T=$(mktemp -d); cp "$REPO/kernel/user/crashme" "$T/" 2>/dev/null
 printf 'binary=/crashme\nargs=crashme peek\nrestart=0\n' > "$T/cell.manifest"
 "$REPO/kernel/mkext2.sh" "$T" "$IMG/disk_peek.img" 32M >/dev/null 2>&1 || echo "no mkfs.ext2 — disk_peek.img was not built"
+rm -rf "$T"
+# A woken thread behind a running sibling (wakedef, mode=cell on two cores: in `talaria.test=`
+# mode the APs are the legacy dedicated ones without a tick, and the test is about the tick).
+T=$(mktemp -d); cp "$REPO/kernel/user/wakedef" "$T/" 2>/dev/null
+printf 'binary=/wakedef\nargs=wakedef 1000 250 1000\nenv=HOME=/\nrestart=0\n' > "$T/cell.manifest"
+"$REPO/kernel/mkext2.sh" "$T" "$IMG/disk_wakedef.img" 32M >/dev/null 2>&1 || echo "no mkfs.ext2 — disk_wakedef.img was not built"
 rm -rf "$T"
 # The same for the crash of ONE thread of a multithreaded cell (crashme mt, mode=cell).
 T=$(mktemp -d); cp "$REPO/kernel/user/crashme" "$T/" 2>/dev/null
@@ -590,12 +596,19 @@ assert "umarkt: ALL OK 50" "proc: umarkt — prctl(PR_TALARIA_SLOW) takes 50 nam
 assert "slow intervals marked by the workload: 50 " "proc: umarkt — the stat block counts the 50 marks"
 assert "held by .*\(um_hog\) (4[5-9]|50)\.[0-9]% \(asleep 0\.[0-9]\)" "proc: umarkt — a thread spinning on the other core holds it the whole interval, awake"
 assert "held by .*\(um_main\) (4[0-9]|50)\.[0-9]% \(asleep (4[0-9]|50)\." "proc: umarkt — the marking thread holds its own core, asleep (a sleeper as the core's current task is told from a runner)"
+assert "a slow interval of t[0-9]+\(um_main\) on core [0-9]+: (19|20|21)[0-9]{2} us; each core's decisions and sleeps" "proc: umarkt — the kept intervals are the longest marked ones (the 2-ms sleeps), decision by decision"
+assert "core 0: .*; slept \[\+[0-9]+\.\.\+(19|20|21)[0-9]{2}\]" "proc: umarkt — a kept interval names the core's sleep inside its window (the marking thread's 2-ms sleep on core 0)"
 stopq $q
 for m in sleeplat sleeplath; do
   q=$(bootd "talaria.test=$m talaria.smp=2" /img/disk_ext2.img); sleep 2
   assert "sleeplat: OK" "proc: $m — nanosleep(50 us) x 2000, the median overshoot under 500 us$( [ $m = sleeplath ] && echo ', a thread spinning on the sleeper'"'"'s core'): the whole term is one exact deadline, not 200-us windows served by the tick (~2 ms; ARM64-PLAN §11 item 2b)"
   stopq $q
 done
+BOOTD_SMP=2
+q=$(bootd "talaria.mode=cell talaria.smp=2" /img/disk_wakedef.img); sleep 2
+assert "wakedef: OK" "cell: wakedef — a thread woken behind a RUNNING sibling waits at most the preemption threshold (p99 under 250 us, lost 0): the sibling's core pulls its tick to the threshold instead of the slice's end (p99 414 us, max 499 before; ARM64-PLAN §11 item 2b)"
+assert "deferred preemptions: wakeups against a young occupant [1-9][0-9]*, the scheduler stayed for the threshold [1-9][0-9]*, ticks pulled [1-9][0-9]*" "cell: wakedef — the stat block counts the deferred wakeups, the stays and the pulled ticks"
+stopq $q
 q=$(bootd "talaria.test=gatecost" /img/disk_ext2.img); sleep 2
 assert "gatecost: OK" "proc: gatecost — a read's buffer is checked only as far as the pipe or socket can fill it, and a file's whole buffer with one descent per table: 1 MiB costs under 3x a 4 KiB read on a pipe, under 8x at a file's end (page by page it was 20x: tlgen's empty receive, 3 us; ARM64-PLAN §11 item 2a)"
 assert "pipe, ns per call: 0 B [0-9]+, 4 KiB [0-9]+, 64 KiB [0-9]+, 1 MiB [0-9]+, 1 MiB untouched [0-9]+ \(x 200000, wrong answers 0\)" "proc: gatecost — every read of the empty pipe answers EAGAIN, a 0-byte one answers 0 (as Linux)"
