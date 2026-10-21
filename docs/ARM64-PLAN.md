@@ -2684,6 +2684,13 @@ order of work:
    by `Project=talaria*` and leaves it alone by design). It stopped with no EC2 API call in CloudTrail
    (from inside the instance), nothing of ours ended it; the worktree `my_os-s64` carries symlinked
    `services/*/build` and its own terraform state — retire it or make it the scoreboard's only home.
+   **`talaria.test=` mode's secondary cores** (met 2026-10-21 by `wakedef`): without a layout
+   (`affinity::CONFIGURED` false) `role()` calls every AP dedicated, so the test modes run their
+   APs without a tick, and `sched_setaffinity` moves a thread only from the BSP (a PoC) — a thread
+   that moved itself onto such a core starves a second thread placed there for good (under TCG,
+   1000 wakeups of 1000 lost). The gates boot such tests as a cell meanwhile; the fix is either
+   the common role for the test modes' APs (the tick on) or `set_affinity` refusing a second
+   thread on a dedicated core — and the self-move from an AP, so a pin means what it says.
 6. **The merge of `arm64-port` into `main`** — the owner's call; before it, both regressions and
    `validate.sh` on the HEAD to be merged.
 
