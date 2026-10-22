@@ -2064,7 +2064,12 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
             let cur_cpu = crate::percpu::cpu_id();
             if mask & (1u64 << cur_cpu) != 0 { return 0; } // it is already where it was asked to be
             let want = (mask & crate::percpu::ONLINE.load(Ordering::SeqCst)).trailing_zeros() as usize;
-            if cur_cpu != 0 || want == 0 { return 0; }     // a move only from the BSP (a PoC)
+            // The move goes FROM ANY core and TO ANY core of the pool (ARM64-PLAN §11 item 5): a
+            // pin means what it says. It used to be honoured only from the BSP (a PoC) — a thread
+            // on an AP that asked for another core silently stayed. `migrate_current_to` knows
+            // both exits: an AP goes back into its pickup loop, the BSP into limbo; a move TO the
+            // BSP leaves the context for its scheduler's next tick (gate `pinmove`).
+            if !crate::sched::sched_cpu(want) { return 0; } // not a scheduler's core (a self-test one): stay
             // The context of the return from THIS syscall (the return value 0) moves onto the AP
             // WITH THE WHOLE REGISTER FILE. A syscall preserves every register but the return
             // value (x86 also rcx/r11, which sysret takes), and compiled code relies on it: an

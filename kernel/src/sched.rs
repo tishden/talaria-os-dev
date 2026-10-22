@@ -1085,6 +1085,18 @@ pub fn cpu_has_other_task(cpu: usize, me: usize) -> bool {
     }
     false
 }
+/// How many live tasks the core `cpu` hosts (a sleeping one counts: it will want the core
+/// back). `affinity::wants_tick` asks it for a legacy AP (ARM64-PLAN §11 item 5).
+pub fn cpu_task_count(cpu: usize) -> usize {
+    let n = NREADY.load(Ordering::Relaxed);
+    let mut c = 0;
+    for t in 0..n {
+        // SAFETY: C1 — as in `cpu_has_other_task`.
+        if unsafe { core::ptr::read_volatile(core::ptr::addr_of!(DEAD[t])) } && !dying(t) { continue; }
+        if CPU_OF[t].load(Ordering::Relaxed) as usize == cpu { c += 1; }
+    }
+    c
+}
 /// The old kernel stacks of migrated tasks: they may be freed only when the BSP
 /// has left them (a limbo context lived on the old stack until the first tick).
 static DEAD_KSTK: [AtomicU64; NTASKS] = [const { AtomicU64::new(0) }; NTASKS]; // base | pages<<48 | (tid+1)<<56
@@ -1094,6 +1106,9 @@ fn kbase48(v: u64) -> u64 {
     let b = v & 0xFFFF_FFFF_FFFF;
     if cfg!(target_arch = "x86_64") && b & (1 << 47) != 0 { b | 0xFFFF_0000_0000_0000 } else { b }
 }
+/// A kernel stack an AP's task left by a self-move (`migrate_current_to`), packed as in
+/// `DEAD_KSTK`; the AP's pickup loop queues it once it stands on its own stack.
+static AP_DEAD_KSTK: [AtomicU64; MAXCPU] = [const { AtomicU64::new(0) }; MAXCPU];
 pub fn queue_dead_kstack(tid: usize, base: u64, pages: u64) {
     for s in DEAD_KSTK.iter() {
         if s.compare_exchange(0, base | pages << 48 | ((tid as u64 + 1) << 56), Ordering::SeqCst, Ordering::SeqCst).is_ok() { return; }
@@ -1129,6 +1144,9 @@ pub fn ap_loop(cpu: usize) -> ! {
         // The core is idling: a timer tick caught here must not take
         // the previous (already handed over) task for the current one.
         crate::percpu::set_cur_task(u64::MAX);
+        // A stack a self-moved task left on this core: we are on the loop's own stack now.
+        let v = AP_DEAD_KSTK[cpu.min(MAXCPU - 1)].swap(0, Ordering::SeqCst);
+        if v != 0 { queue_dead_kstack((v >> 56) as usize - 1, kbase48(v), (v >> 48) & 0xFF); }
         // A request to leave the workload's address space (see `aps_to_kernel_cr3`).
         let g = KCR3_REQ.load(Ordering::SeqCst);
         let dead_here = is_dead_as(crate::paging::current_cr3() & !0xFFF);
@@ -1217,7 +1235,7 @@ pub fn ap_loop(cpu: usize) -> ! {
             // The preemption on this core is switched on exactly when the core is given
             // to the common pool. A dedicated core NEVER has a timer armed: a tick in
             // a latency-critical thread is the very thing for whose absence all this was done.
-            if crate::affinity::shared_core(cpu) { crate::smp::lapic_timer_init(crate::smp::SLICE_NS); }
+            if crate::affinity::wants_tick(cpu) { crate::smp::lapic_timer_init(crate::smp::SLICE_NS); }
             else { crate::smp::lapic_timer_stop(); }
             // SAFETY: C1 — the task-indexed tables of the scheduler: this core owns the task whose row
             // it touches, and what crosses cores is atomic (see the module's note).
@@ -1939,12 +1957,35 @@ pub unsafe fn migrate_current_to(cpu: usize, rip: u64, ursp: u64, rflags: u64, g
     RSP[t] = sp; KSTACK[t] = kstack; KSZ[t] = kpages; ctx_saved(t);
     FSBASE[t] = tls_base();
     set_fpu(t, fpu);
-    if old_kstack != 0 && old_pages != 0 { queue_dead_kstack(t, old_kstack - old_pages * 4096, old_pages); }
+    if old_kstack != 0 && old_pages != 0 {
+        // The old stack is queued for freeing ONLY ONCE NOBODY STANDS ON IT. The BSP's limbo
+        // context lives on it until a tick (`reap_dead_kstacks` skips `CURRENT`); an AP is on it
+        // until `ap_exit_to_loop` below, and the BSP reaps between the two — so the AP hands the
+        // stack to its pickup loop, which queues it from its own stack (`AP_DEAD_KSTK`).
+        let packed = (old_kstack - old_pages * 4096) | old_pages << 48 | ((t as u64 + 1) << 56);
+        if from == 0 { queue_dead_kstack(t, old_kstack - old_pages * 4096, old_pages); }
+        else { AP_DEAD_KSTK[from.min(MAXCPU - 1)].store(packed, Ordering::SeqCst); }
+    }
     AP_TAKEN[t].store(false, Ordering::SeqCst); // nobody executes the task any more
     if from == 0 { BSP_LIMBO.store(true, Ordering::SeqCst); } // the BSP's tick must not save this context
     core::sync::atomic::fence(Ordering::SeqCst);
     CPU_OF[t].store(cpu as u8, Ordering::SeqCst); // from this moment the task belongs to the target core
-    if cpu != 0 { ap_ring(cpu); }
+    if cpu != 0 {
+        ap_ring(cpu);
+        // A TARGET WITHOUT A TICK WHOSE CURRENT TASK IS RUNNING IS ASKED TO ENTER THE NEWCOMER
+        // (ARM64-PLAN §11 item 5): the ring reaches an idle core or one asleep on its doorbell,
+        // and a ticking core rotates the newcomer in at its next tick — but a legacy dedicated AP
+        // (no layout plan) behind a spinning task had neither, and a thread that pinned itself
+        // there never ran (`wakedef` in `talaria.test=` mode: 1000 wakeups of 1000 lost). The
+        // newcomer goes as the hint, the resched IPI enters that core's scheduler, which switches
+        // to it and starts the tick the two now need (`ap_schedule`).
+        let on = crate::percpu::cur_task_of(cpu);
+        if on != u64::MAX && (on as usize) < NTASKS && !crate::sync::sleeps_on_bell(on as usize)
+            && !crate::smp::timer_armed_on(cpu) {
+            hint_set_on(cpu, t);
+            crate::smp::send_ipi(crate::smp::apic_of(cpu), crate::idt::TIMER_VECTOR as u8);
+        }
+    }
     crate::affinity::note_migration();
     if from != 0 {
         crate::percpu::set_cur_task(u64::MAX);
@@ -3094,6 +3135,7 @@ fn rust_schedule_inner(cur_rsp: u64) -> u64 {
         // there is nobody to preempt (a tick is a preemption; in solitude it is only a tail).
         let solo = idle || !cpu_has_other_runnable(0, cur0);
         crate::smp::retune_timer(crate::smp::want_period_ns(0, solo));
+        crate::sync::pull_tick_to_sleeper(0); // a timed sleeper of this core wakes at its term, not at the (long) tick
         if !solo { push_steal(0); }
         runhist_note();
     }
@@ -3208,6 +3250,14 @@ fn rust_schedule_inner(cur_rsp: u64) -> u64 {
         note_left_cpu(cur);                          // see `LAST_OFF`: the BSP's cache is still its own
         acct_run(0, cur); acct_switch(0, cur);       // the time on the processor and the switch go into the top/ps counters
         note_ready_off(cur);                         // preempted or fallen asleep — for `RQ_TSC` those are different things
+    } else if !idle && limbo {
+        // THE LIMBO TASK CAME BACK (ARM64-PLAN §11 item 5): it left the BSP by a self-move, this
+        // context on its old stack went into limbo with `CURRENT` still naming it, and now it has
+        // moved back (`CPU_OF == 0`, `RSP[cur]` a fresh frame on its new stack). Entering that
+        // frame below IS leaving the old stack, so the limbo ends here as well — with it still
+        // raised the next tick did not save the task's context and re-entered the same frame:
+        // "AN ENTRY INTO A USED FRAME t0 by core 0", a #GP (cowstale, 4 runs of 6).
+        BSP_LIMBO.store(false, Ordering::SeqCst);
     }
     // A12: the first N switches go into the log. The pulse is printed BEFORE the decision and does not
     // say WHERE the scheduler went; on metal everything stalls exactly at the first
@@ -3648,6 +3698,7 @@ fn ap_schedule(cpu: usize, cur_rsp: u64) -> u64 {
         crate::obs::stat_flush(150_000);
         let solo = cur == u64::MAX || !cpu_has_other_runnable(cpu, cur as usize);
         crate::smp::retune_timer(crate::smp::want_period_ns(cpu, solo));
+        crate::sync::pull_tick_to_sleeper(cpu); // a timed sleeper of this core wakes at its term, not at the (long) tick
         if !solo { push_steal(cpu); }
     }
     if hw_tick && cur != u64::MAX && (cur as usize) < NTASKS { TICKS_ON[cur as usize].fetch_add(1, Ordering::Relaxed); prof_note(cur_rsp); stuck_note(cpu,
@@ -3740,6 +3791,12 @@ fn ap_schedule(cpu: usize, cur_rsp: u64) -> u64 {
     stack_wait(next); // the core that released it may still be standing on its stack
     strace_note(cpu, cur, next, why, hint);
     crate::sync::demote_preempted_sleeper(cur); // a sleeper in kwait loses the core: state->2 + a recheck
+    // A LEGACY AP THAT GOT A SECOND TASK STARTS ITS TICK HERE (ARM64-PLAN §11 item 5): the pickup
+    // loop arms the timer by the core's role at a task's entry, and a core that never went back to
+    // the loop (its task was running when the newcomer arrived) switches by the newcomer's IPI —
+    // without a tick the two would never rotate again. The preempted sleeper's borrowed deadline,
+    // if any, was returned a line above, so the timer register is the scheduler's.
+    if !crate::smp::timer_running() && crate::affinity::wants_tick(cpu) { crate::smp::lapic_timer_init(crate::smp::SLICE_NS); }
     note_left_cpu(cur);                          // this core's cache is still its own — let the thieves wait
     acct_run(cpu, cur); acct_switch(cpu, cur);   // the same on a secondary core (see `RUN_TSC`)
     note_ready_off(cur);

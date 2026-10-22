@@ -17,6 +17,11 @@ Third-party components
   Copyright (c) 2019-2020 rCore Developers — MIT License
   (see kernel/vendor/virtio-drivers/LICENSE)
 
+* smoltcp 0.14.0 (vendored at kernel/vendor/smoltcp, one constant changed —
+  see kernel/vendor/smoltcp/TALARIA.md)
+  Copyright (C) smoltcp contributors — 0BSD License
+  (see kernel/vendor/smoltcp/LICENSE-0BSD.txt)
+
 * musl libc — kernel/user/tsync/musl-1.2.5-talaria.patch applies to musl 1.2.5
   Copyright (c) 2005-2020 Rich Felker, et al. — MIT License
 

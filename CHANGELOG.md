@@ -10,6 +10,49 @@ the libtsync API may change without migration.
 
 ---
 
+## Unreleased — the arm64 port (branch `arm64-port`, 2026-09-29 … 2026-10-22)
+
+Talaria runs on AArch64: QEMU `virt`, a `c7g.metal` under KVM, and EC2 Graviton AMIs
+(`c7g.large`/`xlarge`, UEFI via edk2, ENA with LLQ, NVMe, the GICv3 ITS). The plan,
+the phases, every gate and every number are `docs/ARM64-PLAN.md`; the first arm64
+scoreboard against Linux on a Graviton3 is `docs/MEASUREMENTS.md` §10.13-10.15.
+
+### Added
+
+- **The arm64 kernel** (`kernel/build-aarch64.sh`, `kernel/uefi-stub/build.sh aarch64`,
+  `kernel/test-aarch64.sh` + `-net`/`-db`/`-pwr`): one source per ring-3 test for both
+  machines, `arch/aarch64` beside `arch/x86_64` behind one `arch` facade; the six
+  workloads (PostgreSQL, MariaDB, MongoDB, Redis, OpenJDK 21, ClickHouse) on Graviton.
+- **The direct map** (ARM64-PLAN §10.16): the kernel image in the higher half with W^X,
+  no RAM identity in a process space by default (`talaria.dmap=strict`), the kernel's
+  memory from any RAM, a `Pa` newtype for everything a device reads.
+- **SNTP on Graviton** (`talaria.ntp=aws`, ±21 us), PMUv3 and the profiler's stacks,
+  a gdb stub over the console.
+- Gates and instruments from §11: `umark` (the workload names its slow intervals),
+  `gatecost`, `wakedef`, `wakesleep`, `sleeplat`/`sleeplath`/`sleeplong`, `pinmove`,
+  `txloss` (`talaria.txdrop=N`, the loss gate).
+
+### Fixed (shared code, found by the second machine or by the arm64 scoreboard)
+
+- Three races of the shared code a loaded TCG host found (ENGINEERING-NOTES §6.1); the
+  stale root reloaded by the switch stub (PostgreSQL on a `c6i.xlarge`); atomicity in
+  pipe/eventfd/signals/the COW refcount; the fork slot.
+- The syscall gate priced a read by its buffer, not by what the descriptor could fill
+  (an empty `recvfrom` of 1 MiB: 4.3 us → 0.45 us on a Graviton).
+- `nanosleep` was a loop of 200-us windows (the Graviton mdpipe tail: p99 36 → 5 us);
+  a woken thread waited for the slice, not the preemption threshold; a timed sleep behind
+  a running neighbour woke at the core's long tick; the `talaria.test=` modes' secondary
+  cores had no tick and starved a second thread; `sched_setaffinity` moved a thread only
+  from the boot core.
+- The TCP retransmission floor was the RFC's 1 s (smoltcp 0.14, now vendored at Linux's
+  200 ms): one lost segment stalled the load generator exactly 1.000 s.
+
+### Gate
+
+See ARM64-PLAN §11 item 6 for the pre-merge run of both regressions and `validate.sh`.
+
+---
+
 ## v1.13 (2026-09-28)
 
 The open-source release. The tag points at the tree of this entry (583 files,

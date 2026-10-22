@@ -14,7 +14,8 @@ default = ["selftest"]
 selftest = []
 
 [dependencies]
-smoltcp = { version = "0.14.0", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-udp", "socket-tcp", "socket-dhcpv4"] }
+# vendored 0.14.0: RTTE_MIN_RTO 1000 -> 200 ms (Linux's TCP_RTO_MIN; ARM64-PLAN §11 item 2a) — see vendor/smoltcp/TALARIA.md
+smoltcp = { path = "vendor/smoltcp", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-udp", "socket-tcp", "socket-dhcpv4"] }
 virtio-drivers = { path = "vendor/virtio-drivers", default-features = false } # vendored: +transmit/receive_begin_no_notify + one notify per batch
 
 [profile.release]

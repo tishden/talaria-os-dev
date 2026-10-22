@@ -172,6 +172,20 @@ pub fn reset() {
 /// While the layout is not set, the behaviour is the former one: an AP is a dedicated core.
 pub fn shared_core(cpu: usize) -> bool { role(cpu) == ROLE_SHARED }
 
+/// Does the core want the scheduler's TICK: a shared core always — and, WITHOUT a layout plan
+/// (the `talaria.test=` modes, where the legacy path calls every AP dedicated), an AP that hosts
+/// MORE THAN ONE task. Found by `wakedef` (ARM64-PLAN §11 item 5): a thread that moved itself
+/// onto such a core with `sched_setaffinity` behind a spinning one never ran — a dedicated core
+/// has no tick by construction, and nobody ever rotated the two (1000 wakeups of 1000 lost).
+/// The product's cores come from a manifest and tick anyway; a legacy AP with ONE task keeps
+/// run-to-completion, as the timing self-tests expect. `sched::ap_loop` asks it before a task's
+/// entry, `ap_schedule` when it switches without having been through the loop.
+pub fn wants_tick(cpu: usize) -> bool {
+    if shared_core(cpu) { return true; }
+    if cpu == 0 || cpu >= MAXCPU || CONFIGURED.load(Ordering::SeqCst) || is_dedicated(cpu) { return false; }
+    crate::sched::cpu_task_count(cpu) > 1
+}
+
 pub fn role(cpu: usize) -> u8 {
     if cpu >= MAXCPU || !crate::sched::sched_cpu(cpu) { return ROLE_OFF; }
     if DEDICATED[cpu].load(Ordering::SeqCst) != 0 { return ROLE_DEDICATED; }

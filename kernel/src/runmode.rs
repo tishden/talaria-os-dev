@@ -56,8 +56,8 @@ pub fn run(cmdline: &str, tsc_hz: u64) -> ! {
     //    its own AS (fork/COW, signals, a dynamic ELF). Both with the network (connect/DNS),
     //    the NIC is optional for cell/proc. Plus talaria.test=connect — a regression of outgoing TCP.
     if crate::cmdline::mode_is(cmdline, "cell") || crate::cmdline::mode_is(cmdline, "proc") || crate::cmdline::test_is(cmdline,
-        "connect") || crate::cmdline::test_is(cmdline, "netshoot") || crate::cmdline::test_is(cmdline, "idleshoot") || crate::cmdline::test_is(cmdline,
-        "forktls") {
+        "connect") || crate::cmdline::test_is(cmdline, "txloss") || crate::cmdline::test_is(cmdline, "netshoot") || crate::cmdline::test_is(cmdline, "idleshoot")
+        || crate::cmdline::test_is(cmdline, "forktls") {
         // talaria.smp=N (2..=MAXCPU): bring up N-1 APs with schedulers of pinned threads —
         // the workload (mode=cell/proc) migrates its threads with sched_setaffinity.
         crate::smp::start_from_cmdline(cmdline);
@@ -117,6 +117,13 @@ pub fn run(cmdline: &str, tsc_hz: u64) -> ! {
                 static CT: &[u8] = user_elf!("connect_test");
                 println!("talaria: a test of outgoing TCP + DNS + the wall clock ({} bytes)", CT.len());
                 crate::user::run(CT);
+            }
+            if crate::cmdline::test_is(cmdline, "txloss") {
+                // What one lost segment costs the stack's TCP: booted with `talaria.txdrop=N`
+                // (ARM64-PLAN §11 item 2a — the retransmission floor was a second).
+                static TL: &[u8] = user_elf!("txloss");
+                println!("talaria: txloss {} bytes — 60 echo rounds under the loss gate", TL.len());
+                crate::user::run(TL);
             }
             if crate::cmdline::test_is(cmdline, "forktls") { run_forktls(); }
             if crate::cmdline::test_is(cmdline, "idleshoot") { run_idleshoot(); }

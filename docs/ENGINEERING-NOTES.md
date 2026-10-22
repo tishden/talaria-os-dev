@@ -1022,6 +1022,22 @@ Two that were the STAND's, not the kernel's, and cost an hour each:
 
 ---
 
+61. **A maximum that is exactly a round number is a protocol's timer, not the scheduler's.** The
+    redis ladder on a `c7g.xlarge` (2026-10-21) had the Talaria generator's max at 1 000 067..
+    1 000 124 us at every rung from 77 k req/s up — a second plus one RTT, the same at every
+    rate — while Linux's max in the same hour was 300 us. The first reading went looking in the
+    scheduler and the stack's poller (the stat block's `the ring lied 1` was next to it), and the
+    plan's next step was an instrument for "who slept a second". Neither was needed: a scheduler
+    stall is never that exact, and a one-second constant with a hundred-microsecond scatter is a
+    timer whose period is a second. It was smoltcp's RFC 6298 retransmission floor
+    (`RTTE_MIN_RTO = 1000` ms) — one lost segment on a closed-loop connection, which earns no
+    duplicate ACK, is recovered by that timer alone; Linux's floor is 200 ms. The habit to keep:
+    before building an instrument for an outlier, look at its DIGITS — an exact second, 200 ms,
+    40 ms, 2^N us name a timer, a delayed ACK, a tick; only a number that looks like noise needs
+    a scheduler's instrument. And the fix needs a gate that can make the loss happen on a stand
+    that never loses a frame (`talaria.txdrop=`): without it the floor is a belief, with it a
+    200-ms number on every run (ARM64-PLAN §11 item 2a, MEASUREMENTS §10.15).
+
 ## 7. Already closed — do not re-open without new evidence
 
 Each of these was written, measured and rejected. Re-opening one costs a stand

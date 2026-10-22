@@ -65,7 +65,7 @@ fi
 # kernel/user/*.
 (cd "$REPO/kernel" && python3 mkfs.py "$IMG/disk.img" >/dev/null) || echo "mkfs.py: disk.img was not built (no kernel/user/mhello?)"
 # The ext2 image for the tests of the RW FS and of the process model (it is recreated: the tests write onto the disk)
-E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/sigtest-lo" "$REPO/kernel/user/chldrace" "$REPO/kernel/user/cowstale" "$REPO/kernel/user/umarkt" "$REPO/kernel/user/sleeplat" "$REPO/kernel/user/gatecost" "$REPO/kernel/user/wakedef" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
+E2=$(mktemp -d); cp "$REPO/kernel/user/sigtest" "$REPO/kernel/user/sigtest-hi" "$REPO/kernel/user/sigtest-lo" "$REPO/kernel/user/chldrace" "$REPO/kernel/user/cowstale" "$REPO/kernel/user/umarkt" "$REPO/kernel/user/sleeplat" "$REPO/kernel/user/gatecost" "$REPO/kernel/user/wakedef" "$REPO/kernel/user/wakesleep" "$REPO/kernel/user/execmt" "$REPO/kernel/user/fputest" "$REPO/kernel/user/memrace" "$REPO/kernel/user/mbench" "$REPO/kernel/user/fsinfo" "$REPO/kernel/user/fsbig" "$REPO/kernel/user/schedapi" "$REPO/kernel/user/forksrv" "$REPO/kernel/user/forktls" "$E2/"; echo hello > "$E2/hello.txt"
 # the symlinks in the image: a "fast" one (the target inside the inode) to a file and to a directory —
 # exactly what the launch with the runtime from Ubuntu stumbled over (/lib64/ld-linux… is a symlink)
 mkdir -p "$E2/dir"; echo inside > "$E2/dir/inside.txt"
@@ -604,6 +604,26 @@ for m in sleeplat sleeplath; do
   assert "sleeplat: OK" "proc: $m — nanosleep(50 us) x 2000, the median overshoot under 500 us$( [ $m = sleeplath ] && echo ', a thread spinning on the sleeper'"'"'s core'): the whole term is one exact deadline, not 200-us windows served by the tick (~2 ms; ARM64-PLAN §11 item 2b)"
   stopq $q
 done
+# A TIMED SLEEP BEHIND A RUNNING NEIGHBOUR ENDS AT ITS TERM, NOT AT THE CORE'S NEXT TICK
+# (ARM64-PLAN §11 item 2b): 300 sleeps of 5 ms with a hog on the sleeper's core — the hog alone
+# thins the core's tick to the long one (2 ms), and a parked sleeper woke at that tick (the
+# overshoot's median ~1 ms); now the tick is pulled to the sleeper's deadline.
+q=$(bootd "talaria.test=sleeplong talaria.smp=2" /img/disk_ext2.img); sleep 3
+assert "sleeplat: OK" "proc: sleeplong — nanosleep(5 ms) x 300 behind a spinning sibling: the median overshoot under 500 us (the core's long tick served it before: ~1 ms; ARM64-PLAN §11 item 2b)"
+assert "ticks pulled to a sleeper's deadline [1-9][0-9]*" "proc: sleeplong — the stat block counts the ticks pulled to a sleeper's deadline"
+stopq $q
+# THE SAME WAKEDEF IN `talaria.test=` MODE (ARM64-PLAN §11 item 5): the APs here are the legacy
+# dedicated ones, and two threads that pin themselves to core 1 must BOTH run — the second never
+# got the core (1000 wakeups of 1000 lost): now the self-move's IPI enters the newcomer and a
+# core with two tasks ticks (`affinity::wants_tick`).
+q=$(bootd "talaria.test=wakedef talaria.smp=2" /img/disk_ext2.img); sleep 3
+assert "wakedef: OK" "proc: wakedef in talaria.test= mode — a thread pinned onto a legacy dedicated core behind a spinning sibling runs at all (lost 0) and within the threshold (p99 under 250 us): the self-move wakes that core's scheduler and a core with two tasks ticks (ARM64-PLAN §11 item 5)"
+stopq $q
+# A WOKEN THREAD BEHIND A SLEEPING SIBLING (ARM64-PLAN §11 item 2b, the "occupant asleep" class):
+# the core's current task is itself asleep in a futex wait; the woken one must get the core at once.
+q=$(bootd "talaria.test=wakesleep talaria.smp=2" /img/disk_ext2.img); sleep 3
+assert "wakesleep: OK" "proc: wakesleep — a thread woken behind a SLEEPING sibling (the core's current task asleep in its own futex wait) runs within the threshold (p99 under 250 us, max under 1 ms, lost 0): the waker's IPI reschedules a core busy with a sleeper (ARM64-PLAN §11 item 2b)"
+stopq $q
 BOOTD_SMP=2
 q=$(bootd "talaria.mode=cell talaria.smp=2" /img/disk_wakedef.img); sleep 2
 assert "wakedef: OK" "cell: wakedef — a thread woken behind a RUNNING sibling waits at most the preemption threshold (p99 under 250 us, lost 0): the sibling's core pulls its tick to the threshold instead of the slice's end (p99 414 us, max 499 before; ARM64-PLAN §11 item 2b)"
@@ -1934,6 +1954,17 @@ for i in $(seq 1 60); do sleep 0.5; grep -aq "migregs: ALL OK\|migregs: FAILURES
 assert "migregs: sched_setaffinity -> 0, the core 0 -> [1-3]" "migregs: sched_setaffinity moves the thread off the boot core"
 assert "migregs: ALL OK" "migregs: rdi/rsi/rdx/r8-r10 survive the move (a syscall preserves all but rax, rcx, r11)"
 stopq $q4
+# A PIN MEANS WHAT IT SAYS FROM ANY CORE (ARM64-PLAN §11 item 5): sched_setaffinity used to move
+# the thread only from the boot core (a PoC) — a thread on an AP that asked for another core
+# silently stayed. The walk 0 -> 1 -> 2 -> 1 -> 0 -> 2 -> 0 checks every direction, the BSP included.
+rm -f /tmp/o.log
+qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 4 -m 1024 \
+  -kernel "/w/$K" -append "console=ttyS0 talaria.test=pinmove talaria.smp=4" \
+  -display none -serial file:/tmp/o.log -no-reboot >/tmp/q.log 2>&1 &
+q4=$!; qstarted pinmove
+for i in $(seq 1 60); do sleep 0.5; grep -aq "pinmove: ALL OK\|pinmove: FAILURES\|panic" /tmp/o.log 2>/dev/null && break; done
+assert "pinmove: ALL OK \(6 moves" "pinmove: a thread walks 0 -> 1 -> 2 -> 1 -> 0 -> 2 -> 0 by sched_setaffinity and runs on every core it asked for (a move from an AP, and onto the BSP; ARM64-PLAN §11 item 5)"
+stopq $q4
 # A WAITER OF A MIXED EPOLL SET, PARKED (`talaria.netmix=`, docs/ARM64-PLAN.md §10.13): a pipe,
 # an eventfd and a signalfd in the set; one of two waiters is the stack's poller, the other
 # parks with a 2 s ceiling, and the producers must kick it — a kernel without the kicks wakes
@@ -2732,6 +2763,15 @@ assert "close-slow: sent 49152, arrived 49152 \(ok\)" "close() with 48 KB unsent
 assert "sleep: .*\(ok\)" "nanosleep of 20 ms (the monotonic clock)"
 assert "connect-test: ALL OK" "the outgoing network: the summary ALL OK"
 grep -q "connect-test: ALL OK" /tmp/o.log || { echo "  --- the diagnostics of connect-test:"; grep -E "wall:|dns:|echo-|refused|close-|sleep:|connect-test|net:" /tmp/o.log | sed 's/^/  | /'; echo "  --- minidns:"; tail -5 /tmp/dns.log | sed 's/^/  | /'; }
+kill $q 2>/dev/null; wait $q 2>/dev/null
+# ONE LOST SEGMENT COSTS THE RETRANSMISSION FLOOR, AND THE FLOOR IS LINUX'S 200 ms, NOT THE RFC'S
+# SECOND (ARM64-PLAN §11 item 2a): every 7th transmitted frame is dropped on the floor
+# (`talaria.txdrop=7`); a closed loop earns no duplicate ACK, so a slow round IS the stack's RTO.
+# smoltcp's floor of 1 s stalled the Talaria generator exactly 1.000 s once per rung on a c7g.xlarge.
+q=$(boot "talaria.test=txloss talaria.txdrop=7" net)
+for i in $(seq 1 120); do sleep 0.5; grep -aq "txloss: ALL OK\|txloss: FAILURES\|txloss: no connection\|panic" /tmp/o.log 2>/dev/null && break; done
+assert "txloss: 60 rounds, max [0-9]+ ms, slow \(>100 ms\) [1-9][0-9]*, over 600 ms 0, bad 0 \(ok\)" "txloss: 60 echo rounds with every 7th transmitted frame dropped — at least one round waited for a retransmission, none over 600 ms (the floor was a second; ARM64-PLAN §11 item 2a)"
+assert "l1: txdrop: the transmitted frame was dropped \(#1" "txloss: the loss gate did drop frames (talaria.txdrop=7)"
 kill $q $DNSP $ECHOP $DEADP $SLOWP 2>/dev/null; wait $q 2>/dev/null; ip addr del 10.0.0.9/24 dev tap0 2>/dev/null
 
 # LIVE DEBUGGING ON SMP. The debug registers are each core's own, and a breakpoint was

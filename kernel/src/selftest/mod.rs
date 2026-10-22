@@ -34,7 +34,7 @@ mod storage;
 /// The `talaria.test=` modes handled NOT by this module but by the production path
 /// further down `rust_main` (they enable the network and go into the datapath). They are listed
 /// so that the "unknown name" diagnostic does not complain about them.
-const HANDLED_LATER: &[&str] = &["ipi", "connect", "netshoot", "idleshoot", "forktls"];
+const HANDLED_LATER: &[&str] = &["ipi", "connect", "txloss", "netshoot", "idleshoot", "forktls"];
 
 /// Run the self-check named in `talaria.test=`.
 ///
