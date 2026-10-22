@@ -4,7 +4,9 @@
 #
 #   run-remote-all.sh [workloads...]     (by default all that have a meta.env)
 #   env: the same as run-remote.sh (DUR/WARM/CONNS/REPEAT/RATES), SKIP="..."
-#        and stand-up.sh's (AWS_DEFAULT_REGION, TF_VAR_instance_type, ARCH=arm64)
+#        and stand-up.sh's (AWS_DEFAULT_REGION, TF_VAR_instance_type, ARCH=arm64);
+#        GENLINUX=1 — after each workload's board, the same ladder with the LINUX generator
+#        against the Talaria server on the same bring-up (gen-<wl>/, summary-genlinux.md)
 #
 # Why: the criterion is "a run on EC2 starts with one command,
 # reaches the end and gives judgeable points on both sides, and the cleanup is checked
@@ -64,6 +66,21 @@ for wl in $LIST; do
         say "   the stand came up in $(( $(date +%s) - t0 )) s, running"
         if ! OUTDIR="$ALL/$wl" "$HERE/run-remote.sh" "$wl" >> "$LOG" 2>&1; then
             st="RUN ERROR"
+        elif [ "${GENLINUX:-0}" = 1 ]; then
+            # GENLINUX=1: THE SAME LADDER UNDER THE LINUX GENERATOR, ON THE SAME BRING-UP
+            # (ARM64-PLAN §12 item 0). The scoreboard charges each side's generator to its
+            # server; the second phase measures the Talaria server with the Linux generator
+            # over the ladder phase A took (ab-phase.sh GEN=linux, a "=" tail — no reboot), with
+            # the scoreboard's own duration and repeats. The result sits in gen-<wl>/L; the
+            # judged view (L's Talaria against A's Linux) is built by lib/genboard.sh.
+            say "   $wl: the Linux-generator phase ($(date +%H:%M:%S))"
+            mkdir -p "$ALL/gen-$wl"; ln -sfn "../$wl" "$ALL/gen-$wl/A"
+            if GEN=linux DUR=${DUR:-60} WARM=${WARM:-10} REPEAT=${REPEAT:-3} \
+                    "$HERE/ab-phase.sh" "$ALL/gen-$wl" L = "$wl" >> "$LOG" 2>&1; then
+                "$HERE/lib/genboard.sh" "$ALL/gen-$wl" >> "$LOG" 2>&1 || true
+            else
+                st="GEN=linux ERROR"
+            fi
         fi
     else
         st="STAND ERROR (see $STAND_DIR/mk-ami-$wl.log)"
@@ -83,10 +100,17 @@ for wl in $LIST; do
     say "   $wl: $st in $(( $(date +%s) - t0 )) s"
 done
 
-DIRS=$(ls -d "$ALL"/*/ 2>/dev/null | sed 's|/$||' | tr '\n' ' ')
+DIRS=$(ls -d "$ALL"/*/ 2>/dev/null | sed 's|/$||' | /usr/bin/grep -v '/gen-' | tr '\n' ' ')
 if [ -n "$DIRS" ]; then
     python3 "$HERE/lib/summary.py" $DIRS --md "$ALL/summary.md" > "$ALL/summary.txt" 2>&1 || true
     tail -30 "$ALL/summary.txt" | tee -a "$LOG"
+fi
+# The Linux-generator view of every workload that has one: one more summary, same rules.
+GDIRS=$(ls -d "$ALL"/gen-*/LA 2>/dev/null | tr '\n' ' ')
+if [ -n "$GDIRS" ]; then
+    python3 "$HERE/lib/summary.py" $GDIRS --md "$ALL/summary-genlinux.md" > "$ALL/summary-genlinux.txt" 2>&1 || true
+    say "== the Linux-generator view: $ALL/summary-genlinux.md"
+    tail -12 "$ALL/summary-genlinux.txt" | tee -a "$LOG"
 fi
 say "== done: $ALL, workloads with errors: $RED"
 [ "$RED" = 0 ]
