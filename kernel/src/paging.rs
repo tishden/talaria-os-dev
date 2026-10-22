@@ -874,10 +874,17 @@ const INVLPG_MAX: u64 = 64;
 unsafe fn flush_range(start: u64, pages: u64) {
     if pages == 0 { return; }
     if pages > INVLPG_MAX { flush_tlb(); return; }
-    let mut a = start & !0xFFF;
-    for _ in 0..pages {
-        mmu::flush_page(a);
-        a += 4096;
+    // arm64: the broadcast invalidations back to back under one pair of barriers (see
+    // `mmu::flush_range_is`); page by page each paid its own `dsb ish`.
+    #[cfg(target_arch = "aarch64")]
+    mmu::flush_range_is(start & !0xFFF, pages);
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut a = start & !0xFFF;
+        for _ in 0..pages {
+            mmu::flush_page(a);
+            a += 4096;
+        }
     }
 }
 
