@@ -178,14 +178,20 @@ if [ -n "$MYIP" ]; then
   esac
 fi
 
+# THE KEY FILE IS PER REGION. A key pair lives in one region, and the file used to be one for
+# all: a bring-up in a second region recreated "its" pair and overwrote the file — and every
+# later upload in the first region failed with "Connection closed" ten times in a row
+# (2026-10-22, two stands in two regions at once). The default region keeps the old name.
+PEM=$W/talaria-v11.pem
+case "$AWS_DEFAULT_REGION" in ap-northeast-1) ;; *) PEM=$W/talaria-v11-$AWS_DEFAULT_REGION.pem;; esac
 HAVE_KEY=$(aws ec2 describe-key-pairs --key-names talaria-v11 --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || echo None)
-if [ ! -f "$W/talaria-v11.pem" ] || [ "$HAVE_KEY" != talaria-v11 ]; then
+if [ ! -f "$PEM" ] || [ "$HAVE_KEY" != talaria-v11 ]; then
   aws ec2 delete-key-pair --key-name talaria-v11 >/dev/null 2>&1 || true
-  rm -f "$W/talaria-v11.pem"
-  aws ec2 create-key-pair --key-name talaria-v11 --query KeyMaterial --output text > "$W/talaria-v11.pem"
-  chmod 600 "$W/talaria-v11.pem"
+  rm -f "$PEM"
+  aws ec2 create-key-pair --key-name talaria-v11 --query KeyMaterial --output text > "$PEM"
+  chmod 600 "$PEM"
 fi
-SSH="ssh -i $W/talaria-v11.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
+SSH="ssh -i $PEM -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
 TAGS="ResourceType=instance,Tags=[{Key=Project,Value=talaria},{Key=Name,Value=$NAME}]"
 
 HELPER=""; VOL=""
@@ -228,7 +234,7 @@ gzip -cf "$IMG" > "$IMG.gz"
 # were not enough for a helper whose sshd came up late: "Connection closed" four times in a
 # row cost a whole stand bring-up on 2026-10-22).
 retry() { local n; for n in 1 2 3 4 5 6 7 8 9 10; do "$@" && return 0; echo "   attempt $n failed ($1) — retrying in 15 s"; sleep 15; done; return 1; }
-retry scp -i "$W/talaria-v11.pem" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q "$IMG.gz" ec2-user@"$HIP":/tmp/img.gz
+retry scp -i "$PEM" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q "$IMG.gz" ec2-user@"$HIP":/tmp/img.gz
 # The disk is found by the volume's SERIAL NUMBER (for EBS NVMe that is the vol-id
 # without dashes): the nvme order is not guaranteed, and a mistake here would mean
 # writing over the helper's root. The write is done WITHOUT conv=sparse: on an account
