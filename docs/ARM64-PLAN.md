@@ -2771,6 +2771,116 @@ order of work:
    `supervise: code 0`. `main` has not moved since the branch point (`3a29de1`), so the merge is a
    fast-forward of 130 commits.
 
+## 12. The next session: beating Linux at every point of the board (plan, 2026-10-22)
+
+The goal in one sentence: a Graviton3 scoreboard (§10.13) where no point of the service latency —
+p50, p99, p99.9, p99.99 at every rung of every workload — and no closed-loop ceiling is Linux's,
+under BOTH generators (ours and Linux's, `ab-phase.sh GEN=linux`), in the same hour. The rules
+that got the board this far stay (ENGINEERING-NOTES 58, 61; §11's method): a lost point is first
+an INSTRUMENT that names the mechanism, then a fix, then a gate that cannot lie; no knob is turned
+by taste; every number is taken next to Linux's in the same hour; the generator's own share of a
+point is split off before the server is blamed (§10.14). Costs are EC2 hours of `c7g.xlarge` x 4
+(one workload pair per bring-up, two or three hours) — about a dozen bring-ups for the session.
+
+**Where Linux wins today** (§10.13, re-read through §10.14-10.15 and §11): the Talaria generator's
+ceiling (103-116 k against 125-141 k req/s) and, through it, redis's medians at the two top rungs;
+redis's rare outliers at low rates (p99.99 285-558 us against 116-130, max 0.5-0.9 ms against
+0.2-0.4 — §11 item 2c); PostgreSQL `pk`'s ceiling (15.5 against 25.2 k req/s) and its p99/p99.9
+(143-149 against 131-144 us — item 2d); mongodb `insert`'s p99 at the middle and top rates
+(235-350 against 184-293 us, the write path) and `ping`'s median at the top two rungs; nginx's
+`nop` ceiling (98 against 146 k) and `file` (79 against 94 k); three p50 points of mysql, one of
+mongoose. Everything else is ours or parity. The order below is the order of work; 0 comes first
+because the board is sixteen days and six kernel changes old.
+
+0. **Re-take the whole board on this HEAD** (`ARCH=arm64 bench/suite/run-remote-all.sh`, the six
+   workloads, three repeats) and, for every network workload, the Linux-generator phase over the
+   same ladder. Since the board was taken the kernel changed what the board measures: the
+   syscall gate's price (recvfrom 4.3 → 0.45 us), `nanosleep`, the woken thread's wait, the
+   sleeper's deadline, the TCP retransmission floor, and `strict` by default. The re-take is the
+   REAL worklist for items 1-6 — a point that moved to parity by itself is not worked on. Keep
+   both reports under `results/` with the date; the acceptance of every later item is read
+   against them. Cost: two bring-ups (redis+mongoose+mysql, nginx+PostgreSQL+mongodb) plus the
+   generator phases.
+
+1. **The generator's ceiling and the lost frame** (redis's top rungs, nginx `nop`). Three
+   instruments, then the fix the instruments name: (a) the ENA receive ring's drop counters and
+   the ring's occupancy at the ceiling into the generator's `stat:` block (ENA keeps `rx_drops`
+   in its admin statistics; the completion queue's phase tells a full ring) — the one drop per
+   rung at 77 k+ that costs 200 ms now and that Linux never takes; (b) `sendto`'s price on the
+   generator (2.3 us per call at 2.0 sends per request; `gatecost`'s method: the same call with
+   and without the stack's work) — what of it is the doorbell per packet (LLQ), the stack's lock,
+   the copy; Linux's `sendto` on the same instance is the reference; (c) the generator's
+   syscalls per request (3.0 against Linux's 9.8 at the ceiling: Linux polls the empty socket
+   more and still wins — its receive is cheaper or its send batches). The hypotheses, in the
+   order the numbers will rank them: a doorbell per `sendto` → one doorbell per pass (the batch
+   mode §7.2 exists for the server; the generator's path takes it too); the receive copy through
+   the socket ring → a read straight from the frame; the ring's size against a burst → a deeper
+   ring or an earlier pass. Gate: `txloss`'s twin for drops — a counter that must read 0 on a
+   10-minute run at the ceiling; `gatecost` extended to `sendto`. Acceptance: the Talaria
+   generator's ceiling ≥ Linux's on the same type in the same hour, every redis rung's median
+   ours or parity under BOTH generators.
+
+2. **redis's rare outliers at low rates** (§11 item 2c; p99.99 and max at 10-25 k req/s). The
+   instrument is `umark` in `tlgen`: mark every request over 200 us
+   (`prctl(PR_TALARIA_SLOW, t0, t1)`, the server's and the generator's kernels both keep the six
+   longest with the cores' decisions and sleeps) — the stat block then names who held the core
+   and whether it slept (the method that found `nanosleep` and the slice's wait). The suspects
+   the board left: a long tick of 2 ms meeting a waiter that is not a timed sleeper, the kick path
+   (`WK_KICK`, 999 of 1000 in `wakesleep`: a wakeup that only kicks a core and waits for the
+   kicked sleeper to notice), the stack's `pollhard` pass colliding with a request. Gate: a
+   `wakesleep`-like test at a low rate with the marks on and a p99.99 ceiling; acceptance: redis
+   p99.99 and max ≤ Linux's at the 10 % and 25 % rungs.
+
+3. **PostgreSQL `pk`: the ceiling and the p99** (§11 item 2d). First the split: the ceiling under
+   the Linux generator (the board's 15.5 k is the Talaria pair's); then `talaria.sysprof=1` on the
+   server at the ceiling — `pk` is a B-tree descent plus heap reads through `pread` on the FS
+   cache, so the suspects are the cache's lookup (the page cache behind `ext2`, `fscnt`, the
+   htree), the process model's syscall price under `strict` (every `pread` checks its buffer: the
+   gate's table walk is now once per 4K table, but a 8 KB page read still walks), the per-backend
+   wakeup from the stack (a fork per connection: the socket's owner is a process, the deliver
+   path goes through `netpark`). Linux's `perf` on the same query is the reference for where the
+   time SHOULD go. Gate: a `pk`-shaped microbenchmark (a backend's `pread` of a cached 8 KB page
+   plus a `recv`/`send`) in `kernel/user` with its price against Linux's `gatecost` numbers.
+   Acceptance: `pk` ceiling ≥ Linux's under the Linux generator, p99 ≤ Linux's at every rung.
+
+4. **mongodb `insert`'s p99: the write path on EBS.** The instrument exists (session 38's fsync
+   split: data 1056 us against copies 888, `jrnfree`, the FUA killed by `talaria.fua`); what the
+   board says is that Linux's ext4 commits an `insert` in 184-293 us p99 where ours takes
+   235-350. The three suspects, each a measurement before a fix: the data write before the commit
+   in ordered mode (one NVMe command per extent — are our extents contiguous, and does the
+   journal write wait for the data's completion or go in parallel on a second queue?); the
+   commit's own latency on EBS (a 4 KB journal block with the barrier: Linux issues the data and
+   the commit back to back and waits once); the wake of the fsync-er after the completion (the
+   NVMe completion's interrupt path to a parked process — `netpark`'s cousin on the disk side,
+   with a ceiling that may be the tail). Gate: `fsyncconc`'s latency histogram against a Linux
+   guest on the same EBS volume in the same hour (the powercut harness already puts both on one
+   volume). Acceptance: `insert` p99 ≤ Linux's at the middle and top rungs with the
+   `powercut-ec2.sh` promise intact (the data survive).
+
+5. **nginx and mongoose: the HTTP path.** After 0 and 1, what is left of nginx's `nop` and
+   `file` ceilings is the server's: an HTTP response is several hundred bytes in one `writev`
+   and a `sendfile` for `file` — the instruments are `sysprof` on the server at the ceiling and
+   `netprof`'s stages; the suspects are the per-byte copy into the socket ring (a response of
+   250 B against redis's 5), `sendfile` through the FS cache, and the 100-us `pollhard` pass.
+   Acceptance: both ceilings ≥ Linux's under the Linux generator, the medians parity or ours.
+
+6. **The small ones** (mysql's three p50 points, mongodb `ping`'s top-rung median, mongoose's
+   one p50): taken from the re-take's report, each with the same question — the generator's or
+   the server's (`GEN=linux`) — and only then an instrument. They are listed so that the
+   acceptance is "no point", not "no big point".
+
+7. **The acceptance run and the x86 check.** The board again on the session's HEAD, both
+   generators, three repeats: the acceptance is a table with no Linux cell at any point of any
+   workload and every ceiling ours or parity, plus `docs/MEASUREMENTS.md` §10.16 with the numbers
+   and the mechanism named for every point that moved. Then the x86 board on `c6i.xlarge` once
+   (the kernel is shared; sessions 33-43 left it ours — a regression there would be ours too).
+   Both regressions and `validate.sh` before every EC2 run, as in §11 item 6.
+
+What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
+last, and only if a point needs exactly that), a new slice or threshold value without an
+instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and
+"within a workload" stay — a board that moves its own goalposts proves nothing).
+
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),
 `docs/BARE-METAL.md` (what QEMU hides — the arm64 list in §7 above is its
