@@ -193,6 +193,23 @@ pub unsafe fn flush_all_is() { core::arch::asm!("dsb ishst", "tlbi vmalle1is", "
 /// inner-shareable domain, which is what makes `paging::shootdown_impl` a plain flush here.
 /// `dsb ishst` first, so that another core's walker cannot refill the old entry after the
 /// invalidation from a store not yet visible.
+/// Drop the translations of a RANGE on every core with ONE pair of barriers: the `tlbi`s are
+/// queued back to back and a single `dsb ish` waits for the whole broadcast (Linux's
+/// `__flush_tlb_range`). Page by page, `flush_page` paid a `dsb ish` per page — on a
+/// Graviton ~400 ns each, and PostgreSQL's `munmap` of 14 pages per query stood 5.6 us in
+/// the flush and the same again in the "shootdown" that is this same flush (ARM64-PLAN §12
+/// item 3).
+#[inline(always)]
+pub unsafe fn flush_range_is(start: u64, pages: u64) {
+    core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+    let mut a = start >> 12;
+    for _ in 0..pages {
+        core::arch::asm!("tlbi vaae1is, {}", in(reg) a, options(nostack, preserves_flags));
+        a += 1;
+    }
+    core::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
+}
+
 #[inline(always)]
 pub unsafe fn flush_page(vaddr: u64) {
     core::arch::asm!("dsb ishst", "tlbi vaae1is, {}", "dsb ish", "isb", in(reg) vaddr >> 12, options(nostack));
