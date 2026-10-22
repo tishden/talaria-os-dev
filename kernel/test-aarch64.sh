@@ -259,6 +259,9 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
   boot 60 "talaria.test=migregs"
   assert 'migregs: sched_setaffinity -> 0, the core 0 -> [1-3]'               'migregs: sched_setaffinity moves the thread off the boot core'
   assert 'migregs: ALL OK'                                                    'migregs: x1..x17 and lr survive the move (a syscall preserves all but x0)'
+  # A pin means what it says from ANY core: the move used to be honoured only from the boot core.
+  boot 60 "talaria.test=pinmove"
+  assert 'pinmove: ALL OK \(6 moves'                                          'pinmove: a thread walks 0 -> 1 -> 2 -> 1 -> 0 -> 2 -> 0 by sched_setaffinity and runs on every core it asked for (a move from an AP, and onto the BSP; ARM64-PLAN §11 item 5)'
   # The ID registers from EL0: AT_HWCAP's CPUID bit promises Linux's emulation of `mrs` (OpenSSL
   # reads MIDR at load; Alpine's PostgreSQL died on it with a SIGILL before).
   boot 60 "talaria.test=idregs"
@@ -302,7 +305,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     [ $rc = 0 ] && [ -s "$REPO/$TD/$name.img" ]
   }
   if command -v mkfs.ext2 >/dev/null 2>&1 \
-     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace cowstale umarkt sleeplat gatecost wakedef \
+     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace cowstale umarkt sleeplat gatecost wakedef wakesleep \
      && mkimg ms 64M '' mapshared && mkimg core 32M '' crashme \
      && mkimg wd 32M 'binary=/wakedef\nargs=wakedef 1000 5000 20000\nenv=HOME=/\nrestart=0\n' wakedef \
      && mkimg coremt 32M 'binary=/crashme\nargs=crashme mt\nrestart=0\n' crashme \
@@ -350,6 +353,18 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
       run 120 "talaria.test=$m" ext2
       assert 'sleeplat: OK'                                                   "$m: nanosleep(50 us) x 2000, the median overshoot under 500 us$( [ $m = sleeplath ] && echo ', a thread spinning on the sleeper'"'"'s core'): one exact deadline, not 200-us windows served by the tick (ARM64-PLAN §11 item 2b)"
     done
+    # A timed sleep behind a RUNNING neighbour ends at its term, not at the core's (long) tick.
+    run 120 "talaria.test=sleeplong" ext2
+    assert 'sleeplat: OK'                                                     'sleeplong: nanosleep(5 ms) x 300 behind a spinning sibling, the median overshoot under 500 us — the tick is pulled to the sleeper'"'"'s deadline instead of the 2-ms long tick serving it (ARM64-PLAN §11 item 2b)'
+    assert "ticks pulled to a sleeper's deadline [1-9][0-9]*"                 'sleeplong: the stat block counts the ticks pulled to a sleeper'"'"'s deadline'
+    # The same wakedef in `talaria.test=` mode: the APs are the legacy dedicated ones, and a thread
+    # that pinned itself behind a spinning sibling never ran (1000 of 1000 lost; ARM64-PLAN §11 item 5).
+    # TCG's latencies are its own — the counters are judged.
+    run 120 "talaria.test=wakedef" ext2
+    assert 'wakedef: a wakeup behind a spinning sibling \(core 1\), us: .*lost 0\)' 'wakedef in talaria.test= mode: a thread pinned onto a legacy dedicated core behind a spinning sibling runs, every wakeup delivered (lost 0): the self-move wakes that core'"'"'s scheduler and a core with two tasks ticks (ARM64-PLAN §11 item 5)'
+    # A woken thread behind a SLEEPING sibling (the core's current task asleep in its futex wait).
+    run 120 "talaria.test=wakesleep" ext2
+    assert 'wakesleep: a wakeup behind a sleeping sibling \(core 1\), us: .*lost 0\)' 'wakesleep: a thread woken behind a sleeping sibling runs every time (lost 0) — the waker reschedules a core busy with a sleeper (ARM64-PLAN §11 item 2b; TCG'"'"'s latencies are its own)'
     # A cell on two cores (`talaria.smp=2` first wins over the harness's 4): the hog and the waiter
     # share core 1. Under TCG the latencies are the emulation's (p50 50-60 us, p99 ~700), so the
     # limits here are loose and the gate is the mechanism — the counters and no lost wakeup; the

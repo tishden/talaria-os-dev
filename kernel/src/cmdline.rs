@@ -391,6 +391,7 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.top", Kind::Check(top_ok), "a top snapshot every N ms[,rss]"),
     once("talaria.trace", Kind::Check(trace_ok), "the early trace on disk: LBA[,eager]"),
     once("talaria.trefs", Kind::Flag, "a trace of process references"),
+    once("talaria.txdrop", Kind::Num, "the loss gate: drop every N-th transmitted frame (0 — none)"),
     once("talaria.uacheck", Kind::Num, "checking syscall pointers (uaccess.rs): 0 — off (an A/B of the price)"),
     once("talaria.userdata", Kind::Flag, "read the cmdline tail from EC2 user-data"),
     once("talaria.wakebal", Kind::Num, "the placement rule on wakeup"),

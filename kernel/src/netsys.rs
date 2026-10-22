@@ -1235,6 +1235,10 @@ pub fn pollgap_from_cmdline(cmdline: &str) {
         NET_TRACE.store(true, core::sync::atomic::Ordering::SeqCst);
         crate::println!("netsys: the connections' trace is on (net: connect/close)");
     }
+    if let Some(n) = crate::cmdline::num(cmdline, "talaria.txdrop") {
+        crate::l1::TXDROP_EVERY.store(n, core::sync::atomic::Ordering::SeqCst);
+        if n != 0 { crate::println!("netsys: THE LOSS GATE IS ON — every {}-th transmitted frame is dropped (talaria.txdrop)", n); }
+    }
     if let Some(ns) = crate::cmdline::num(cmdline, "talaria.pollhard") {
         // 0 — go back to the former threshold by time (the window over the ring is not created).
         POLL_HARD_NS.store(ns, core::sync::atomic::Ordering::SeqCst);

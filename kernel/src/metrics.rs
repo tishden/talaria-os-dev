@@ -846,6 +846,10 @@ pub fn dump() {
                 crate::println!("stat:   deferred preemptions: wakeups against a young occupant {}, the scheduler stayed for the threshold {}, ticks pulled {}",
                     young, crate::sched::DEFER_STAY.load(Relaxed), crate::smp::TICK_PULLS.load(Relaxed));
             }
+            let dl = crate::sync::DL_PULLS.load(Relaxed);
+            if dl != 0 {
+                crate::println!("stat:   ticks pulled to a sleeper's deadline {} (a timed sleep behind a running neighbour ends at its term, not at the core's next tick)", dl);
+            }
         }
         {   // the holders of a core a wakeup only kicked (the top four)
             let mut top = [(0u64, 0usize); 4];

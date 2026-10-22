@@ -2591,7 +2591,26 @@ order of work:
    from the fourth rung up the Talaria generator stalls once per run for a whole second (max
    1.000 s, 100-350 k requests behind it at a debt p99 of 1.6 us; `the ring lied 1` in its
    stat) — the open loop's debt, not the service latency, and the next thing to name on the
-   client path (`talaria.sysprof` is not the instrument: B doubles the p99, 56 → 115 us);
+   client path (`talaria.sysprof` is not the instrument: B doubles the p99, 56 → 115 us).
+   **Named and fixed 2026-10-22: the stall was the TCP retransmission floor.** The max column
+   said it: 1 000 067..1 000 124 us at every rung from 77 k up — one second plus one RTT, the
+   same at every rate, while the Linux generator's max stayed at 280-380 us. A number that exact
+   is a protocol timer, not a scheduler: smoltcp 0.14 keeps RFC 6298's floor, `RTTE_MIN_RTO =
+   1000` ms (and `RTTE_INITIAL_RTO` 1000), and a closed-loop request/response connection has no
+   second segment in flight to earn a duplicate ACK, so every lost segment is recovered by that
+   timer alone — one drop at the ceiling cost the generator 1.000 s and the 100-350 k requests of
+   debt behind it. The stat block's `the ring lied 1` was a red herring (one event in the hour
+   against four stalls per run, and a lie costs the 100 us of `pollhard`, not a second). Fix:
+   smoltcp is vendored (`kernel/vendor/smoltcp`, its `TALARIA.md`) with the floor at Linux's
+   `TCP_RTO_MIN`, 200 ms. Gate `txloss` on both machines: `talaria.txdrop=N` drops every N-th
+   TRANSMITTED frame on the floor (a loss gate, not a feature — the only way to see what a loss
+   costs on a stand that never loses one; a receive-side drop would measure the PEER's timer,
+   since the peer's reply carries the ACK), 60 echo rounds against the harness's echo server
+   with every 7th frame lost: under KVM every slow round is 200-201 ms (10 of 60), none over
+   600 ms; before, 1 000 ms each. What is left is the DROP itself — why the generator (or the
+   server) loses a frame once per rung at 77 k+ req/s where Linux loses none; the ENA receive
+   ring under a burst is the first suspect, to be measured on EC2 with the drop counters. A drop
+   costs 200 ms meanwhile, as it does Linux;
    (b) the wfe tier's mdpipe tail at `smp=2` — **closed 2026-10-09: it was `nanosleep`.** The
    per-tick instrument was built (`kernel/src/umark.rs`): the workload names a slow interval itself,
    `prctl(PR_TALARIA_SLOW, t0_ns, t1_ns)` (mdpipe's `--mark-us N`; Linux answers EINVAL), and the
@@ -2657,13 +2676,41 @@ order of work:
    late by up to the long tick; harmless for mdpipe (a 1-s sleep), to be weighed for `nanosleep`
    under load. Also met, not chased: in `talaria.test=` mode the APs are the legacy dedicated ones
    (no tick), and a thread that moves itself there with `sched_setaffinity` from the BSP starves a
-   second thread placed on that core; the gates boot such tests as a cell. (c) redis's rare
+   second thread placed on that core; the gates boot such tests as a cell. **2026-10-22, (2)
+   closed:** `sync::pull_tick_to_sleeper` — at every hardware tick, after the period is retuned,
+   the core looks for the nearest deadline among its own sleepers (a parked one or one asleep
+   under the tick; `TIMED_WAITS` keeps the scan off for a workload without timed waits) and, when
+   it lies inside the current period, pulls the next tick to it (`smp::tick_sooner`, a one-shot
+   — the long tick stays long for the runner). Gate `sleeplong` on both machines (300 sleeps of
+   5 ms behind a spinning sibling): the overshoot's median under KVM 36-52 us against ~1 ms
+   before (the 2-ms long tick served the deadline), 300 pulls in `stat:`; TCG 122 us. **(1), the
+   "occupant asleep" class, measured in isolation:** gate `wakesleep` on both machines (the
+   core's current task asleep in its own futex wait, a parked sibling woken 1000 times at a
+   random phase of the slice): under KVM x86 p99 61-72 us, max 92-111, lost 0 — the path there
+   is the resched IPI to a core busy with a sleeper (`WK_RESCHED_IDLE`); on a `c7g.large`
+   (`variants-wakesleep-c7g`, two instances of this kernel, 20 000 wakes each, the path there the
+   doorbell write into the occupant's `wfe` — `by a call 19 873 / 19 352` in the stat block) p50
+   0 us, p99 1, max 5-6, lost 0; Linux on the same type in the same hour p50 3, p99 4, max 199.
+   So the class AS MODELLED — one sleeper as the core's current task, one parked sibling woken
+   from another core — has no tail on a Graviton: the 296-us stage of `variants-wakedef-c7g`
+   (once in 90 s of mdpipe) needs something the model lacks (a third party on the core, a
+   deadline, the pickup loop) and stays open with its instrument, the kept intervals of `umark`,
+   to be read off the next mdpipe run that shows it. Gate `wakesleep` stays as the class's
+   regression on both machines (KVM p99 under 250 us and lost 0; TCG lost 0).
+   (c) redis's rare
    0.3-0.9 ms outliers at low rates; (d) PostgreSQL `pk`'s ceiling, measured under the Linux
    generator too; (e) the lazy FP save (17 ns of a 130 ns svc — last).
 3. **Stage 6's tails.** The low allocator takes one RAM region (the others below 4 GiB stay
    unused — on x86 the 640 KB under 1 MB); the workload cannot use RAM beyond the identity ceiling
    yet (the identity modes need a check of their own first); the `alloc_contig` callers that are not
    dual (the vDSO, `syscall.rs`'s identity-mode mmaps, shm's identity fallback) keep the low memory.
+   **Weighed 2026-10-22, left as written on purpose:** the first tail costs nothing on either
+   target — a `c7g.large` has ONE RAM region below 4 GiB (`0x4000_0000..0x7863_0000`, the
+   allocator's 844 MB after the image; the rest is the high area above 4 GiB) and on x86 the
+   unused region is the 640 KB under 1 MB; the second matters only above 192 GiB of RAM, which no
+   instance of the scoreboard has; the third keeps kernel-sized allocations (the vDSO's pages, a
+   shm fallback) in the low memory by design. None of the three changes a number on any machine
+   the port runs on.
 4. **The direct map's tails.** ~~The `Pa` newtype for the drivers' entry points~~ — done 2026-10-09:
    `kaddr::Pa`, made only by `frame` (an allocator's frame), `of` (a kernel pointer) and `of_kva`;
    each refuses a value at or above 2^47 (every kernel virtual address on both machines) by
@@ -2691,8 +2738,38 @@ order of work:
    1000 wakeups of 1000 lost). The gates boot such tests as a cell meanwhile; the fix is either
    the common role for the test modes' APs (the tick on) or `set_affinity` refusing a second
    thread on a dedicated core — and the self-move from an AP, so a pin means what it says.
+   **Done 2026-10-22, three pieces.** (1) `affinity::wants_tick`: without a layout plan an AP
+   that hosts MORE THAN ONE task wants the tick (`sched::cpu_task_count`); `ap_loop` arms the
+   timer by it at a task's entry, and `ap_schedule` starts it when it switches on a core that
+   never went back through the loop (the preempted sleeper's borrowed deadline is returned a line
+   above); a legacy AP with one task keeps run-to-completion, as the timing self-tests expect,
+   and `role()`, stealing and pushing are untouched. (2) A self-move onto a core whose current
+   task is RUNNING without a tick sets the newcomer as the hint and sends the resched IPI
+   (`migrate_current_to`): the ring alone reached only an idle core or a bell sleeper, and the
+   newcomer never ran. (3) `sched_setaffinity` moves the thread FROM ANY core and TO ANY core of
+   the pool, the BSP included (the `cur_cpu != 0` PoC guard is gone; a target outside the pool
+   stays a no-op). Two things the real move surfaced, both fixed: the BSP's LIMBO (a context left
+   on the old stack after a self-move, `CURRENT` still naming the task) did not end when the
+   same task moved BACK onto the BSP — the entry into its fresh frame was taken as "the same
+   task stays", the next tick did not save its context and re-entered the consumed frame
+   ("AN ENTRY INTO A USED FRAME t0 by core 0", a #GP; `cowstale` 4 runs of 6 — whose pin(0) from
+   core 1 had been a no-op until now, so the item-0 scenario runs as written for the first time
+   and passes 6 of 6); and the old kernel stack of a task that left an AP was queued for freeing
+   while the AP still stood on it (the BSP reaps between the queueing and `ap_exit_to_loop`) —
+   the AP now hands it to its pickup loop, which queues it from its own stack (`AP_DEAD_KSTK`).
+   Gates on both machines: `wakedef` in `talaria.test=` mode (KVM p99 96-97 us, lost 0 — 1000 of
+   1000 lost before; TCG judges lost 0) and `pinmove` (a thread walks 0 → 1 → 2 → 1 → 0 → 2 → 0
+   by `sched_setaffinity` and runs on every core it asked for, on both).
 6. **The merge of `arm64-port` into `main`** — the owner's call; before it, both regressions and
-   `validate.sh` on the HEAD to be merged.
+   `validate.sh` on the HEAD to be merged. **The pre-merge run, 2026-10-22, on the HEAD that closes
+   items 2a, 2b(2) and 5:** `kernel/test.sh` 570/0 plus the host's 22/0, `kernel-unit` 303/0,
+   clippy `-D warnings` clean in both configurations, `kernel/test-aarch64.sh` (with `-net` and
+   `-pwr`) 409/0 under TCG, `kernel/validate.sh` 9/0 with PostgreSQL, MariaDB, MongoDB, OpenJDK 21
+   and ClickHouse green (14 PASS, 0 FAIL); the same kernel booted on EC2
+   as the default variant of `variants-wakesleep-c7g` (two `c7g.large`) and
+   `variants-wakesleep-c6i` (two `c6i.large`), both to the workload's verdict and a clean
+   `supervise: code 0`. `main` has not moved since the branch point (`3a29de1`), so the merge is a
+   fast-forward of 130 commits.
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),

@@ -328,6 +328,47 @@ pub fn blocked_for_sched(t: usize) -> bool {
     true
 }
 
+/// The nearest deadline of a timed sleeper of the core `cpu` that the core's TICK is to serve
+/// (0 — none): a parked one (WSLEEP 2, it gave the core up to a running neighbour) or one asleep
+/// under the tick (`tick_serves`). A sleeper that borrowed the deadline timer serves itself —
+/// `smp::tick_sooner` refuses while the timer is borrowed.
+pub fn next_deadline_on(cpu: usize) -> u64 {
+    let n = crate::sched::task_count();
+    let mut best = 0u64;
+    for t in 0..n.min(NTASKS) {
+        if crate::sched::cpu_of(t) != cpu || WADDR[t].load(Ordering::Relaxed) == 0 || WOKEN[t].load(Ordering::Relaxed) != 0 { continue; }
+        let d = WDEADLINE[t].load(Ordering::Relaxed);
+        if d != 0 && (best == 0 || d < best) { best = d; }
+    }
+    best
+}
+/// How many times a core's tick was pulled to a sleeper's deadline (`pull_tick_to_sleeper`).
+pub static DL_PULLS: AtomicU64 = AtomicU64::new(0);
+/// How many waits with a deadline are in progress on the machine: the tick's scan for a sleeper's
+/// deadline runs only while there is one (the tick's price stays flat for a workload without
+/// timed waits).
+static TIMED_WAITS: AtomicU64 = AtomicU64::new(0);
+/// A TIMED SLEEP BEHIND A RUNNING NEIGHBOUR ENDS AT ITS TERM, NOT AT THE CORE'S NEXT TICK
+/// (ARM64-PLAN §11 item 2b). A sleeper whose core has other work parks (`yield`), and the
+/// scheduler notices its deadline at the next tick — on a core with ONE runner that tick is the
+/// long one (2 ms, `talaria.idleslice`): mdpipe's md_main, a 1-s sleeper on a hog's core, got its
+/// core 0.5-1 ms late ~150 times a run (`[-14005 tick t4->t4 stay:nobody] … [-0 tick t4->t0
+/// rotation]`). The tick handler calls this after retuning its period: the next tick is pulled to
+/// the nearest deadline that lies inside the period (a one-shot; the period returns with it). An
+/// expired deadline is the rotation's — the task is ready now (`blocked_for_sched`), and a pull
+/// to "now" would storm; a deadline further than the period is met by the periodic tick first.
+pub fn pull_tick_to_sleeper(cpu: usize) {
+    if TIMED_WAITS.load(Ordering::Relaxed) == 0 { return; }
+    let d = next_deadline_on(cpu);
+    if d == 0 { return; }
+    let now = crate::tsc::mono_ns();
+    if d <= now { return; }
+    let left = d - now;
+    let p = crate::smp::my_period_ns();
+    if p == 0 || left >= p { return; }
+    if crate::smp::tick_sooner(left.max(20_000)) { DL_PULLS.fetch_add(1, Ordering::Relaxed); }
+}
+
 // The diagnostics: a ring of the latest "slow" waits (wait_on_ex > 20 us) —
 // who, on what word, how many us. The printing: dump_slow() (the metrics at the exit).
 const SLOWN: usize = 64;
@@ -569,6 +610,7 @@ pub fn wait_on_ex(addr: *const u32, val: u32, deadline: Option<u64>, kind: u64, 
     // wait and would give seconds out of nowhere in the histogram.
     WOKE_TSC[t].store(0, Ordering::Relaxed);
     WDEADLINE[t].store(deadline.unwrap_or(0), Ordering::SeqCst);
+    if deadline.is_some() { TIMED_WAITS.fetch_add(1, Ordering::Relaxed); }
     WSKIP[t].store(0, Ordering::SeqCst);
     WVAL[t].store(val, Ordering::SeqCst);
     WKIND[t].store(kind as u8, Ordering::SeqCst);
@@ -798,6 +840,7 @@ pub fn wait_on_ex(addr: *const u32, val: u32, deadline: Option<u64>, kind: u64, 
     WADDR[t].store(0, Ordering::SeqCst);
     WEXTRA[t].store(0, Ordering::SeqCst);
     WDEADLINE[t].store(0, Ordering::SeqCst);
+    if deadline.is_some() { TIMED_WAITS.fetch_sub(1, Ordering::Relaxed); }
     if dbg_t0 != 0 && deadline.is_none() {
         let us = (crate::tsc::rdtsc() - dbg_t0) / (crate::tsc::calibrate_cached() / 1_000_000);
         if us > 500 && SLOW_PRN.fetch_add(1, Ordering::Relaxed) < 16 {

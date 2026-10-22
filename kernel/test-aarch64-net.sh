@@ -185,6 +185,13 @@ assert "sleep: .*\(ok\)" "nanosleep of 20 ms (the monotonic clock)"
 assert "connect-test: ALL OK" "the outgoing network: the summary ALL OK"
 refute "$BAD" "connect: no trap, no unknown syscall"
 grep -aq "connect-test: ALL OK" $O || { grep -aE "wall:|dns:|echo-|refused|close-|sleep:|connect-test" $O | sed 's/^/  | /'; tail -3 /tmp/dns.log | sed 's/^/  | dns: /'; }
+stopq
+# One lost segment costs the retransmission floor, and the floor is Linux's 200 ms, not the RFC's
+# second (ARM64-PLAN §11 item 2a): every 7th transmitted frame is dropped (`talaria.txdrop=7`); a
+# closed loop earns no duplicate ACK, so a slow round IS the stack's RTO (it was 1.000 s per drop).
+bootn 1 "talaria.test=txloss talaria.txdrop=7" "$DISK"; waitfor "txloss: ALL OK|txloss: FAILURES|txloss: no connection|PANIC|\[trap\]" 120
+assert "txloss: 60 rounds, max [0-9]+ ms, slow \(>100 ms\) [1-9][0-9]*, over 600 ms 0, bad 0 \(ok\)" "txloss: 60 echo rounds with every 7th transmitted frame dropped — at least one round waited for a retransmission, none over 600 ms (the floor was a second; ARM64-PLAN §11 item 2a)"
+assert "l1: txdrop: the transmitted frame was dropped \(#1" "txloss: the loss gate did drop frames (talaria.txdrop=7)"
 stopq; kill $DNSP $ECHOP $DEADP $SLOWP 2>/dev/null; ip addr del 10.0.0.9/24 dev tap0 2>/dev/null
 
 echo "== virtio-net over virtio-pci: the BARs our own (the device tree's window) and the firmware's (edk2) =="

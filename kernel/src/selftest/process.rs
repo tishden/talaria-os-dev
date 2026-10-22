@@ -194,6 +194,34 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/umarkt", &[b"umarkt", b"50"], &[b"HOME=/"]); } }
             crate::suite::park()
         }
+        "sleeplong" => {
+            // A timed sleep behind a RUNNING neighbour ends at its term, not at the core's next
+            // tick (ARM64-PLAN §11 item 2b): 300 sleeps of 5 ms with a hog spinning on the
+            // sleeper's core — the hog alone thins the core's tick to the long one (2 ms), and a
+            // parked sleeper used to wake at that tick (the overshoot's median ~1 ms); now the tick
+            // is pulled to the sleeper's deadline (`sync::pull_tick_to_sleeper`), median under 500 us.
+            crate::smp::start_from_cmdline(cmdline);
+            if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/sleeplat", &[b"sleeplat", b"5000", b"300", b"hog", b"500"], &[b"HOME=/"]); } }
+            crate::suite::park()
+        }
+        "wakedef" => {
+            // The same binary the cell gate boots, in THIS mode's legacy layout (no manifest: the
+            // APs are the dedicated ones until a second task lands — ARM64-PLAN §11 item 5): the hog
+            // and the waiter pin themselves to core 1 from core 0; the waiter must run there at all
+            // (the move's IPI and the core's tick, `affinity::wants_tick`), then every wakeup within
+            // the preemption threshold. Before the fix: 1000 wakeups of 1000 lost.
+            crate::smp::start_from_cmdline(cmdline);
+            if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/wakedef", &[b"wakedef", b"1000", b"250", b"1000"], &[b"HOME=/"]); } }
+            crate::suite::park()
+        }
+        "wakesleep" => {
+            // The "occupant asleep" class of ARM64-PLAN §11 item 2b: the core's current task is
+            // itself asleep in a futex wait, and a woken sibling must get the core at once (on a
+            // c7g.large the core slept in four 62-us pieces over the ready neighbour, 296 us).
+            crate::smp::start_from_cmdline(cmdline);
+            if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/wakesleep", &[b"wakesleep", b"1000", b"250", b"1000"], &[b"HOME=/"]); } }
+            crate::suite::park()
+        }
         "sleeplat" | "sleeplath" => {
             // nanosleep's accuracy (ARM64-PLAN §11 item 2b): 2000 sleeps of 50 us, the median
             // overshoot under 500 us — a sleep served by the tick (200-us coarse windows until
@@ -328,6 +356,14 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             static MR: &[u8] = user_elf!("migregs");
             println!("talaria: the migregs test, {} bytes (the registers across a move to another core)", MR.len());
             unsafe { crate::user::run_threaded(MR); }
+        }
+        // `sched_setaffinity` moves the thread from ANY core to any core of the pool, the BSP
+        // included (ARM64-PLAN §11 item 5); it used to be honoured only from the boot core.
+        "pinmove" => {
+            crate::smp::start_from_cmdline(cmdline);
+            static PM: &[u8] = user_elf!("pinmove");
+            println!("talaria: the pinmove test, {} bytes (a thread walks the cores by sched_setaffinity)", PM.len());
+            unsafe { crate::user::run_threaded(PM); }
         }
         // Two waiters in epoll_wait on sets that are not only sockets, one of them parked by
         // `talaria.netmix=`: a pipe's write, an eventfd's and a signal must wake the parked one

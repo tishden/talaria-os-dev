@@ -439,6 +439,26 @@ pub struct SmolTx<'a> {
     sh: &'a DevCell<Shared>,
 }
 
+/// `talaria.txdrop=N`: every N-th transmitted frame is dropped on the floor (0 — none). A LOSS
+/// GATE, not a feature: the only way to see what one lost segment costs this stack's TCP on a
+/// stand that never loses one. It named the generator's one-second stall on a `c7g.xlarge`:
+/// smoltcp's retransmission floor was the RFC's 1 s (`vendor/smoltcp`, now 200 ms as Linux's) —
+/// gate `txloss`, ARM64-PLAN §11 item 2a.
+pub static TXDROP_EVERY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static TXDROP_SEEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// How many transmitted frames the knob dropped (the gate asserts a drop did happen).
+pub static TXDROP_DROPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[inline]
+fn txdrop_hit() -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    let n = TXDROP_EVERY.load(Relaxed);
+    if n == 0 { return false; }
+    if TXDROP_SEEN.fetch_add(1, Relaxed) % n != n - 1 { return false; }
+    let k = TXDROP_DROPPED.fetch_add(1, Relaxed) + 1;
+    if k <= 3 { crate::println!("l1: txdrop: the transmitted frame was dropped (#{}, every {}-th)", k, n); }
+    true
+}
+
 impl<'a> TxToken for SmolTx<'a> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
@@ -449,6 +469,11 @@ impl<'a> TxToken for SmolTx<'a> {
             let mut tmp = [0u8; BUF];
             return f(&mut tmp[..len]);   // the card is unavailable — we lose the frame, the machine lives
         };
+        if txdrop_hit() {
+            drop(sh);
+            let mut tmp = [0u8; BUF];
+            return f(&mut tmp[..len]);   // the loss gate: the frame is formatted and never sent
+        }
         // find a free tx slot, reaping completions as needed
         // We wait for a free transmit slot for A LIMITED time: if the device
         // has stopped giving out completions, an eternal loop here would hang the whole core

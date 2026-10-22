@@ -748,6 +748,12 @@ per-packet hardware timestamps the ENA does not give out at all — see `docs/RO
   your hardware can be checked by `kstat net: ... the ring lied N times` — normally there is
   a zero there (under load fractions of a percent: that is a frame that arrived between the read of the word and
   the taking of the lock).
+- `talaria.txdrop=N` — THE LOSS GATE, not a feature: every N-th transmitted frame is dropped
+  on the floor, so that what one lost segment costs the stack's TCP can be measured on a stand
+  that never loses one (the gate `txloss`: a lost segment is recovered by the retransmission
+  timer alone on a request/response connection, and the floor is Linux's 200 ms — it was the
+  RFC's second, and the load generator stalled exactly 1.000 s per drop). `0` (the default) drops
+  nothing; the first three drops are printed (`l1: txdrop: …`).
 - `talaria.netprof=N` — a profile of the datapath by stages, a summary once every N round trips.
 
 **The ENA's diagnostic flags (they are NOT included into the production path, only for measurements):**

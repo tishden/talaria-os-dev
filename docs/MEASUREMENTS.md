@@ -1020,6 +1020,33 @@ ladder median and p99 up to 77-86 k req/s under Linux's, the top rung 92-104 k a
 Gate `gatecost` (an empty read with a 4 KiB and a 1 MiB buffer must cost the same): `c7g.large`
 Talaria 207 / 207 ns, Linux 217 / 216.
 
+### 10.15. The generator's one-second stall was the TCP retransmission floor (2026-10-22)
+
+The redis ladder of 2026-10-21 (`ec2ab-redis-20261021-143739`, `c7g.xlarge`) carried one
+number no instrument of the scheduler could explain: the Talaria generator's **max** at every
+rung from 77 k req/s up was 1 000 067..1 000 124 us — one second plus one RTT, the same at every
+rate — while the Linux generator's max in the same hour was 280-380 us. A maximum that exact is
+a protocol timer, not a scheduler. smoltcp 0.14 keeps RFC 6298's floor, `RTTE_MIN_RTO = 1000`
+ms; a closed-loop request/response connection has no second segment in flight to earn a duplicate
+ACK, so one lost segment is recovered by that timer alone, and one drop at the ceiling cost the
+generator 1.000 s and 100-350 k requests of debt behind it. Linux's floor is 200 ms
+(`TCP_RTO_MIN`).
+
+The fix is one constant in a vendored smoltcp (`kernel/vendor/smoltcp/TALARIA.md`), and the
+gate is a loss gate: `talaria.txdrop=N` drops every N-th TRANSMITTED frame on the floor (a drop
+on the receive side would measure the peer's timer — its reply carries the ACK), and `txloss`
+runs 60 echo rounds against the harness's echo server with every 7th frame lost. Under KVM on the
+dev box:
+
+| | slow rounds (>100 ms) of 60 | each | over 600 ms |
+|---|---:|---:|---:|
+| before | 10 | 1 000 ms | 10 |
+| after | 10 | 200-201 ms | 0 |
+
+What the ladder still owes an answer: why a frame is lost at all once per rung at 77 k+ req/s
+where Linux loses none (the ENA receive ring under a burst is the first suspect) — to be measured
+on EC2 with the drop counters; a drop now costs what it costs Linux.
+
 ## 11. Reproducing any of this
 
 ```sh
