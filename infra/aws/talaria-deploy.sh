@@ -224,8 +224,10 @@ gzip -cf "$IMG" > "$IMG.gz"
 # reconnects every hour or two and breaks all its TCP sessions ("Connection
 # closed" in the middle of scp or dd — and the AMI is not built, and the load stand is lost).
 # Both steps are idempotent (the file is overwritten, the disk is written from scratch), so
-# a drop is a reason to retry, not to give up: up to 4 attempts with a 15 s pause.
-retry() { local n; for n in 1 2 3 4; do "$@" && return 0; echo "   attempt $n failed ($1) — retrying in 15 s"; sleep 15; done; return 1; }
+# a drop is a reason to retry, not to give up: up to 10 attempts with a 15 s pause (four
+# were not enough for a helper whose sshd came up late: "Connection closed" four times in a
+# row cost a whole stand bring-up on 2026-10-22).
+retry() { local n; for n in 1 2 3 4 5 6 7 8 9 10; do "$@" && return 0; echo "   attempt $n failed ($1) — retrying in 15 s"; sleep 15; done; return 1; }
 retry scp -i "$W/talaria-v11.pem" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q "$IMG.gz" ec2-user@"$HIP":/tmp/img.gz
 # The disk is found by the volume's SERIAL NUMBER (for EBS NVMe that is the vol-id
 # without dashes): the nvme order is not guaranteed, and a mistake here would mean
