@@ -1038,6 +1038,56 @@ Two that were the STAND's, not the kernel's, and cost an hour each:
     that never loses a frame (`talaria.txdrop=`): without it the floor is a belief, with it a
     200-ms number on every run (ARM64-PLAN §11 item 2a, MEASUREMENTS §10.15).
 
+62. **A ring's doorbell takes the monotonic counter, not the index.** ENA's admin queue, its
+    completion queue and the asynchronous event queue are rings whose tail and head are u16
+    counters in ena_com: the index is the low bits, the phase flips when the low bits wrap, and
+    the DOORBELL takes the counter itself. Ours wrapped the counter to zero at the ring's depth
+    and wrote the zero. The admin queue is 32 deep and a boot issues fewer commands than that,
+    so nothing was seen until an instrument read `GET_STATS` every ten seconds and the 33rd
+    command put the device into FATAL_ERROR; the event queue is 16 deep and the device posts a
+    keep-alive about every second, so every kernel of every board had told the device a wrapped
+    head within a minute of boot — and a 2-core PostgreSQL server ran at 24.6 k req/s against
+    44.9 k on a kernel with the fix. The lesson is older than the bug: an instrument that
+    exercises a path more often than the product does (a command every 10 s instead of twenty
+    per boot) finds the wrap the product never reached (MEASUREMENTS §10.16, `35b2bcd`).
+
+63. **On arm64 a barrier per page is the flush's price, not the invalidation.** `tlbi vaae1is`
+    is cheap; the `dsb ish` that waits for the broadcast to complete is ~400 ns on a Graviton,
+    and a range flush that paid it per page cost a 14-page `munmap` 5.6 us — and then the
+    "shootdown" after it, which on this machine is the same broadcast flush, paid it again.
+    Linux's `__flush_tlb_range` is one `dsb ishst`, the `tlbi`s back to back, one `dsb ish`.
+    The stat block's `unmap:` line (the walk / the flush / the acknowledgements split, written
+    for x86's IPIs) named it without a new instrument: 12.5 → 2.8 us per `munmap` on the stand
+    (`5e97998`). A x86 mechanism ported literally can be correct and still pay for a protocol
+    the machine does not need.
+
+64. **Localise a loss by substitution before by instrument.** Seven probes with counters at
+    every layer bounded the lost frame (MEASUREMENTS §10.16) — the sender's device had
+    transmitted it, the receiver's device had not received it, nothing above either driver
+    dropped it — and still could not say whose it was. Two substitutions said more than all the
+    counters: the Talaria generator against the Linux server loses nothing, the Linux generator
+    against the Talaria server loses nothing, only Talaria against Talaria loses. One stand
+    phase each (`ab-phase.sh SRV=linux`, `GEN=linux`). When a stand has a known-good peer,
+    swap it in first; the counters then have a side to look at.
+
+65. **A periodic print on the generator makes the retransmissions it is meant to count.** The
+    stat block every 10 s on both nodes of a redis pair turned one lost frame per run into
+    thousands of RTOs and duplicate replies: printing a 9 KB block through a Nitro serial port
+    stalls the node past the 200-ms timer. The accounting had to move to a quiet-point report —
+    printed once the port has been silent for three seconds after a run — so the two nodes'
+    counters meet at the end of a run with nothing in flight and nothing perturbed
+    (`talaria.netport=`, `arm64-inst`). A counter read at a quiet point is worth more than a
+    hundred read mid-run.
+
+66. **Terraform's state lives in the source tree, so a live stand is one per worktree.** The
+    stand scripts take `STAND_DIR` for `stand.env` and the key, but `terraform -chdir` keeps its
+    state under `bench/suite/infra/terraform` of the tree the script runs from. Two probes run
+    from one worktree in two regions destroyed each other: each "found a live stand" and
+    tore down the other's instances with the shared state (two hours of EC2, 2026-10-23). The
+    rule that the regions-per-worktree layout had encoded was never written down; it is now:
+    one live stand per worktree, and a second region means a second worktree (`git worktree add
+    --detach`, the built kernel and stub copied with `cp -p`, the workload trees linked).
+
 ## 7. Already closed — do not re-open without new evidence
 
 Each of these was written, measured and rejected. Re-opening one costs a stand
