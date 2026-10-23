@@ -350,6 +350,7 @@ impl Ena {
             let w0 = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(ce)) };
             let cphase = (w0 >> 24) & 1 != 0;
             if cphase == self.acq_phase {
+                crate::arch::barrier::dma_rmb(); // the answer's words after the phase bit
                 let mut out = [0u32; 16];
                 unsafe { core::ptr::copy_nonoverlapping(crate::mem::kptr::<u8>(ce), out.as_mut_ptr() as *mut u8, ACQ_ENTRY); }
                 self.acq_head = self.acq_head.wrapping_add(1);
@@ -501,6 +502,11 @@ impl Ena {
         let ce = self.rx_cq + idx * RX_CDESC_SZ as u64;
         let status = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(ce)) };
         if ((status >> 24) & 1 != 0) != self.rx_cq_phase { return None; }
+        // The rest of the completion (the length, the buffer's id) and the frame itself are read
+        // only AFTER the phase bit was seen: ena_com's dma_rmb() after the phase check. On x86
+        // loads keep their order by themselves; on arm64 they do not, and a load issued before
+        // the phase's could bring the previous lap's id or length (ARM64-PLAN §12 item 1).
+        crate::arch::barrier::dma_rmb();
         let len = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u16>(ce + 4)) } as usize;
         let req_id = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u16>(ce + 6)) } as usize;
         self.rx_cq_head = self.rx_cq_head.wrapping_add(1);
@@ -714,6 +720,7 @@ impl Ena {
             let e = self.aenq + ((self.aenq_head & (AENQ_DEPTH - 1)) as u64) * AENQ_ENTRY as u64;
             let flags = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(e + 4)) };
             if ((flags >> 0) & 1 != 0) != self.aenq_phase { break; }
+            crate::arch::barrier::dma_rmb();
             self.aenq_head = self.aenq_head.wrapping_add(1);
             if self.aenq_head & (AENQ_DEPTH - 1) == 0 { self.aenq_phase = !self.aenq_phase; }
             w32(self.regs + REG_AENQ_HEAD_DB, self.aenq_head as u32);
