@@ -331,24 +331,29 @@ impl Ena {
         let cid = self.aq_cmd_id;
         // the aq_common_desc in LE u32: command_id[15:0] | opcode[23:16] | flags[31:24] (bit 0 of the flags is the phase)
         cmd[0] = (cmd[0] & 0xFFFF_0000) | (cid as u32) | ((self.aq_phase_flag as u32) << 24);
-        let slot = self.aq + (self.aq_tail as u64) * AQ_ENTRY as u64;
+        // THE TAIL IS MONOTONIC, THE INDEX IS ITS LOW BITS (ena_com: `sq.tail++`, the phase flips
+        // when `tail & mask == 0`, and the DOORBELL takes the counter itself). It used to wrap to
+        // zero at AQ_DEPTH and write 0 into the doorbell: no boot ever issued 32 admin commands
+        // until GET_STATS was read every 10 s — the 33rd command put the device into
+        // DEV_STS FATAL_ERROR (0x21) and the datapath died (2026-10-22, §12 item 1a's probe).
+        let slot = self.aq + ((self.aq_tail & (AQ_DEPTH - 1)) as u64) * AQ_ENTRY as u64;
         unsafe { core::ptr::copy_nonoverlapping(cmd.as_ptr() as *const u8, crate::mem::kptr::<u8>(slot), AQ_ENTRY); }
         crate::arch::barrier::dma_wmb();
-        self.aq_tail += 1;
-        if self.aq_tail == AQ_DEPTH { self.aq_tail = 0; self.aq_phase_flag = !self.aq_phase_flag; }
+        self.aq_tail = self.aq_tail.wrapping_add(1);
+        if self.aq_tail & (AQ_DEPTH - 1) == 0 { self.aq_phase_flag = !self.aq_phase_flag; }
         w32(self.regs + REG_AQ_DB, self.aq_tail as u32);
         // wait for the completion (polling, up to ~2 s)
         let hz = crate::tsc::hz();
         let t0 = crate::tsc::rdtsc();
         loop {
-            let ce = self.acq + (self.acq_head as u64) * ACQ_ENTRY as u64;
+            let ce = self.acq + ((self.acq_head & (AQ_DEPTH - 1)) as u64) * ACQ_ENTRY as u64;
             let w0 = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(ce)) };
             let cphase = (w0 >> 24) & 1 != 0;
             if cphase == self.acq_phase {
                 let mut out = [0u32; 16];
                 unsafe { core::ptr::copy_nonoverlapping(crate::mem::kptr::<u8>(ce), out.as_mut_ptr() as *mut u8, ACQ_ENTRY); }
-                self.acq_head = (self.acq_head + 1) % AQ_DEPTH;
-                if self.acq_head == 0 { self.acq_phase = !self.acq_phase; }
+                self.acq_head = self.acq_head.wrapping_add(1);
+                if self.acq_head & (AQ_DEPTH - 1) == 0 { self.acq_phase = !self.acq_phase; }
                 let status = ((w0 >> 16) & 0xFF) as u8;
                 if DBG.load(core::sync::atomic::Ordering::Relaxed) {
                     crate::println!("ena[dbg]: cmd[0..6]={:#x} {:#x} {:#x} {:#x} {:#x} {:#x} -> resp w0={:#x} w1={:#x} w2={:#x} w3={:#x}",
@@ -704,11 +709,13 @@ impl Ena {
     /// move the head — otherwise the device considers the queue overflowed and resets.
     pub fn drain_aenq(&mut self) {
         loop {
-            let e = self.aenq + (self.aenq_head as u64) * AENQ_ENTRY as u64;
+            // The head is monotonic and the doorbell takes the counter (ena_com's aenq.head++),
+            // the index is its low bits — the same rule as the admin queue's tail (see `admin`).
+            let e = self.aenq + ((self.aenq_head & (AENQ_DEPTH - 1)) as u64) * AENQ_ENTRY as u64;
             let flags = unsafe { core::ptr::read_volatile(crate::mem::kptr::<u32>(e + 4)) };
             if ((flags >> 0) & 1 != 0) != self.aenq_phase { break; }
-            self.aenq_head += 1;
-            if self.aenq_head == AENQ_DEPTH { self.aenq_head = 0; self.aenq_phase = !self.aenq_phase; }
+            self.aenq_head = self.aenq_head.wrapping_add(1);
+            if self.aenq_head & (AENQ_DEPTH - 1) == 0 { self.aenq_phase = !self.aenq_phase; }
             w32(self.regs + REG_AENQ_HEAD_DB, self.aenq_head as u32);
         }
     }
