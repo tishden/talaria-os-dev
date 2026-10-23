@@ -2876,6 +2876,22 @@ because the board is sixteen days and six kernel changes old.
    (the kernel is shared; sessions 33-43 left it ours — a regression there would be ours too).
    Both regressions and `validate.sh` before every EC2 run, as in §11 item 6.
 
+### 12.1. Progress (2026-10-23)
+
+Item 0 is done (MEASUREMENTS §10.16, both generators, `summary-genlinux.md` next to
+`summary.md`); the PostgreSQL phase under the Linux generator needed the manifest's
+`PROBE_ARGS` (`ebe4dae`) and was retaken. Item 1: the lost frame is measured to the frame and
+bounded to "Talaria at both ends, between the two ENAs", not named — the next instrument is a
+VPC traffic mirror of both ENIs; a sendto's price is the stack's pass, nothing hidden. Item 3:
+the AENQ/admin wrap (`35b2bcd`) and the arm64 range flush (`5e97998`) are fixed and gated; the
+×2 of the server's ceiling is bimodal within a boot, its per-core accounting is written down,
+its mechanism is open — the waiter knobs do not move it. Item 5: the nginx server's profile is
+taken (`writev` 3.1 us is the gap). Items 2, 4, 6, 7 are not started. The instruments live on
+`arm64-inst` (`lossprobe-ec2.sh`, `kernprobe-ec2.sh`, `genprobe-ec2.sh`, the event ring, the
+port counters, the frame classifier, the quiet-point report, the five-leg sendto split); what
+is correct by the spec is in `arm64-port` (`dma_rmb` after the phase bit, the monotonic ring
+counters, the batched flush). ENGINEERING-NOTES 62-66 hold the lessons, 66 in particular.
+
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and

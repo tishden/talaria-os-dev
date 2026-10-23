@@ -1047,6 +1047,93 @@ What the ladder still owes an answer: why a frame is lost at all once per rung a
 where Linux loses none (the ENA receive ring under a burst is the first suspect) — to be measured
 on EC2 with the drop counters; a drop now costs what it costs Linux.
 
+### 10.16. The re-take with both generators, and what the instruments named (2026-10-22/23)
+
+**The board** (ARM64-PLAN §12 item 0): HEAD 14b6720's kernel (`e1682979`), `c7g.xlarge` pairs,
+three repeats, each workload's ladder taken twice on one bring-up — with its own generator and
+with the Linux generator against the same Talaria server (`GENLINUX=1`,
+`bench/suite/lib/genboard.sh`). Two stands in two regions (`ec2all-a64-20261022-200847`
+ap-northeast-1, `ec2all-a64-20261022-193452` us-west-2). Faster / parity / slower:
+
+| workload | own generators p50 / p99 / p99.9 / p99.99 | Linux generator p50 / p99 / p99.9 / p99.99 | server ceilings under the Linux generator |
+|---|---|---|---|
+| redis | 7/13/0, 18/2/0, 19/1/0, 18/2/0 | 15/5/0, 20/0/0, 20/0/0, 20/0/0 | 139-164 k (Linux pair 125-145 k) |
+| mongoose | 2/5/3, 6/3/1, 9/1/0, 9/0/1 | 3/4/2, 7/2/0, 7/1/1, 5/1/3 | dyn 136 k, file 89 k |
+| mysql | 2/7/1, 8/0/2, 6/4/0, 7/3/0 | 2/6/2, 8/0/2, 6/3/1, 8/1/1 | pk 49.5 k, select1 74.6 k |
+| nginx | 3/6/0, 7/2/0, 8/0/1, 7/0/2 | 5/5/0, 10/0/0, 8/2/0, 8/1/1 | nop 126.8 k (Linux 147.2), file 81.9 k (105.3) |
+| mongodb | 5/5/5, 5/2/8, 4/0/11, 8/1/6 | 4/6/5, 4/3/8, 3/2/10, 6/1/8 | — |
+| postgresql | 0/0/10, 1/0/9, 1/0/9, 1/1/7 | (phase cancelled: the probe's role) | select1 24.8 k (Linux 43.6), pk 10.3 k (25.5) |
+
+The losses of mongoose `dyn` and redis's top rungs are the generator's debt (a 200-ms maximum
+drags a block of the open loop behind it — below); mysql `select1`'s p50 at 40 k (47 against
+42.5 us) and mongodb's tails are the server's (items 4 and 6); PostgreSQL is a defect of its
+own (below).
+
+**The lost frame** (item 1). The 200-ms maximum of §10.15 was taken apart with the vendored
+smoltcp counting every debug-level event by site and keeping the last eight with their text,
+`talaria.netport=6379` counting the segments in and out on the workload's port, the device's
+own frame counters (`GET_STATS`) beside the driver's, a classifier of frames at the driver, and
+a report printed three seconds after the port falls silent — all on the `arm64-inst` branch
+(`bench/suite/lossprobe-ec2.sh`, probes 2-8 in us-east-1). What is now known:
+
+- it is not one frame per run: a lossy run (every rung from 62 k req/s up, none at 36 k) loses
+  170-260 request frames in 70 s, ~3 per second, each one a 200-ms RTO on its connection and a
+  retransmission of the server's unacknowledged reply (the generator's challenge ACKs equal
+  the server's retransmissions to the frame);
+- the direction is one per stand: the generator's requests on three stands, the server's
+  replies on one;
+- the device's transmit counter equals the driver's on the sender and the device's receive
+  counter equals the driver's on the receiver, to the frame, at every quiet point; nothing
+  is dropped by the stack above the driver (no malformed, no held card, no ring stall), the
+  ENA `rx_drops`/`tx_drops` and the five Nitro allowances are zero;
+- the Talaria generator against the Linux server loses nothing at 129 k req/s (max 1-2 ms,
+  zero requests over 100 ms), and the Linux generator against the Talaria server loses nothing
+  on every board — the loss needs Talaria at BOTH ends;
+- `dma_rmb` after the completion's phase bit (kept: it is the spec), the receive-completion
+  head doorbell off (`talaria.ena=nocqdb`), and the burst-budgeted LLQ doorbell were each
+  excluded by a probe; `talaria.ena=nollq` and `nowc` are not usable as A/Bs (the first does
+  not hold 35 k req/s, the second does not boot the server).
+
+So a frame that one Talaria ENA counted as transmitted is not counted by the other Talaria ENA
+as received, only when both ends are ours. The next instrument is outside the kernel: a VPC
+traffic mirror of both ENIs, to see whether the frame leaves the sender's ENI and whether it
+reaches the receiver's. Until then the loss is what it costs Linux at 200 ms (§10.15), and the
+board's "debt" column is where it shows.
+
+**A sendto's price** (item 1b, `talaria.sysprof=1` with the five-leg split): at 105 k req/s the
+entry to the dispatcher 153 ns, to `netsys::write` 56, the write itself 1 710 (of which before
+the lock 73, the queueing 53, the pass to the card 580-1 710 ns growing with the rate: the pass
+also drains the receive ring), the return 67, the exit 20. The pointer gate is 65 ns of it.
+There is no unexplained microsecond; the price is the pass.
+
+**PostgreSQL** (item 3). Three defects, two fixed:
+
+1. The ENA admin queue's tail and the AENQ head wrapped to zero and were written into the
+   doorbell (ena_com keeps them monotonic, the index is the low bits). The AENQ is 16 deep and
+   the device posts an event about every second, so every board kernel told the device a
+   wrapped head within a minute of boot. Found by reading `GET_STATS` every 10 s: the 33rd
+   admin command put the device into FATAL_ERROR. Fixed (`35b2bcd`).
+2. `munmap` of 14 pages per `pk` query cost 12.5 us: the arm64 range flush paid a `dsb ish`
+   per page, and the "shootdown" after it was the same broadcast flush once more. One pair of
+   barriers around back-to-back `tlbi` (Linux's `__flush_tlb_range`): 2.8 us on the stand
+   (`5e97998`).
+3. The ceiling is bimodal within one boot — select1 45 052 / 25 689 / 45 179 req/s in three
+   consecutive ten-second probes, pk 10 353 / 10 597 / 21 715 — and the slow state is the
+   usual one (three stands of four; the 44.9 k / 15.9 k run of us-east-1 was the exception).
+   In the slow state the syscalls are no slower than in the fast one (sendto 3.6 us, recvfrom
+   1.1), the clock is the same 2.55 GHz, the IPC is 0.62/0.53 against 0.75/0.52 with more LLC
+   misses per instruction, and the per-task accounting of a 10-s window reads: core 1 runs four
+   backends at 2.44 s each (saturated), core 0 three at 2.2 s and one at 0.4-1.2 s — 82 us of
+   "running" per `SELECT 1`, which is the spin in `epoll_wait` under the manifest's
+   `netyield=5`. Parking the waiters under interrupts (`netirq=1 netpark=1000000`), `netyield`
+   2, 20 and 0 do not change the ceiling (0 collapses it). The mechanism of the ×2 is not
+   named; the facts are here for the next session.
+
+**nginx** (item 5): the server is `smp=1`; per request `recvfrom` 591 ns, `writev` 3.1 us,
+`epoll_pwait` 19.6 us with its wait. One core serves 125.8 k `nop` req/s at 8.0 us each against
+Linux's 6.6; the gap is about `writev`'s price (the assembly under the stack's lock, then the
+pass to the card that also drains the receive ring).
+
 ## 11. Reproducing any of this
 
 ```sh
