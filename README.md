@@ -31,10 +31,11 @@ Every lost point is analysed by name (`docs/MEASUREMENTS.md` §2.3).
 ## What is different
 
 - **Synchronisation without busy-spinning.** A futex sleeps *in the kernel* with
-  `mwait` on the user's own word, so the waker's store wakes it with no IPI and
-  no syscall. Plain pthread mutexes and condition variables in an ordinary
-  binary: futex round trip 165 ns, condvar 1.3 µs across cores, 0 % CPU while
-  waiting.
+  `mwait` on the user's own word, so the waker's store itself wakes it, with no
+  IPI (stock musl's `FUTEX_WAKE` still follows and finds the sleeper awake;
+  libtsync skips even that syscall). Plain pthread mutexes and condition
+  variables in an ordinary binary: futex round trip 165 ns, condvar 1.3 µs
+  across cores, 0 % CPU while waiting.
 - **Real software, unmodified:** PostgreSQL 16, MariaDB 10.11, MongoDB 4.0
   (persistent, on a journalled ext2), OpenJDK 21, ClickHouse 25.8, Redis, nginx,
   mongoose, SObjectizer, busybox, Lua, SQLite, QuickJS.

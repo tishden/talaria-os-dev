@@ -26,13 +26,14 @@ connections per node"; scaling out is done with VM instances. More in "Where
 the connection ceiling comes from" in `docs/POSITIONING.md`.
 
 The key mechanism: **synchronisation without busy-spinning**. A futex sleeps IN
-THE KERNEL with `mwait` on the user's own word; the waker's store wakes the
-sleeper with no IPI and no syscall. Plain pthread mutexes and condition
-variables in an ordinary Linux binary get sub-microsecond wakeups at 0 % CPU
-while waiting (mechanics: DEVELOPMENT-GUIDE §6b, results: MEASUREMENTS §6). It
-is the largest single mechanism, not the only one: the rest — the scheduler, the
-memory, the file system, the datapath, the syscall path and the cost of watching
-all of it — are enumerated in §3a.
+THE KERNEL with `mwait` on the user's own word; the waker's store itself wakes
+the sleeper, with no IPI (the `FUTEX_WAKE` stock musl still issues finds it
+awake; libtsync's `upark` skips that syscall too). Plain pthread mutexes and
+condition variables in an ordinary Linux binary get sub-microsecond wakeups at
+0 % CPU while waiting (mechanics: DEVELOPMENT-GUIDE §6b, results: MEASUREMENTS
+§6). It is the largest single mechanism, not the only one: the rest — the
+scheduler, the memory, the file system, the datapath, the syscall path and the
+cost of watching all of it — are enumerated in §3a.
 
 Tested with real software: PostgreSQL 16, MariaDB 10.11, MongoDB 4.0
 (persistent network servers), OpenJDK 21, ClickHouse 25.8, SObjectizer-5 (an
@@ -107,8 +108,8 @@ Linux guest in the same VM topology on the same host. Details and methodology:
 
 What is behind this (all at 0 % CPU while waiting, without burning cores): the
 waiter sleeps in the kernel with `mwait` right on the futex word; the waker's
-store wakes it with no IPI or syscall; on the same core — a directed switch;
-across VMs — the same words in ivshmem.
+store wakes it with no IPI (and, under libtsync, with no wake syscall); on the
+same core — a directed switch; across VMs — the same words in ivshmem.
 
 ### Real workloads against Linux (EC2, board 41)
 
@@ -170,9 +171,11 @@ validated at boot — an unknown knob is a boot refusal) and `docs/USER-GUIDE.md
   WAITPKG/MONITORX in ring 3, else MONITOR/MWAIT in ring 0, else `hlt` + an IPI
   kick; `talaria.sync=` forces one for an A/B.
 - **The waiter sleeps on the application's OWN futex word.** The waker's plain
-  `mov` in user space wakes the core: no syscall, no IPI, nothing to deliver.
-  That is why an unmodified musl `pthread` gets 165 ns RTT across cores at 0 %
-  CPU while waiting.
+  `mov` in user space wakes the core: no IPI, nothing to deliver. Stock musl
+  still follows the store with `FUTEX_WAKE`, which by then only marks the
+  waiter woken (and on the same core switches straight to it); the syscall
+  itself is skipped by libtsync and `upark` (below). That is why an unmodified
+  musl `pthread` gets 165 ns RTT across cores at 0 % CPU while waiting.
 - **A wake is a directed switch, not a rotation.** On the same core the waker
   leaves a hint and the scheduler takes exactly that task; a sleeper on another
   core gets a resched IPI with the hint (before that a woken thread waited for
