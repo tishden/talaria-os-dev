@@ -250,8 +250,16 @@ core::arch::global_asm!(r#"
     ldr x10, [x9, #40]
     cbz x10, 6f
     str xzr, [x9, #40]  /* the decision is spent: x86's stub, which loads it on every pass, reloaded a stale root (ARM64-PLAN §11 item 0); here only another frame loads it, but a word that orders an action is cleared by its doer */
+    /* the word carries the ASID (mmu::ttbr_of): two spaces with their own ASIDs switch with
+       the register write alone; ASID 0 on either side is the old full invalidation */
+    mrs x11, ttbr0_el1
     msr ttbr0_el1, x10
     isb
+    lsr x10, x10, #48
+    lsr x11, x11, #48
+    cbz x10, 7f
+    cbnz x11, 6f
+7:
     tlbi vmalle1
     dsb ish
     isb

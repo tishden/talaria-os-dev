@@ -332,6 +332,7 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.netyield", Kind::Num, "a network waiter yields the core after N µs (0 — it does not)"),
     once("talaria.nic", Kind::Text, "the requested NIC driver"),
     once("talaria.nobalance", Kind::Flag, "switch the balancer off"),
+    once("talaria.asid", Kind::Flag, "arm64: 0 — every space on ASID 0, a full TLB invalidation at every switch (the behaviour before ASIDs; the A/B)"),
     once("talaria.noshoot", Kind::Flag, "switch TLB shootdowns to neighbours off (diagnostics)"),
     once("talaria.nosteal", Kind::Flag, "switch work stealing off"),
     once("talaria.nowakebal", Kind::Flag, "switch placement on wakeup off"),
