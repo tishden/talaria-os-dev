@@ -110,7 +110,9 @@ pub fn pv_eoi_addr(_cpu: usize) -> u64 { 0 }
 #[inline] pub fn set_sig_newrsp(v: u64) { let b = block(); if !b.is_null() { unsafe { (*b).sig_newrsp = v; } } }
 #[inline] pub fn set_cur_task(t: u64) { let b = block(); if !b.is_null() { unsafe { (*b).cur_task = t; } } }
 #[inline] pub fn cur_task() -> u64 { let b = block(); if b.is_null() { u64::MAX } else { unsafe { (*b).cur_task } } }
-#[inline] pub fn set_sched_cr3(v: u64) { let b = block(); if !b.is_null() { unsafe { (*b).sched_root = v; } } }
+/// The root word carries the space's ASID (`mmu::ttbr_of`): the exit path writes it into
+/// `TTBR0_EL1` as it is and invalidates only when ASID 0 is on either side.
+#[inline] pub fn set_sched_cr3(v: u64) { let b = block(); if !b.is_null() { unsafe { (*b).sched_root = if v == 0 { 0 } else { super::mmu::ttbr_of(v) }; } } }
 #[inline] pub fn set_off_stack(t: u64) { let b = block(); if !b.is_null() { unsafe { (*b).off_stack = t; } } }
 
 /// The kernel stack for an EL0 -> EL1 entry on the current core (+8).

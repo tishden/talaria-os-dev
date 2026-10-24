@@ -856,6 +856,11 @@ unsafe fn cr3_root() -> *mut Pte {
 /// publishes (P4), and never while another core is mid-walk of a table this core is
 /// freeing — that ordering is the shootdown's business.
 unsafe fn flush_tlb() {
+    // arm64 with ASIDs: this core's flush is not enough any more — a core that ran a space
+    // keeps its translations past the switch (`mmu::asid_on`), so the flush that relied on the
+    // switch to clean the other cores is the broadcast one (ARM64-PLAN §12 item 3).
+    #[cfg(target_arch = "aarch64")]
+    if mmu::asid_on() { mmu::flush_all_is(); return; }
     mmu::flush_all();
 }
 
@@ -2790,6 +2795,8 @@ pub fn new_address_space() -> u64 {
         }
         pte_w(kptr::<Pte>(new_pml4), new_pdpt | PTE_P | PTE_RW | PTE_US);
         AS_LIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        #[cfg(target_arch = "aarch64")]
+        mmu::asid_assign(new_pml4);
         new_pml4
     }
 }
@@ -2846,6 +2853,8 @@ pub fn new_process_space() -> u64 {
         if strict() { strict_strip(kptr::<Pte>(pdpt), kptr::<Pte>(pd0), kgb); }
         pte_w(kptr::<Pte>(pml4), pdpt | PTE_P | PTE_RW | PTE_US);
         AS_LIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        #[cfg(target_arch = "aarch64")]
+        mmu::asid_assign(pml4);
         pml4
     }
 }
@@ -3575,6 +3584,10 @@ pub fn free_address_space(pml4: u64) {
     // PostgreSQL gate with 30 backends passed. The rule: an entry EQUAL to the entry of
     // the reference kernel AS in the same slot is a shared one, we do not touch it (the gate
     // `talaria.test=sharedpd`).
+    // arm64: the space leaves the ASID table first (a new space that gets this root's frame
+    // must not find its ASID); the ASID itself is returned only after the broadcast flush below.
+    #[cfg(target_arch = "aarch64")]
+    let asid = mmu::asid_forget(pml4);
     let saved = current_cr3() & ADDR_MASK;
     let kern = kernel_cr3() & ADDR_MASK;
     let swapped = kern != 0 && kern != saved;
@@ -3606,6 +3619,8 @@ pub fn free_address_space(pml4: u64) {
         crate::mem::free_contig(pml4, 1);
         flush_tlb();
     }
+    #[cfg(target_arch = "aarch64")]
+    mmu::asid_free(asid);
     // SAFETY: P5 — the CR3 this core came in with is restored.
     if swapped { unsafe { switch(saved); } }
 }

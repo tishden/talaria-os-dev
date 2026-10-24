@@ -146,11 +146,187 @@ pub fn hw_dirty_on() -> bool { hw_dirty() }
 #[inline(always)]
 pub fn root() -> u64 { cpu::ttbr0_el1() & ADDR_MASK }
 
-/// Make `root` the active root table. As a CR3 write on x86 without PCID: this core's
-/// translations are dropped (ASID 0 is shared by every space for now).
+// ── ASIDs: a space's translations survive a switch (ARM64-PLAN §4.3, §12 item 3) ─────────
+//
+// Every process space gets its own 16-bit ASID (`TCR.AS = 1`, written into `TTBR0[63:48]`), so
+// a switch between two of them is `msr ttbr0_el1; isb` with no invalidation — x86's PCID, which
+// x86 Talaria never used. Before, every space shared ASID 0 and EVERY switch was a full
+// `tlbi vmalle1`: the PostgreSQL server's waiters rotate between processes every few
+// microseconds (~170 000 switches a second per core on the board's stand), each one entered
+// the next process with a cold TLB — the kernel's translations included, everything is nG —
+// and the slow state of the server ran its user code at IPC 0.53-0.62.
+//
+// WHAT KEEPS IT CORRECT. The kernel was written for x86 without PCID, where a space that is not
+// running on a core holds nothing in that core's TLB: the root switch dropped it. With ASIDs a
+// core keeps the translations of every space that ran on it. The broadcast invalidations
+// (`flush_page`, `flush_range_is`, `flush_all_is`: `tlbi ...is` over all ASIDs) already reach
+// every core; the one LOCAL operation, `paging::flush_tlb`, becomes the broadcast full flush
+// while ASIDs are on (`asid_on`), so whatever the switch used to drop is dropped at once
+// everywhere. A space's ASID goes back to the pool only after `free_address_space`'s flush
+// (broadcast), so a reused ASID finds nothing of its previous owner. A root the table does not
+// know (the kernel's own, a space created before the table) runs on ASID 0 with the old
+// sequence — a full invalidation on entering AND on leaving ASID 0 — so nothing of a stranger is
+// ever tagged with a live ASID. `talaria.asid=0` is the old behaviour throughout (the A/B).
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+
+/// ASIDs on (`talaria.asid=0` switches them off at boot, before the first process).
+pub static ASID_ON: AtomicBool = AtomicBool::new(true);
+/// The table root -> ASID: open addressing, linear probing, backward-shift deletion. Writers
+/// take `ASID_LOCK`; readers are lock-free under the sequence `ASID_SEQ` and fall back to
+/// ASID 0 (always safe) when a writer moved under them.
+const ASID_SLOTS: usize = 8192;
+/// At most this many live spaces carry an ASID (the rest run on ASID 0, correctly and slower).
+const ASID_MAX: usize = 4096;
+static ASID_KEY: [AtomicU64; ASID_SLOTS] = [const { AtomicU64::new(0) }; ASID_SLOTS];
+static ASID_VAL: [AtomicU16; ASID_SLOTS] = [const { AtomicU16::new(0) }; ASID_SLOTS];
+static ASID_SEQ: AtomicU64 = AtomicU64::new(0);
+static ASID_LOCK: AtomicBool = AtomicBool::new(false);
+/// The ASIDs in use (bit `a` — ASID `a`; ASID 0 is never handed out).
+static ASID_USED: [AtomicU64; ASID_MAX / 64] = [const { AtomicU64::new(0) }; ASID_MAX / 64];
+/// For `stat:` — spaces given an ASID, spaces that found the pool empty, switches that kept
+/// the TLB, switches that had to invalidate.
+pub static ASID_GIVEN: AtomicU64 = AtomicU64::new(0);
+pub static ASID_EMPTY: AtomicU64 = AtomicU64::new(0);
+pub static SWITCH_KEPT: AtomicU64 = AtomicU64::new(0);
+pub static SWITCH_FLUSHED: AtomicU64 = AtomicU64::new(0);
+
+#[inline(always)]
+pub fn asid_on() -> bool { ASID_ON.load(Ordering::Relaxed) }
+
+#[inline(always)]
+fn asid_hash(root: u64) -> usize {
+    (((root >> 12).wrapping_mul(0x9E37_79B9_7F4A_7C15)) >> (64 - 13)) as usize & (ASID_SLOTS - 1)
+}
+
+fn asid_lock() {
+    while ASID_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        core::hint::spin_loop();
+    }
+    // odd: a writer is inside
+    ASID_SEQ.fetch_add(1, Ordering::AcqRel);
+}
+fn asid_unlock() {
+    ASID_SEQ.fetch_add(1, Ordering::AcqRel);
+    ASID_LOCK.store(false, Ordering::Release);
+}
+
+/// The ASID of `root` (0 — none: the kernel's root, an unknown one, ASIDs off).
+#[inline]
+pub fn asid_of(root: u64) -> u64 {
+    if !asid_on() { return 0; }
+    let key = root & ADDR_MASK;
+    if key == 0 { return 0; }
+    let s0 = ASID_SEQ.load(Ordering::Acquire);
+    if s0 & 1 != 0 { return 0; }
+    let mut i = asid_hash(key);
+    let mut a = 0u64;
+    for _ in 0..ASID_SLOTS {
+        let k = ASID_KEY[i].load(Ordering::Acquire);
+        if k == 0 { break; }
+        if k == key { a = ASID_VAL[i].load(Ordering::Acquire) as u64; break; }
+        i = (i + 1) & (ASID_SLOTS - 1);
+    }
+    if ASID_SEQ.load(Ordering::Acquire) != s0 { return 0; }
+    a
+}
+
+/// The `TTBR0_EL1` value for `root`: the table's address and its ASID.
+#[inline]
+pub fn ttbr_of(root: u64) -> u64 { (root & ADDR_MASK) | (asid_of(root) << 48) }
+
+/// Give the new space `root` an ASID (`paging::new_address_space`/`new_process_space`, before the
+/// space is ever loaded). No ASID left — the space runs on ASID 0, correctly.
+pub fn asid_assign(root: u64) {
+    if !asid_on() { return; }
+    let key = root & ADDR_MASK;
+    asid_lock();
+    let mut a = 0usize;
+    'find: for w in 0..ASID_MAX / 64 {
+        let v = ASID_USED[w].load(Ordering::Relaxed);
+        let free = !v & if w == 0 { !1u64 } else { !0u64 };
+        if free != 0 {
+            let b = free.trailing_zeros() as usize;
+            ASID_USED[w].store(v | (1 << b), Ordering::Relaxed);
+            a = w * 64 + b;
+            break 'find;
+        }
+    }
+    if a == 0 {
+        asid_unlock();
+        ASID_EMPTY.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let mut i = asid_hash(key);
+    loop {
+        let k = ASID_KEY[i].load(Ordering::Relaxed);
+        if k == 0 || k == key { break; }
+        i = (i + 1) & (ASID_SLOTS - 1);
+    }
+    ASID_VAL[i].store(a as u16, Ordering::Release);
+    ASID_KEY[i].store(key, Ordering::Release);
+    asid_unlock();
+    ASID_GIVEN.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Take `root` out of the table (the space is being freed; nobody runs it). The ASID is returned
+/// separately, by `asid_free`, AFTER the broadcast flush — until then it is reserved.
+pub fn asid_forget(root: u64) -> u64 {
+    if !asid_on() { return 0; }
+    let key = root & ADDR_MASK;
+    asid_lock();
+    let mut i = asid_hash(key);
+    let mut a = 0u64;
+    for _ in 0..ASID_SLOTS {
+        let k = ASID_KEY[i].load(Ordering::Relaxed);
+        if k == 0 { break; }
+        if k == key {
+            a = ASID_VAL[i].load(Ordering::Relaxed) as u64;
+            // backward-shift deletion: the entries after the hole that hash at or before it move up
+            let mut hole = i;
+            let mut j = (i + 1) & (ASID_SLOTS - 1);
+            loop {
+                let kj = ASID_KEY[j].load(Ordering::Relaxed);
+                if kj == 0 { break; }
+                let h = asid_hash(kj);
+                // is `h` cyclically outside (hole, j]? then the entry may fill the hole
+                let outside = if hole <= j { h <= hole || h > j } else { h <= hole && h > j };
+                if outside {
+                    ASID_VAL[hole].store(ASID_VAL[j].load(Ordering::Relaxed), Ordering::Release);
+                    ASID_KEY[hole].store(kj, Ordering::Release);
+                    hole = j;
+                }
+                j = (j + 1) & (ASID_SLOTS - 1);
+            }
+            ASID_KEY[hole].store(0, Ordering::Release);
+            ASID_VAL[hole].store(0, Ordering::Release);
+            break;
+        }
+        i = (i + 1) & (ASID_SLOTS - 1);
+    }
+    asid_unlock();
+    a
+}
+
+/// Return an ASID to the pool — only after a broadcast invalidation that covered it.
+pub fn asid_free(a: u64) {
+    if a == 0 || a as usize >= ASID_MAX { return; }
+    ASID_USED[a as usize / 64].fetch_and(!(1u64 << (a % 64)), Ordering::AcqRel);
+}
+
+/// Make `root` the active root table. Two spaces with their own ASIDs: the register write
+/// alone, the old space's translations stay tagged with its ASID. ASID 0 on either side (the
+/// kernel's root, an unknown one, ASIDs off): as a CR3 write on x86 without PCID — this core's
+/// translations are dropped.
 #[inline(always)]
 pub unsafe fn set_root(root: u64) {
-    // Every space shares ASID 0 for now, so the old space's translations must be gone
+    let new = ttbr_of(root);
+    if new >> 48 != 0 && cpu::ttbr0_el1() >> 48 != 0 {
+        SWITCH_KEPT.fetch_add(1, Ordering::Relaxed);
+        core::arch::asm!("msr ttbr0_el1, {}", "isb", in(reg) new, options(nostack));
+        return;
+    }
+    SWITCH_FLUSHED.fetch_add(1, Ordering::Relaxed);
+    // ASID 0 is shared by every space without its own, so the old space's translations must be gone
     // BEFORE the new root can be walked — and any that a speculative walk brings in during
     // the switch, after it: the invalidate on both sides, completed (`dsb ish`, not `nsh`:
     // the walks are inner-shareable), and an `isb` so that nothing fetched under the old
@@ -166,7 +342,7 @@ pub unsafe fn set_root(root: u64) {
         "tlbi vmalle1",
         "dsb ish",
         "isb",
-        in(reg) root & ADDR_MASK, options(nostack));
+        in(reg) new, options(nostack));
 }
 
 /// Drop every translation this core has cached. The `dsb` first: the entry changed before

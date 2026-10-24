@@ -34,6 +34,8 @@ pub unsafe fn enter_user(entry: u64, ustack: u64, flags: u64) -> ! {
 /// As `enter_user`, in the space `root`, whose tables must map this kernel stack as well.
 pub unsafe fn switch_and_enter_user(root: u64, entry: u64, ustack: u64, flags: u64) -> ! {
     let top = super::percpu::kstack_top();
+    // the space's ASID goes with it (the full invalidation stays: a process's first entry is rare)
+    let root = super::mmu::ttbr_of(root);
     core::arch::asm!(
         "msr daifset, #2",
         "msr ttbr0_el1, {root}",

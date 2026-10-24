@@ -1043,6 +1043,13 @@ pub fn top_tasks() {
             r[3].load(Relaxed), r[4].load(Relaxed), r[5].load(Relaxed));
         crate::println!("stat:            tasks on the thief {}, on the donor {}", r[6].load(Relaxed), r[7].load(Relaxed));
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::mmu as m;
+        crate::println!("stat: asid: {} (spaces given one {}, found the pool empty {}; root switches outside the scheduler's exit: kept the TLB {}, invalidated {})",
+            if m::asid_on() { "on" } else { "OFF (talaria.asid=0)" }, m::ASID_GIVEN.load(Relaxed), m::ASID_EMPTY.load(Relaxed),
+            m::SWITCH_KEPT.load(Relaxed), m::SWITCH_FLUSHED.load(Relaxed));
+    }
     crate::println!("stat: balancing: passes {}, a skew found {}, rearranged {} (migrations in total {})",
         crate::affinity::BAL_PASS.load(Relaxed), crate::affinity::BAL_SEEN.load(Relaxed),
         crate::affinity::BALANCED.load(Relaxed), crate::affinity::MIGRATIONS.load(Relaxed));
