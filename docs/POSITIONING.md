@@ -20,8 +20,9 @@ changes.
 
 The main internal mechanism is **synchronisation without busy-spinning**: a
 futex sleeps in the kernel with `mwait` right on the user's word, and the
-waker's store wakes the sleeper with no IPI and no syscall. Ordinary pthread
-code gets sub-microsecond wakeups at 0 % CPU while waiting.
+waker's store itself wakes the sleeper, with no IPI (stock musl's
+`FUTEX_WAKE` that follows finds it awake; libtsync skips that syscall too).
+Ordinary pthread code gets sub-microsecond wakeups at 0 % CPU while waiting.
 
 ## 2. The headline number
 
