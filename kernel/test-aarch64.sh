@@ -361,7 +361,12 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     # asleep — x86's test.sh and a Graviton (variants-umark-c7g) judge that part.
     assert 'held by .*\(um_hog\) (2[2-5])\.[0-9]% \(asleep 0\.[0-9]\)'   'umarkt: a thread spinning on the other core holds it the whole interval, awake'
     assert 'held by .*\(um_main\) (2[0-5])\.[0-9]%'                         'umarkt: the marking thread holds its own core for its interval'
-    assert "a slow interval of t[0-9]+\(um_main\) on core [0-9]+: (19|20|21)[0-9]{2} us; each core's decisions and sleeps" 'umarkt: the kept intervals are the longest marked ones (the 2-ms sleeps), decision by decision'
+    # The kept intervals are the LONGEST of fifty 2-ms sleeps: under TCG a sleep overshoots by
+    # 0.1-1.1 ms on a quiet host (2026-10-25: 2168-3104 us, the same on the kernel before and
+    # after the change under test), so the longest are past 2.1 ms by construction — TCG's window
+    # is to 3.9 ms; a KVM machine keeps the x86 window.
+    UMW='(19|2[0-9]|3[0-9])'; [ "$KVM" = 1 ] && UMW='(19|20|21)'
+    assert "a slow interval of t[0-9]+\(um_main\) on core [0-9]+: $UMW[0-9]{2} us; each core's decisions and sleeps" 'umarkt: the kept intervals are the longest marked ones (the 2-ms sleeps), decision by decision'
     for m in sleeplat sleeplath; do
       run 120 "talaria.test=$m" ext2
       assert 'sleeplat: OK'                                                   "$m: nanosleep(50 us) x 2000, the median overshoot under 500 us$( [ $m = sleeplath ] && echo ', a thread spinning on the sleeper'"'"'s core'): one exact deadline, not 200-us windows served by the tick (ARM64-PLAN §11 item 2b)"
