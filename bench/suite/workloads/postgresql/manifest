@@ -24,3 +24,11 @@ netyield=5
 # thousand, p50 -5..-13 %, p99 -10..-16 %. The pipe/eventfd/signal producers kick the
 # sleepers (netsys::mix_kick), so the ceiling bounds only a timerfd's lateness.
 netmix=1000000
+# netmixsteal: under netmix the polling slot goes to a waiter with traffic younger than this,
+# taken from one without. The postmaster enters its epoll_wait first and kept the slot for
+# the whole run, spinning, while the backends the requests came for parked (the stat block's
+# "the slot" lines). Measured on c7g.xlarge smp=2 against phase A of the same stand, with a
+# third phase of the knob off as the drift control (2026-10-25): the select1 ceiling 36.0 ->
+# 58.0 thousand (Linux 44.3), pk 18.4 -> 21.2 thousand (Linux 24.6); at the top rungs p99
+# select1@32k 507 -> 78 us, pk@16.6k 921 -> 307 us; the low rungs unchanged or -5..-10 %.
+netmixsteal=1000000

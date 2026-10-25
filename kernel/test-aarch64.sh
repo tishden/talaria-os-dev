@@ -259,6 +259,14 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
   assert 'mixwait: ALL OK'                                                    'mixwait: a parked mixed-set waiter is woken by a pipe, an eventfd and a signal at once, not by its 2 s ceiling'
   assert 'mixed-set waiters parked [1-9][0-9]* \(woken [1-9][0-9]*, by the ceiling 0\)' 'mixwait: the waiters really parked, and no park ended by the ceiling'
   assertnot "$BAD"                                                           'mixwait: no trap'
+  # The slot by traffic (`talaria.netmixsteal=`, ARM64-PLAN §12 item 3): a waiter with no events
+  # holds the polling slot, one fed every 5 ms takes it, the old holder parks and its pipe still
+  # wakes it at once (mixwait's second phase).
+  boot 120 "talaria.test=mixwait talaria.netmix=2000000000 talaria.netmixsteal=1000000"
+  assert 'mixwait: ALL OK'                                                    'mixwait+steal: every wake at once, the holder that lost the slot too'
+  assert 'the slot taken by traffic [1-9][0-9]* times, holders that saw it gone [1-9]' 'mixwait+steal: the slot changed hands and the old holder noticed'
+  assert 'mixed-set waiters parked [1-9][0-9]* \(woken [1-9][0-9]*, by the ceiling 0\)' 'mixwait+steal: no park ended by the ceiling'
+  assertnot "$BAD"                                                           'mixwait+steal: no trap'
   # A syscall that moves the thread to another core keeps every register (a ClickHouse thread
   # moved by its name came back with x0..x18 and lr zero; the old kernel fails this on x1..x17, lr).
   boot 60 "talaria.test=migregs"

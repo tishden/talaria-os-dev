@@ -181,6 +181,26 @@ pub fn dump() {
             crate::println!("stat: net: mixed-set waits spun: alone {}, beside another waiter {} (netmix {} ns parks the latter)",
                 sp, so, crate::netsys::netmix_get());
         }
+        let (st, lo) = (crate::netsys::NET_MIX_STEALS.load(Relaxed), crate::netsys::NET_MIX_LOST.load(Relaxed));
+        if st | lo != 0 { crate::println!("stat: net: the slot taken by traffic {} times, holders that saw it gone {}", st, lo); }
+        // Who held the polling slot (the top four by time): the one a mixed set leaves spinning.
+        let hz = crate::tsc::hz().max(1);
+        let mut top = [(0u64, usize::MAX); 4];
+        let open = crate::netsys::poll_holder();
+        for t in 0..crate::sched::NTASKS {
+            let mut c = crate::netsys::POLL_HOLD_CYC[t].load(Relaxed);
+            if let Some((h, cy)) = open { if h == t { c += cy; } }
+            if c == 0 { continue; }
+            let mut i = 4;
+            while i > 0 && top[i - 1].0 < c { i -= 1; }
+            if i < 4 { let mut j = 3; while j > i { top[j] = top[j - 1]; j -= 1; } top[i] = (c, t); }
+        }
+        for &(c, t) in top.iter() {
+            if t == usize::MAX { break; }
+            let n = crate::sched::comm(t); let l = crate::sched::comm_len(t);
+            crate::println!("stat: net: the slot t{} proc {} ({}): held {} ms, mixed spins {}", t, crate::sched::proc_of(t),
+                core::str::from_utf8(&n[..l]).unwrap_or("?"), c / (hz / 1000).max(1), crate::netsys::POLL_MIX_SPIN[t].load(Relaxed));
+        }
         let m = crate::netsys::NET_MIX_PARKS.load(Relaxed);
         if m != 0 {
             crate::println!("stat: net: mixed-set waiters parked {} (woken {}, by the ceiling {}); non-socket kicks that woke one {}",
