@@ -2533,6 +2533,9 @@ fn park_on() -> bool {
 /// the producer sees the waiter and moves its word (the park returns at once), or the
 /// waiter's scan sees the state.
 static NETMIX_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The manifest's `netmix=` (`cellman::apply_tuning`; the command line outranks it).
+pub fn netmix_set(ns: u64) { NETMIX_NS.store(ns, core::sync::atomic::Ordering::SeqCst); }
+pub fn netmix_get() -> u64 { NETMIX_NS.load(core::sync::atomic::Ordering::SeqCst) }
 pub static NET_MIX_PARKS: AtomicU64 = AtomicU64::new(0);
 pub static NET_MIX_WAKE: AtomicU64 = AtomicU64::new(0);
 pub static NET_MIX_TMO: AtomicU64 = AtomicU64::new(0);

@@ -562,7 +562,8 @@ fn parse_tuning_opts(cmdline: &str) {
         for (key, bit) in [("talaria.slice", TUNE_SLICE), ("talaria.idleslice", TUNE_IDLESLICE),
                            ("talaria.netslice", TUNE_NETSLICE), ("talaria.wakepreempt", TUNE_WAKEPREEMPT),
                            ("talaria.readahead", TUNE_READAHEAD), ("talaria.netyield", TUNE_NETYIELD),
-                           ("talaria.fscache", TUNE_FSCACHE), ("talaria.huge", TUNE_HUGE)] {
+                           ("talaria.fscache", TUNE_FSCACHE), ("talaria.huge", TUNE_HUGE),
+                           ("talaria.netmix", TUNE_NETMIX)] {
             if cmdline::value(cmdline, key).is_some() { m |= bit; }
         }
         if m != 0 { TUNE_FROM_CMDLINE.fetch_or(m, core::sync::atomic::Ordering::SeqCst); }

@@ -14,3 +14,13 @@ env=PATH=/opt/pg/bin
 # epoll_wait, and without yielding the core they hold the machine from one another. So it
 # is declared here — next to the workload it was measured on, not in the stand's command line.
 netyield=5
+# netmix: a waiter whose set is not only sockets PARKS for at most this many ns instead of
+# spinning. Every PostgreSQL process waits on a latch's signalfd/self-pipe and the
+# postmaster's death pipe next to its sockets, so without it the postmaster and the
+# background workers (checkpointer, bgwriter, walwriter, the autovacuum launcher) spun
+# their whole timeouts and held the cores from the backends — the "slow state" of the arm64
+# board. Measured on c7g.xlarge smp=2 against phase A of the same stand twice
+# (2026-10-25): the pk ceiling 9.9 -> 18.8-18.9 thousand, select1 26.6-26.8 -> 31.5-35.4
+# thousand, p50 -5..-13 %, p99 -10..-16 %. The pipe/eventfd/signal producers kick the
+# sleepers (netsys::mix_kick), so the ceiling bounds only a timerfd's lateness.
+netmix=1000000
