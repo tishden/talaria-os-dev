@@ -893,6 +893,33 @@ unsafe fn flush_range(start: u64, pages: u64) {
     }
 }
 
+/// Drop the range's translations on THIS core and on every core that may hold them —
+/// the pair "the local flush, then `shoot` (one of the `shootdown_range*`)" every caller wrote.
+///
+/// On arm64 the local `flush_range` is ALREADY the broadcast `TLBI VAAE1IS` (and the large
+/// case the broadcast `flush_all_is`), so the shootdown that followed it invalidated the same
+/// range a second time: a second pass and a second `dsb ish` per `munmap` — 899 of the
+/// 3.3 us of PostgreSQL's per-request `munmap` on a c7g ("the acknowledgements" of the stat
+/// block's unmap line, MEASUREMENTS §10.19). A caller whose local flush is the LOCAL full one
+/// (`flush_tlb` before `shootdown_range_auto` in `move_mapping`) still calls the shootdown
+/// itself.
+///
+/// # Safety
+/// P4 + P5: as `flush_range`.
+unsafe fn flush_range_all(start: u64, pages: u64, shoot: fn(u64, u64)) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = shoot;
+        // 0 is "everything" for the shootdown the pair ended with
+        if pages == 0 || pages > INVLPG_MAX { mmu::flush_all_is(); } else { mmu::flush_range_is(start & !0xFFF, pages); }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        flush_range(start, pages);
+        shoot(start, pages);
+    }
+}
+
 // ── THE INSTALLATION OF A TABLE INTO THE PARENT ENTRY ─────────────────────────
 //
 // ALL the functions below put a new page table in the place of a leaf or of an empty
@@ -1270,8 +1297,7 @@ pub fn protect_none(vaddr: u64, len: u64) {
         }
     }
     // SAFETY: P4 — the range's translations are stale after the loop above.
-    unsafe { flush_range(start, (end - start) / 4096); }
-    shootdown_range_auto(start, (end - start) / 4096);
+    unsafe { flush_range_all(start, (end - start) / 4096, shootdown_range_auto); }
 }
 
 pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
@@ -1359,9 +1385,8 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
         }
     }
     // SAFETY: P4 — the range's translations are stale after the loop above.
-    unsafe { flush_range(start, (end - start) / 4096); }
     // the rights could have been TIGHTENED (RW->RO, the removal of X) — the foreign TLBs must see that
-    shootdown_range_auto(start, (end - start) / 4096);
+    unsafe { flush_range_all(start, (end - start) / 4096, shootdown_range_auto); }
 }
 /// A pointer to the PD entry (level 2) in the pml4, creating the PML4E/PDPTE if
 /// necessary. For installing 2M leaves — nothing needs to be split.
@@ -2177,7 +2202,7 @@ pub fn relazy_pages(vaddr: u64, pages: u64) {
         let end = a + pages * 4096;
         let mut touched = false;
         let first = vaddr & !0xFFF;
-        let flush = || { flush_range(first, pages); shootdown_range_auto(first, pages); };
+        let flush = || { flush_range_all(first, pages, shootdown_range_auto); };
         let mut dfr = Deferred::new();
         while a < end {
             if a & 0x1F_FFFF == 0 && end - a >= 0x20_0000 {
@@ -2472,9 +2497,8 @@ pub fn unmap_ident(vaddr: u64, pages: u64) {
             if let Some(pte) = pte_ptr(a) { pte_w(pte, ident_leaf(a)); }
             a += 0x1000;
         }
-        flush_range(start, pages);
+        flush_range_all(start, pages, shootdown_range);
     }
-    shootdown_range(start, pages);
 }
 
 /// THE STATE OF THE IDENTITY INVARIANT in the current address space.
@@ -3398,7 +3422,7 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
         // 69 on one — that is, more than half of the call's time went into collecting
         // the acknowledgements of a flush that was not required.
         let mut present_gone = false;
-        let flush = || { flush_range(vaddr & !0xFFF, pages); shootdown_range_user(vaddr & !0xFFF, pages); };
+        let flush = || { flush_range_all(vaddr & !0xFFF, pages, shootdown_range_user); };
         let mut dfr = Deferred::new();
         while a < end {
             // A whole huge page: free 2 MB in one piece rather than
@@ -3450,10 +3474,15 @@ pub fn unmap_proc(vaddr: u64, pages: u64) {
         if present_gone {
             UNMAP_HIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let t1 = crate::tsc::rdtsc();
-            flush_range(vaddr & !0xFFF, pages);
-            let t2 = crate::tsc::rdtsc();
-            shootdown_range_user(vaddr & !0xFFF, pages);
-            let t3 = crate::tsc::rdtsc();
+            #[cfg(target_arch = "aarch64")]
+            let (t2, t3) = { flush_range_all(vaddr & !0xFFF, pages, shootdown_range_user); let t = crate::tsc::rdtsc(); (t, t) };
+            #[cfg(not(target_arch = "aarch64"))]
+            let (t2, t3) = {
+                flush_range(vaddr & !0xFFF, pages);
+                let t2 = crate::tsc::rdtsc();
+                shootdown_range_user(vaddr & !0xFFF, pages);
+                (t2, crate::tsc::rdtsc())
+            };
             UNMAP_FLUSH_TSC.fetch_add(t2.wrapping_sub(t1), core::sync::atomic::Ordering::Relaxed);
             UNMAP_SHOOT_TSC.fetch_add(t3.wrapping_sub(t2), core::sync::atomic::Ordering::Relaxed);
         }
