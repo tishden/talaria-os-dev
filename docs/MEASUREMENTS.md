@@ -1156,8 +1156,9 @@ switch between two spaces is the register write alone, where every root change u
 full `tlbi vmalle1`. The hypothesis was PostgreSQL's ×2 (four to five processes switching on
 two cores, IPC 0.53-0.62). Measured on one stand (`kernprobe-a64-postgresql-20261025-000912`,
 us-west-2, `talaria.asid=0` against `=1`): 0.94-1.04 on every point — the TLB is not the ×2.
-The ASIDs stay (correct, gated under TCG; a KVM `c7g.metal` gate is owed, TCG flushes on an
-ASID change itself and cannot see a stale-ASID class).
+The ASIDs stay: correct under TCG (which flushes on an ASID change itself and cannot see a
+stale-ASID class) and on a `c7g.metal` under KVM — the gate, the databases, 650 soak boots and
+576 parallel race boots with no failure (ARM64-PLAN §12.2).
 
 **PostgreSQL's ×2 named** (`8610cda`). In session 73's accounting the heavy long-lived tasks
 were the postmaster and PostgreSQL's background processes (65-79 s of "running" in a window),

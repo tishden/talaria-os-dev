@@ -2898,8 +2898,11 @@ Item 3: PostgreSQL's ×2 is named and halved — its postmaster and background p
 their mixed `epoll` sets (socket + signalfd/self-pipe + the death pipe) on the backends' two
 cores; the manifest key `netmix=<ns>` (`8610cda`) parks them: pk 9.9 → 18.9 k req/s, select1
 26.7 → 31.5-35.4 k, the medians at Linux's (MEASUREMENTS §10.17). ASIDs on arm64 (`5efa961`)
-were the first suspect and measured nothing; they stay because they are correct, and a KVM
-`c7g.metal` gate for them is owed. The stat block counts who spins a mixed set beside another
+were the first suspect and measured nothing; they stay because they are correct, gated on a
+`c7g.metal` under KVM (`infra/aws/logs/aarch64-20261025-131835`): the gate 389/1 then 0 of 1
+in the loop, the databases 15/0 twice, the soak 13 modes × 50 boots and the race detector
+6 × 96 with no failure; the one FAIL was `shmrace A/B`'s negative control breaking the other
+way (a half-published row faults instead of a second row), and its assertion now takes both. The stat block counts who spins a mixed set beside another
 waiter (`444cd35`): only PostgreSQL and MongoDB do, and MongoDB under the knob loses its top
 rungs — the knob is not a default. Left of item 3: the ceiling (pk 18.9 against 25.5 k, select1
 33 against 44 k). Item 1: Nitro's connection tracking and the MTU are excluded, the VPC mirror
