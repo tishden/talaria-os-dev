@@ -2540,6 +2540,10 @@ pub static NET_MIX_PARKS: AtomicU64 = AtomicU64::new(0);
 pub static NET_MIX_WAKE: AtomicU64 = AtomicU64::new(0);
 pub static NET_MIX_TMO: AtomicU64 = AtomicU64::new(0);
 pub static NET_MIX_KICKS: AtomicU64 = AtomicU64::new(0);
+/// A pass of a mixed set's wait that spun (`yield_window`) instead of parking — counted with
+/// the knob off too: the board's `stat:` names the workloads `netmix` would touch.
+/// [0] a sole network waiter, [1] a waiter while another task waits too (netmix's).
+pub static NET_MIX_SPINS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 /// A non-socket's readiness has changed: wake the network waiters to rescan (see NETMIX_NS).
 pub fn mix_kick() {
     use core::sync::atomic::Ordering::{Relaxed, SeqCst};
@@ -2755,7 +2759,14 @@ fn wait_frame_w(seq: u32, cap_ns: u64, w: &mut NetWaiter, only_sock: bool) -> bo
     // The polling one is as it was: by sockets it waits for a frame, with a mixed set it
     // yields the window (parking on a socket's word is not allowed, the readiness of a pipe or
     // an eventfd does not move it).
-    if only_sock { wait_frame(seq, cap_ns) } else { yield_window(); false }
+    if only_sock { wait_frame(seq, cap_ns) } else {
+        // Who netmix would park: a waiter while another task is inside a network wait too
+        // (under the knob one of them takes the polling slot and spins, the rest park; with
+        // the knob off the mixed path never takes the slot, so the slot cannot tell them apart).
+        let other = NET_WAITERS.load(core::sync::atomic::Ordering::Relaxed) >= 2;
+        NET_MIX_SPINS[other as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        yield_window(); false
+    }
 }
 
 fn wait_frame(seq: u32, cap_ns: u64) -> bool {

@@ -176,6 +176,11 @@ pub fn dump() {
     }
     {
         use core::sync::atomic::Ordering::Relaxed;
+        let (sp, so) = (crate::netsys::NET_MIX_SPINS[0].load(Relaxed), crate::netsys::NET_MIX_SPINS[1].load(Relaxed));
+        if sp | so != 0 {
+            crate::println!("stat: net: mixed-set waits spun: alone {}, beside another waiter {} (netmix {} ns parks the latter)",
+                sp, so, crate::netsys::netmix_get());
+        }
         let m = crate::netsys::NET_MIX_PARKS.load(Relaxed);
         if m != 0 {
             crate::println!("stat: net: mixed-set waiters parked {} (woken {}, by the ceiling {}); non-socket kicks that woke one {}",
