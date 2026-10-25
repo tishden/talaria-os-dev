@@ -225,7 +225,12 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
   assert 'stat: shm: creators waited for the tables [1-9][0-9]* times'        'shmrace: the race really happened (the kernel counted the waits)'
   assertnot "$BAD"                                                           'shmrace: no trap, no unknown syscall'
   boot 90 "talaria.test=shmrace talaria.shmdelay=2000 talaria.shmlock=0"
-  assert 'shmrace: FAIL one name -> one object'                               'shmrace A/B: with the tables lock off the same program gets TWO objects for one name'
+  # Two outcomes of the same broken create: under TCG the second creator takes a second row
+  # (two objects); on a Graviton under KVM it finds the first creator's row HALF published —
+  # `shm_region` stores the window address before the frames and their attach — takes the
+  # address and writes before the page is mapped, and that write faults (c7g.metal,
+  # 2026-10-25). Either one proves the lock is what keeps the create whole.
+  assert 'shmrace: FAIL one name -> one object|the signal 11 to the thread'   'shmrace A/B: with the tables lock off the same program breaks (two objects for one name, or a torn row faults)'
   # libtsync (docs/ARM64-PLAN.md §10.10): with no user-mode monitor tier every wait goes to the
   # kernel, timed ones on a borrowed deadline — the set that found the level-sensitive timer's
   # interrupt storm (its MPSC phase never finished before `trap.rs` silenced the timer).
