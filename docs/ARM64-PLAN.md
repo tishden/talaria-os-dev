@@ -2892,6 +2892,19 @@ port counters, the frame classifier, the quiet-point report, the five-leg sendto
 is correct by the spec is in `arm64-port` (`dma_rmb` after the phase bit, the monotonic ring
 counters, the batched flush). ENGINEERING-NOTES 62-66 hold the lessons, 66 in particular.
 
+### 12.2. Progress (2026-10-25)
+
+Item 3: PostgreSQL's ×2 is named and halved — its postmaster and background processes spun
+their mixed `epoll` sets (socket + signalfd/self-pipe + the death pipe) on the backends' two
+cores; the manifest key `netmix=<ns>` (`8610cda`) parks them: pk 9.9 → 18.9 k req/s, select1
+26.7 → 31.5-35.4 k, the medians at Linux's (MEASUREMENTS §10.17). ASIDs on arm64 (`5efa961`)
+were the first suspect and measured nothing; they stay because they are correct, and a KVM
+`c7g.metal` gate for them is owed. The stat block counts who spins a mixed set beside another
+waiter (`444cd35`): only PostgreSQL and MongoDB do, and MongoDB under the knob loses its top
+rungs — the knob is not a default. Left of item 3: the ceiling (pk 18.9 against 25.5 k, select1
+33 against 44 k). Item 1: Nitro's connection tracking and the MTU are excluded, the VPC mirror
+is not an instrument at this rate; the next stand is a `c7gn`/`.metal` pair.
+
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and
