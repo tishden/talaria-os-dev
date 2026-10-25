@@ -1134,6 +1134,85 @@ There is no unexplained microsecond; the price is the pass.
 Linux's 6.6; the gap is about `writev`'s price (the assembly under the stack's lock, then the
 pass to the card that also drains the receive ring).
 
+### 10.17. The lost frame's last suspects, ASIDs, and PostgreSQL's spinning waiters (2026-10-24/25)
+
+**The lost frame** (ARM64-PLAN §12 item 1), probes 9-12 on `arm64-inst` in us-east-1:
+
+- Nitro's connection tracking is not it: with the security group opened to all TCP (untracked
+  flows, no reboot) the "with data" loss is the same — ~250 per rung above 62 k req/s, none at
+  36 k. Both directions lose in one run (on earlier stands it was one direction per stand).
+- The MTU is not it: ENA `SET_FEATURE(MTU)` = 1500, smoltcp's 1514.
+- A VPC traffic mirror of both ENIs (`mirrorprobe-ec2.sh`, `lib/mirrorscan.py`) is unusable on
+  `c7g.xlarge` at this rate: it delivers ~10 % of the segments in bursts about every second
+  second, identically on both ENIs, and in probe 11 it caught no retransmission at all. Probe
+  12 (the first rung after boot, 14.7 k req/s, 60 s, the mirror on from boot) lost nothing —
+  "the first rung always loses" was wrong.
+
+The loss stays bounded to "between the two Talaria ENAs"; the next stand is a `c7gn`/`.metal`
+pair, not another counter.
+
+**ASIDs on arm64** (`5efa961`). Every process space got its own 16-bit ASID (TTBR0[63:48]); a
+switch between two spaces is the register write alone, where every root change used to be a
+full `tlbi vmalle1`. The hypothesis was PostgreSQL's ×2 (four to five processes switching on
+two cores, IPC 0.53-0.62). Measured on one stand (`kernprobe-a64-postgresql-20261025-000912`,
+us-west-2, `talaria.asid=0` against `=1`): 0.94-1.04 on every point — the TLB is not the ×2.
+The ASIDs stay (correct, gated under TCG; a KVM `c7g.metal` gate is owed, TCG flushes on an
+ASID change itself and cannot see a stale-ASID class).
+
+**PostgreSQL's ×2 named** (`8610cda`). In session 73's accounting the heavy long-lived tasks
+were the postmaster and PostgreSQL's background processes (65-79 s of "running" in a window),
+not the backends. Every one of them waits in `epoll_wait` on a MIXED set — its socket(s) next
+to the latch's signalfd or self-pipe and the postmaster's death pipe — and a mixed set was
+never allowed to park (nothing moved a socket's word when a pipe became ready): each spun its
+whole timeout in `yield_window` and shared the two cores with the backends. `talaria.netmix=<ns>`
+lets a non-polling waiter of a mixed set park on its word for at most that long; pipes,
+eventfds and pending signals kick it (`mix_kick`). Two stands, us-west-2:
+
+| point | spin (A) | `netmix=1ms` | Linux |
+|---|---|---|---|
+| pk ceiling | 9.9-10.0 k | 18.8-18.9 k | 25.1-25.5 k |
+| select1 ceiling | 26.6-26.8 k | 31.5-35.4 k | 43.0-44.1 k |
+| select1 p50 | — | 61-65 us | ~62 |
+| pk p50 | — | 118-135 us | ~120 |
+
+p50 −5..−13 %, p99 −10..−16 %, pk@8882 p99 273 → 147 us. `netirq=1 netpark=1ms` on top is not
+better (p50 +2..4 %, pk 17.2/21.3 k). The knob is declared by PostgreSQL's manifest
+(`netmix=1000000`), not by default: it touches every server with a mixed set.
+
+**Who else spins a mixed set** (`444cd35`): the stat block now counts the mixed-set waits that
+spun, split by whether another task was inside a network wait at the same time — only those
+are what `netmix` parks (one waiter of the set keeps the polling slot and spins under the knob
+too). A local census, every network workload under x86 KVM with `netmix=0`:
+
+| workload | spun alone | spun beside another waiter |
+|---|---:|---:|
+| postgresql | 79 | 206 M |
+| mongodb | 14 M | 4.0 M |
+| redis | 326 M | 0 |
+| nginx | 180 M | 0 |
+| mysql, mongoose | — | — |
+
+redis's and nginx's sets hold a non-socket too, but each server has one waiter: the knob does
+not touch them. MariaDB polls sockets only. So the default is a question about MongoDB.
+
+MongoDB with `netmix=1ms` on one stand (`kernprobe-a64-mongodb-20261025-111746`, us-west-2,
+A both sides, P1 the knob, P2 the knob off again as the drift control; p50/p99, us):
+
+| point | A | netmix | off again |
+|---|---|---|---|
+| insert 10.3 k | 83.7 / 202 | 72.2 / 277 | 78.0 / 213 |
+| insert 18.6 k | 86.9 / 390 | 72.6 / 343 | 80.7 / 347 |
+| find 16.2 k | 83.3 / 100 | 100.2 / 254 | 87.8 / 118 |
+| find 19.5 k | 82.5 / 108 | 159.7 / 421 | 93.6 / 207 |
+| ping 51.8 k | 55.8 / 77 | 59.4 / 110 | 50.0 / 71 |
+
+Against its own control the knob buys `insert` 7-9 % of the median and costs `find` and `ping`
+their top rungs (find at 19.5 k: ×1.7 the median, ×2 the p99). `ping`'s low-rate "gain" in P1
+is the stand's drift (P2 shows it too). Why the top rungs lose is not measured; the likely
+reading is that a parked waiter's wake-up lands on the request's path once the rate keeps every
+waiter busy. So `netmix` stays a manifest key, declared by PostgreSQL alone; MongoDB's manifest
+does not take it.
+
 ## 11. Reproducing any of this
 
 ```sh
