@@ -51,6 +51,13 @@
 //!   readahead=<blocks>    the read-ahead window (default — full)
 //!   netyield=<µs>         how often a network waiter yields the core (default 5;
 //!                         PostgreSQL p50 1148 -> 67 µs, the ceiling 8.9 -> 20.1 thousand)
+//!   netmix=<ns>           a waiter whose epoll/poll set is NOT only sockets parks for at most
+//!                         this long instead of spinning (`talaria.netmix`; default 0 — it
+//!                         spins). PostgreSQL on a c7g.xlarge (smp=2): every process of it
+//!                         waits on a latch's signalfd/self-pipe next to its sockets, so the
+//!                         postmaster and the background workers spun their whole timeouts
+//!                         against the backends; 1 ms: the pk ceiling 9.9 -> 18.8-18.9 thousand,
+//!                         select1 26.6-26.8 -> 31.5-35.4 thousand, p99 -10..-16 % (2026-10-25)
 //!   stealpush=on|off      a push: a core with two ready tasks at the tick gives away
 //!                         the one that has waited longer than `talaria.stealwait` to an empty
 //!                         neighbour (off by default). For computing threads — yes
@@ -213,6 +220,7 @@ pub struct CellManifest {
     pub fscache_mb: i64,
     pub readahead: i64,
     pub netyield_us: i64,
+    pub netmix_ns: i64,
     pub stealpush: i64,
     // The shares of the common L3 (`llc=`)
     llcs: [LlcRule; MAXLLC],
@@ -231,7 +239,7 @@ impl CellManifest {
             spread: true, balance: true, numa: true, numa_node: PIN_UNSET, irq: PIN_UNSET,
             huge_mb: -1,
             slice_ns: -1, idleslice_us: -1, netslice_us: -1, wakepreempt_ns: -1,
-            fscache_mb: -1, readahead: -1, netyield_us: -1, stealpush: -1,
+            fscache_mb: -1, readahead: -1, netyield_us: -1, netmix_ns: -1, stealpush: -1,
             llcs: [LlcRule::empty(); MAXLLC], llcc: 0,
             valid: false }
     }
@@ -528,6 +536,7 @@ pub fn parse(bytes: &[u8]) -> CellManifest {
             b"fscache" => m.fscache_mb = parse_tune(val),
             b"readahead" => m.readahead = parse_tune(val),
             b"netyield" => m.netyield_us = parse_tune(val),
+            b"netmix" => m.netmix_ns = parse_tune(val),
             b"stealpush" => m.stealpush = if val == b"on" || val == b"yes" { 1 } else { parse_tune(val) },
             _ => {}
         }
@@ -570,6 +579,7 @@ pub const TUNE_READAHEAD: u32 = 1 << 4;
 pub const TUNE_NETYIELD: u32 = 1 << 5;
 pub const TUNE_FSCACHE: u32 = 1 << 6;
 pub const TUNE_HUGE: u32 = 1 << 7;
+pub const TUNE_NETMIX: u32 = 1 << 8;
 pub fn tune_locked(bit: u32) -> bool {
     let v = TUNE_FROM_CMDLINE.load(core::sync::atomic::Ordering::SeqCst) & bit != 0;
     if v { crate::println!("manifest: the setting was not applied — it is set on the command line (the operator outranks the manifest)"); }
@@ -610,6 +620,11 @@ pub fn apply_tuning(m: &CellManifest) {
         crate::println!("manifest: a network waiter yields the core at least once every {} µs{}", m.netyield_us,
             if m.netyield_us == 0 { " (off)" } else { "" });
     }
+    if m.netmix_ns >= 0 && !tune_locked(TUNE_NETMIX) {
+        crate::netsys::netmix_set(m.netmix_ns as u64);
+        crate::println!("manifest: a waiter of a mixed set (sockets and a pipe/eventfd/signalfd) parks for at most {} ns{}",
+            m.netmix_ns, if m.netmix_ns == 0 { " (off: it spins)" } else { "" });
+    }
     if m.stealpush >= 0 {
         crate::sched::STEAL_PUSH.store(m.stealpush != 0, SeqCst);
         crate::println!("manifest: the stealing push is {}", if m.stealpush != 0 { "on: a donor at the tick gives a spare ready task to an empty neighbour" }
@@ -631,7 +646,7 @@ pub fn apply_tuning(m: &CellManifest) {
 /// and every one of them certainly differs from the machine's default.
 pub fn selftest_tuning() -> ! {
     use core::sync::atomic::Ordering::SeqCst;
-    const M: &[u8] = b"binary=/app\nslice=300000\nidleslice=700\nnetslice=50\nwakepreempt=90000\nreadahead=16\nnetyield=0\nstealpush=on\nfscache=48\n";
+    const M: &[u8] = b"binary=/app\nslice=300000\nidleslice=700\nnetslice=50\nwakepreempt=90000\nreadahead=16\nnetyield=0\nnetmix=250000\nstealpush=on\nfscache=48\n";
     // We mount the disk OURSELVES: without a mounted FS the riskiest of the seven
     // quantities (the block cache, the only one that REALLOCATES memory) would not be
     // checked at all, while the gate would look green.
@@ -640,13 +655,14 @@ pub fn selftest_tuning() -> ! {
     let was_cache = crate::ext2::cache_mb();
     let m = parse(M);
     apply_tuning(&m);
-    let got: [(&str, u64, u64); 7] = [
+    let got: [(&str, u64, u64); 8] = [
         ("slice(ns)", crate::smp::TIMER_SLICE.load(SeqCst) as u64, 300_000),
         ("idleslice(ns)", crate::smp::IDLESLICE_NS.load(SeqCst), 700_000),
         ("netslice(ns)", crate::smp::NETSLICE_NS.load(SeqCst), 50_000),
         ("wakepreempt(ns)", crate::sync::WAKE_PREEMPT_NS.load(SeqCst), 90_000),
         ("readahead(blocks)", crate::ext2::RA_WINDOW.load(SeqCst) as u64, 16),
         ("netyield(ns)", crate::netsys::NETYIELD_NS.load(SeqCst), 0),
+        ("netmix(ns)", crate::netsys::netmix_get(), 250_000),
         ("stealpush", crate::sched::STEAL_PUSH.load(SeqCst) as u64, 1),
     ];
     let mut ok = true;
