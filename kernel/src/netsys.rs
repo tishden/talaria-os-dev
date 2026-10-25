@@ -753,6 +753,10 @@ pub fn configure_from_cmdline(cmdline: &str) {
             // cost MariaDB 29 times (see `wait_frame_w`).
             NETSOLO.store(true, core::sync::atomic::Ordering::SeqCst);
         }
+        else if let Some(v) = tok.strip_prefix("talaria.netmixsteal=") {
+            // Under netmix: the polling slot goes to the waiter with traffic (see NETMIXSTEAL_NS).
+            if let Ok(ns) = v.parse::<u64>() { NETMIXSTEAL_NS.store(ns, core::sync::atomic::Ordering::SeqCst); }
+        }
         else if let Some(v) = tok.strip_prefix("talaria.netmix=") {
             // A waiter whose set is NOT only sockets parks too (`wait_frame_w`), with this
             // ceiling in nanoseconds; implies `netsolo`. 0 — off (the default: the spin).
@@ -2544,6 +2548,73 @@ pub static NET_MIX_KICKS: AtomicU64 = AtomicU64::new(0);
 /// the knob off too: the board's `stat:` names the workloads `netmix` would touch.
 /// [0] a sole network waiter, [1] a waiter while another task waits too (netmix's).
 pub static NET_MIX_SPINS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// WHO HOLDS THE POLLING SLOT, per task: the cycles between `take_poll` and the wait's end,
+/// and the passes a mixed-set holder spun (`yield_window`). Under `netmix` the rest of a
+/// mixed set parks, so the one left spinning is whoever took the slot first — a backend or
+/// a background process with no traffic; the stat block names it (`stat: net: the slot`).
+pub static POLL_HOLD_CYC: [AtomicU64; crate::sched::NTASKS] = [const { AtomicU64::new(0) }; crate::sched::NTASKS];
+pub static POLL_MIX_SPIN: [AtomicU64; crate::sched::NTASKS] = [const { AtomicU64::new(0) }; crate::sched::NTASKS];
+/// When the current holder took the slot: a holder that never leaves its wait (the postmaster)
+/// would otherwise show no hold at all — the stat block adds this open interval.
+static POLL_SINCE: AtomicU64 = AtomicU64::new(0);
+/// The slot's holder now and the cycles it has held it (see POLL_SINCE).
+pub fn poll_holder() -> Option<(usize, u64)> {
+    let h = NET_POLLER.load(core::sync::atomic::Ordering::Relaxed);
+    if h >= crate::sched::NTASKS { return None; }
+    Some((h, tsc::rdtsc().wrapping_sub(POLL_SINCE.load(core::sync::atomic::Ordering::Relaxed))))
+}
+/// THE SLOT TO THE ONE WITH TRAFFIC (`talaria.netmixsteal=<ns>`, off by default).
+///
+/// Under `netmix` the polling slot is first come, first kept: PostgreSQL's postmaster enters
+/// its `epoll_wait` (the listener, the signal pipe) before any backend and holds the slot for
+/// the whole run — measured locally, t1 held it 301 s of 301 and spun 320 M passes, while
+/// every backend, the ones the requests come for, parked and waited to be woken. With the
+/// knob a waiter whose last event is younger than this takes the slot from a holder whose
+/// last event is older (one CAS); the old holder sees `NET_POLLER` is not its own at its next
+/// pass and parks like any non-polling one. A slot never changes hands between two waiters
+/// with traffic, so the backends do not ping-pong it.
+static NETMIXSTEAL_NS: AtomicU64 = AtomicU64::new(0);
+/// The manifest's `netmixsteal=` (`cellman::apply_tuning`; the command line outranks it).
+pub fn netmixsteal_set(ns: u64) { NETMIXSTEAL_NS.store(ns, core::sync::atomic::Ordering::SeqCst); }
+pub fn netmixsteal_get() -> u64 { NETMIXSTEAL_NS.load(core::sync::atomic::Ordering::SeqCst) }
+/// The cycle of a task's last `epoll_wait`/`poll` that returned events (its traffic's age).
+static NET_EV_TSC: [AtomicU64; crate::sched::NTASKS] = [const { AtomicU64::new(0) }; crate::sched::NTASKS];
+pub static NET_MIX_STEALS: AtomicU64 = AtomicU64::new(0);
+pub static NET_MIX_LOST: AtomicU64 = AtomicU64::new(0);
+#[inline]
+fn note_events() {
+    if NETMIXSTEAL_NS.load(core::sync::atomic::Ordering::Relaxed) == 0 { return; }
+    let t = crate::sched::current_id();
+    if t < crate::sched::NTASKS { NET_EV_TSC[t].store(tsc::rdtsc(), core::sync::atomic::Ordering::Relaxed); }
+}
+/// The slot by traffic, before a mixed set's waiter decides to spin or park (see NETMIXSTEAL_NS).
+fn slot_by_traffic(w: &mut NetWaiter, ns: u64) {
+    use core::sync::atomic::Ordering::{Relaxed, SeqCst};
+    let me = crate::sched::current_id();
+    if me >= crate::sched::NTASKS { return; }
+    if w.0 {
+        if NET_POLLER.load(SeqCst) == me { return; }
+        // taken from us: account the hold and become a non-polling one
+        POLL_HOLD_CYC[me].fetch_add(tsc::rdtsc().wrapping_sub(w.1), Relaxed);
+        w.0 = false;
+        NET_MIX_LOST.fetch_add(1, Relaxed);
+        return;
+    }
+    let h = NET_POLLER.load(SeqCst);
+    if h >= crate::sched::NTASKS || h == me { return; }
+    // tsc::hz, not the stack's HZ: that one is 1 until a NIC opens (the gate has none)
+    let age = (tsc::hz() / 1_000_000).max(1) * (ns / 1000).max(1);
+    let now = tsc::rdtsc();
+    let mine = NET_EV_TSC[me].load(Relaxed);
+    if mine == 0 || now.wrapping_sub(mine) >= age { return; }        // no traffic of my own
+    if now.wrapping_sub(NET_EV_TSC[h].load(Relaxed)) < age { return; } // the holder has traffic too
+    if NET_POLLER.compare_exchange(h, me, SeqCst, SeqCst).is_ok() {
+        w.0 = true;
+        w.1 = now;
+        POLL_SINCE.store(now, Relaxed);
+        NET_MIX_STEALS.fetch_add(1, Relaxed);
+    }
+}
 /// A non-socket's readiness has changed: wake the network waiters to rescan (see NETMIX_NS).
 pub fn mix_kick() {
     use core::sync::atomic::Ordering::{Relaxed, SeqCst};
@@ -2561,7 +2632,7 @@ pub fn mix_kick() {
 }
 
 /// The guard "I am waiting for the network": it counts the waiters and frees the polling one's slot.
-pub struct NetWaiter(bool);
+pub struct NetWaiter(bool, u64);
 impl NetWaiter {
     pub fn new() -> Self {
         NET_WAITERS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
@@ -2569,7 +2640,7 @@ impl NetWaiter {
         // SeqCst: published before the wait's first snapshot of the word (`mix_kick`'s Dekker)
         if me < crate::sched::NTASKS { NW_IN[me].store(true, core::sync::atomic::Ordering::SeqCst); }
         crate::netprof::mark_wait_in(); // `talaria.appprof=1`: the stage write -> the network wait
-        NetWaiter(false)
+        NetWaiter(false, 0)
     }
     /// Become the polling one if the place is free.
     fn take_poll(&mut self) -> bool {
@@ -2578,6 +2649,8 @@ impl NetWaiter {
         if NET_POLLER.compare_exchange(usize::MAX, me, core::sync::atomic::Ordering::SeqCst,
                                        core::sync::atomic::Ordering::SeqCst).is_ok() {
             self.0 = true;
+            self.1 = tsc::rdtsc();
+            POLL_SINCE.store(self.1, core::sync::atomic::Ordering::Relaxed);
         }
         self.0
     }
@@ -2590,6 +2663,9 @@ impl Drop for NetWaiter {
         }
         if self.0 {
             let me = crate::sched::current_id();
+            if me < crate::sched::NTASKS {
+                POLL_HOLD_CYC[me].fetch_add(tsc::rdtsc().wrapping_sub(self.1), core::sync::atomic::Ordering::Relaxed);
+            }
             let _ = NET_POLLER.compare_exchange(me, usize::MAX, core::sync::atomic::Ordering::SeqCst,
                                                 core::sync::atomic::Ordering::SeqCst);
             // THE POLLING ONE LEAVES WHILE THE WAITERS STAY. The slot is taken for the duration of
@@ -2745,6 +2821,10 @@ fn wait_frame_w(seq: u32, cap_ns: u64, w: &mut NetWaiter, only_sock: bool) -> bo
     // A mixed set with `talaria.netmix=` (see NETMIX_NS): the non-polling one parks; the
     // polling one stays, as above, the stack's driver.
     let mix = NETMIX_NS.load(core::sync::atomic::Ordering::Relaxed);
+    if mix != 0 && !only_sock {
+        let steal = NETMIXSTEAL_NS.load(core::sync::atomic::Ordering::Relaxed);
+        if steal != 0 { slot_by_traffic(w, steal); }
+    }
     if mix != 0 && !only_sock && !w.take_poll() {
         let t = crate::sched::current_id();
         if t < crate::sched::NTASKS && !crate::console::in_tick() {
@@ -2765,6 +2845,10 @@ fn wait_frame_w(seq: u32, cap_ns: u64, w: &mut NetWaiter, only_sock: bool) -> bo
         // the knob off the mixed path never takes the slot, so the slot cannot tell them apart).
         let other = NET_WAITERS.load(core::sync::atomic::Ordering::Relaxed) >= 2;
         NET_MIX_SPINS[other as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if w.0 {
+            let t = crate::sched::current_id();
+            if t < crate::sched::NTASKS { POLL_MIX_SPIN[t].fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
+        }
         yield_window(); false
     }
 }
@@ -3777,7 +3861,7 @@ pub fn epoll_wait(epfd: i64, events: *mut u8, maxev: i64, timeout: i64) -> i64 {
         drop(_scan);              // waiting with the lock clamped is not allowed
         gate.done(only_sock);
         }
-        if n > 0 { nw_ph(PH_RET); return n; }
+        if n > 0 { nw_ph(PH_RET); note_events(); return n; }
         if timeout == 0 { return 0; }
         if timeout > 0 && tsc::rdtsc() - t0 > limit { return 0; }
         if crate::proc::sig_pending() { return -4; } // EINTR
@@ -3926,7 +4010,7 @@ pub fn poll_fds(fds: *mut u8, nfds: usize, timeout: i64) -> i64 {
         drop(_scan);              // waiting with the lock clamped is not allowed
         gate.done(only_sock);
         }
-        if n > 0 { nw_ph(PH_RET); return n; }
+        if n > 0 { nw_ph(PH_RET); note_events(); return n; }
         if timeout == 0 { return 0; }
         if timeout > 0 && tsc::rdtsc() - t0 > limit { return 0; }
         if crate::proc::sig_pending() { return -4; } // EINTR

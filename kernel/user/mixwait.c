@@ -11,7 +11,14 @@
  * signalfd for SIGUSR1}, both inside epoll_wait at once (one of them is the poller, the
  * other parks); the main thread, 30 ms after both are in, fires one source of one waiter
  * and the waiter stamps the time it returned. ROUNDS rounds over the three sources and the
- * two waiters; the verdict is the worst wake. */
+ * two waiters; the verdict is the worst wake.
+ *
+ * The second phase is the slot by traffic (`talaria.netmixsteal=`): waiter A enters first
+ * and has no events (it holds the polling slot, first come), waiter B is fed an eventfd
+ * every 5 ms and re-enters fresh each time — under the knob B takes the slot and A, at its
+ * next pass, parks; then A's pipe is written and A must wake at once, not at the ceiling
+ * (a holder that lost the slot is a parked waiter like any other, kicked by its events).
+ * Without the knob A keeps the slot and spins: the phase passes the same way. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <pthread.h>
@@ -70,6 +77,39 @@ static void *waiter_main(void *a) {
     return 0;
 }
 
+static struct waiter wa, wb;
+static volatile int b_go, b_left;
+
+static void *slot_a(void *x) {
+    (void)x;
+    struct epoll_event ev = {0}, out[2];
+    ev.events = EPOLLIN; ev.data.u32 = 1; epoll_ctl(wa.ep, EPOLL_CTL_ADD, wa.pfd[0], &ev);
+    ev.data.u32 = 2; epoll_ctl(wa.ep, EPOLL_CTL_ADD, wa.efd, &ev);
+    wa.inside = 1;
+    int n = epoll_wait(wa.ep, out, 2, 5000);
+    wa.t_ret = now();
+    wa.got = n > 0 ? (int)out[0].data.u32 : -n;
+    wa.done = 1;
+    return 0;
+}
+
+static void *slot_b(void *x) {
+    (void)x;
+    struct epoll_event ev = {0}, out[2];
+    ev.events = EPOLLIN; ev.data.u32 = 1; epoll_ctl(wb.ep, EPOLL_CTL_ADD, wb.pfd[0], &ev);
+    ev.data.u32 = 2; epoll_ctl(wb.ep, EPOLL_CTL_ADD, wb.efd, &ev);
+    while (!b_go) ;
+    for (;;) {
+        wb.inside++;
+        int n = epoll_wait(wb.ep, out, 2, 5000);
+        if (n > 0 && out[0].data.u32 == 1) break;          /* the pipe: the phase is over */
+        uint64_t v; read(wb.efd, &v, 8);
+        wb.done++;
+    }
+    b_left = 1;
+    return 0;
+}
+
 int main(void) {
     sigset_t m; sigemptyset(&m); sigaddset(&m, SIGUSR1);
     pthread_sigmask(SIG_BLOCK, &m, 0);   /* the threads inherit it: SIGUSR1 is the signalfd's */
@@ -97,6 +137,28 @@ int main(void) {
         }
     }
     for (int i = 0; i < 2; i++) pthread_join(w[i].th, 0);
+    /* the second phase: the slot by traffic */
+    wa.ep = epoll_create1(0); pipe(wa.pfd); wa.efd = eventfd(0, EFD_NONBLOCK);
+    wb.ep = epoll_create1(0); pipe(wb.pfd); wb.efd = eventfd(0, EFD_NONBLOCK);
+    pthread_create(&wa.th, 0, slot_a, 0);
+    while (!wa.inside) ;
+    struct timespec ts20 = {0, 20 * 1000000}; nanosleep(&ts20, 0);   /* A holds the slot */
+    pthread_create(&wb.th, 0, slot_b, 0);
+    b_go = 1;
+    for (int k = 0; k < 20; k++) {
+        struct timespec ts5 = {0, 5 * 1000000}; nanosleep(&ts5, 0);
+        uint64_t one = 1; write(wb.efd, &one, 8);
+    }
+    struct timespec ts10 = {0, 10 * 1000000}; nanosleep(&ts10, 0);
+    double t0 = now();
+    write(wa.pfd[1], "x", 1);
+    while (!wa.done) ;
+    double da = wa.t_ret - t0;
+    write(wb.pfd[1], "x", 1);
+    pthread_join(wa.th, 0); pthread_join(wb.th, 0);
+    if (wa.got != 1) { bad++; printf("mixwait: slot phase: A saw %d, not its pipe\n", wa.got); }
+    if (da > LIMIT_MS) { bad++; printf("mixwait: slot phase: A woke %.1f ms after its pipe\n", da); }
+    printf("mixwait: slot phase: B fed %d times, A woke %.1f ms after its pipe\n", wb.done, da);
     printf("mixwait: %d wakes by a pipe, an eventfd and a signal, the worst %.1f ms (the limit %.0f)\n", 6 * ROUNDS, worst, LIMIT_MS);
     puts(bad ? "mixwait: FAILURES" : "mixwait: ALL OK");
     return 0;

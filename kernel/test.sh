@@ -544,7 +544,7 @@ stopq $q
 # formal: `core=N` had been parsed since session 4 and was applied by nobody until session 22.
 echo "== the manifest: the application of the tuning settings (slice/idleslice/netslice/wakepreempt/fscache/readahead/netyield/stealpush) =="
 q=$(bootd "talaria.test=tuning" /img/disk_ext2.img); sleep 3
-assert "tuning: ALL CHECKS PASSED" "tuning: all eight manifest settings REACHED the scheduler, the FS and the network stack (they are read back from the working atomics)"
+assert "tuning: ALL CHECKS PASSED" "tuning: all nine manifest settings REACHED the scheduler, the FS and the network stack (they are read back from the working atomics)"
 assert "ext2: the block cache from the manifest: [0-9]+ -> 48 MB" "tuning: fscache= re-issues the block cache on a LIVE mounted FS (the size is chosen at the mount, and the manifest lies on the same disk)"
 assert "tuning: a read through the reallocated cache: h=[0-9]+ bytes=6" "tuning: after the cache reallocation the FS reads THE SAME THING (changing the cache base past the tags = reading from someone else's memory, silently)"
 stopq $q
@@ -1977,6 +1977,19 @@ q4=$!; qstarted mixwait
 for i in $(seq 1 120); do sleep 0.5; grep -aq "mixed-set waiters parked\|mixwait: FAILURES\|panic" /tmp/o.log 2>/dev/null && break; done
 assert "mixwait: ALL OK" "mixwait: a parked mixed-set waiter is woken by a pipe, an eventfd and a signal at once, not by its 2 s ceiling"
 assert "mixed-set waiters parked [1-9][0-9]* \(woken [1-9][0-9]*, by the ceiling 0\)" "mixwait: the waiters really parked, and no park ended by the ceiling"
+stopq $q4
+# The slot by traffic (`talaria.netmixsteal=`, ARM64-PLAN §12 item 3): a waiter with no events
+# holds the polling slot, one fed every 5 ms takes it, the old holder parks and its pipe still
+# wakes it at once (mixwait's second phase).
+rm -f /tmp/o.log
+qemu-system-x86_64 -M microvm,rtc=off -enable-kvm -cpu "$CPU" -smp 4 -m 1024 \
+  -kernel "/w/$K" -append "console=ttyS0 talaria.test=mixwait talaria.smp=4 talaria.netmix=2000000000 talaria.netmixsteal=1000000" \
+  -display none -serial file:/tmp/o.log -no-reboot >/tmp/q.log 2>&1 &
+q4=$!; qstarted mixwait-steal
+for i in $(seq 1 120); do sleep 0.5; grep -aq "mixed-set waiters parked\|mixwait: FAILURES\|panic" /tmp/o.log 2>/dev/null && break; done
+assert "mixwait: ALL OK" "mixwait+steal: every wake at once, the holder that lost the slot too"
+assert "the slot taken by traffic [1-9][0-9]* times, holders that saw it gone [1-9]" "mixwait+steal: the slot changed hands and the old holder noticed"
+assert "mixed-set waiters parked [1-9][0-9]* \(woken [1-9][0-9]*, by the ceiling 0\)" "mixwait+steal: no park ended by the ceiling"
 stopq $q4
 
 # THE ISOLATION OF THE MEMORY. The identity window GB0 (32 MB-1 GB of the physical memory)

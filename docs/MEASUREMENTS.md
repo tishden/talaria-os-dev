@@ -1214,6 +1214,35 @@ reading is that a parked waiter's wake-up lands on the request's path once the r
 waiter busy. So `netmix` stays a manifest key, declared by PostgreSQL alone; MongoDB's manifest
 does not take it.
 
+### 10.18. PostgreSQL's polling slot: the postmaster held it (2026-10-25)
+
+Under `netmix` (§10.17) one waiter of a mixed set keeps the polling slot and spins — the
+stack's driver while the rest park — and the slot was first come, first kept. The stat block
+now names the holder (`stat: net: the slot t<N> proc <P>: held <ms>, mixed spins`): locally
+t1, proc 1 — the postmaster, whose set is the listener and the signal pipe — held it for the
+whole run and spun 320 M passes, while every backend, the ones the requests come for,
+parked and waited for the postmaster's pass to wake it. `talaria.netmixsteal=<ns>`
+(`netsys::slot_by_traffic`): a mixed-set waiter whose last `epoll_wait`/`poll` returned
+events less than `ns` ago takes the slot (one CAS) from a holder whose last events are
+older; the old holder sees the slot is not its own at its next pass and parks like any
+non-polling waiter. Two waiters with traffic never trade it. One stand, us-west-2,
+`kernprobe-a64-postgresql-20261025-194000`, phase A = PostgreSQL's manifest (`netmix=1ms`),
+P3 = the knob off again (the drift control):
+
+| point | A | steal 1 ms | steal 200 us | off again | Linux |
+|---|---|---|---|---|---|
+| select1 ceiling | 36.0 k | 58.0 k | 57.8 k | 33.8 k | 44.3 k |
+| pk ceiling | 18.4 k | 21.2 k | 21.0 k | 18.4 k | 24.6 k |
+| select1@32.4k p50 / p99 | 66.0 / 507 | 53.9 / 78 | 54.7 / 80 | 65.7 / 537 | |
+| pk@16.6k p50 / p99 | 121 / 921 | 128 / 307 | 134 / 267 | 120 / 820 | |
+| pk@9.2k p99.9 | 795 | 262 | — | — | |
+
+The low rungs move by −4..−10 % of the median or stay; the control repeats A within
+0.89-1.07. The manifest takes `netmixsteal=1000000`. With it PostgreSQL's select1 ceiling is
+past Linux's; pk's is 21.2 against 24.6 k — what is left of item 3. The gate is `mixwait`'s
+second phase (a holder with no events, a waiter fed every 5 ms takes the slot, the old
+holder's pipe still wakes it at once) on both machines.
+
 ## 11. Reproducing any of this
 
 ```sh

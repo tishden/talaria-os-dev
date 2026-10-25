@@ -2908,6 +2908,14 @@ rungs — the knob is not a default. Left of item 3: the ceiling (pk 18.9 agains
 33 against 44 k). Item 1: Nitro's connection tracking and the MTU are excluded, the VPC mirror
 is not an instrument at this rate; the next stand is a `c7gn`/`.metal` pair.
 
+### 12.3. Progress (2026-10-25, later)
+
+Item 3: under `netmix` the polling slot belonged to the postmaster (first in, never out,
+spinning) and the backends parked; `netmixsteal=<ns>` gives the slot to the waiter with
+traffic (MEASUREMENTS §10.18). PostgreSQL's manifest takes 1 ms: the select1 ceiling
+36.0 → 58.0 k (Linux 44.3 k), pk 18.4 → 21.2 k (Linux 24.6 k), the top rungs' p99 ÷2..÷6.
+Left of item 3: pk's ceiling (21.2 against 24.6 k).
+
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and
