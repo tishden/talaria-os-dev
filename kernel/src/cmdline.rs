@@ -272,7 +272,7 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.clocksync", Kind::Num, "the clock discipline's period, ms (0 — off)"),
     once("talaria.cols", Kind::Num, "the operator terminal's width"),
     once("talaria.console", Kind::Check(console_ok), "the output channel: vga/serial/poll, the flag nopoll"),
-    once("talaria.cont", Kind::Flag, "arm64: read-only ELF segments in 64 KB Contiguous groups (one TLB entry each)"),
+    once("talaria.cont", Kind::Flag, "arm64: read-only ELF segments and file mappings in 64 KB Contiguous groups, one TLB entry each (on; 0 — off)"),
     once("talaria.core", Kind::Check(core_ok), "ELF core dumps: path[,full]"),
     once("talaria.ctltoken", Kind::Text, "the control plane's token (/ctl)"),
     once("talaria.dirtyage", Kind::Num, "a pre-emptive flush of data older than N ms (0 — off, as before)"),

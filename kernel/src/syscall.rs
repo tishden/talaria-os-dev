@@ -2343,10 +2343,15 @@ fn dispatch(f: &Frame, raw: &mut Frame) -> u64 {
                 if fixed && f.a4 & 0x10_0000 != 0 && crate::paging::any_mapped(vaddr, pages) { return (-17i64) as u64; }
                 if file_backed {
                     // the file's content is needed NOW — we allocate the frames at once
-                    if !crate::paging::map_fresh_pages(vaddr, pages) { return (-12i64) as u64; }
+                    // talaria.cont=1: a read-only one (ld.so's text and rodata of a .so) in
+                    // 64 KB Contiguous groups, as the loader does for the image (ARM64-PLAN §12 item 3)
+                    let cont = crate::paging::cont_on() && f.a3 & 2 == 0 && pages >= 16;
+                    let mapped = if cont { crate::paging::map_fresh_pages_cont(vaddr, pages) } else { crate::paging::map_fresh_pages(vaddr, pages) };
+                    if !mapped { return (-12i64) as u64; }
                     let n = crate::ext2::pread(f.a5 as i64, uptr::<u8>(vaddr), f.a2 as usize, f.a6);
                     if n < 0 { return n as u64; }
                     crate::paging::protect(vaddr, pages * 4096, f.a3 & 2 != 0, f.a3 & 4 != 0); // the final rights (PRIV is preserved)
+                    if cont { crate::paging::cont_fold_live(vaddr, pages * 4096); }
                 } else {
                     // anonymous memory is A RESERVATION: a frame will appear at the first access
                     // (demand-zero, paging::lazy_fault). That way the reservation of the JVM's heap/code cache

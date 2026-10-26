@@ -48,7 +48,9 @@ static volatile long last[2];
 static void *runner(void *a) {
     int me = (int)(intptr_t)a;
     pin(me);
-    while (!quit) last[me] = bigfn();
+    // `isb` between calls: another core's write of code is architecturally seen by this core
+    // only after a context synchronization (the writer's `ic ivau` reached every icache)
+    while (!quit) { last[me] = bigfn(); __asm__ volatile("isb" ::: "memory"); }
     return 0;
 }
 
@@ -58,6 +60,12 @@ static int both(long want) {
     double t0 = now();
     while (now() - t0 < 2.0) if (last[0] == want && last[1] == want) return 1;
     return 0;
+}
+// On a failure: what the page holds as data, and what a call returns on every core.
+static void diag(uint32_t *pg) {
+    printf("conttext: diag: the word reads %#x; a call returns", pg[0]);
+    for (int c = 0; c < 4; c++) { pin(c); long r = bigfn(); printf(" core%d=%ld", c, r); }
+    sched_yield(); printf(" again=%ld\n", bigfn());
 }
 static void put(uint32_t *pg, uint32_t w) {
     mprotect(pg, 4096, PROT_READ | PROT_WRITE | PROT_EXEC);
@@ -78,11 +86,11 @@ int main(void) {
     uint32_t *pg = (uint32_t *)((uintptr_t)bigfn + AT * 4);
     for (int round = 0; round < 50; round++) {
         put(pg, RET);
-        if (bigfn() != SHORT) { printf("conttext: FAIL round %d: this thread returns %ld after the `ret` (%ld wanted)\n", round, bigfn(), SHORT); return 1; }
-        if (!both(SHORT)) { printf("conttext: FAIL round %d: a runner keeps returning %ld / %ld after the `ret` (a stale translation)\n", round, last[0], last[1]); return 1; }
+        if (bigfn() != SHORT) { printf("conttext: FAIL round %d: this thread returns %ld after the `ret` (%ld wanted)\n", round, bigfn(), SHORT); diag(pg); return 1; }
+        if (!both(SHORT)) { printf("conttext: FAIL round %d: a runner keeps returning %ld / %ld after the `ret` (a stale translation)\n", round, last[0], last[1]); quit = 1; diag(pg); return 1; }
         put(pg, ADD);
-        if (bigfn() != FULL) { printf("conttext: FAIL round %d: this thread returns %ld after the restore\n", round, bigfn()); return 1; }
-        if (!both(FULL)) { printf("conttext: FAIL round %d: a runner keeps returning %ld / %ld after the restore\n", round, last[0], last[1]); return 1; }
+        if (bigfn() != FULL) { printf("conttext: FAIL round %d: this thread returns %ld after the restore\n", round, bigfn()); diag(pg); return 1; }
+        if (!both(FULL)) { printf("conttext: FAIL round %d: a runner keeps returning %ld / %ld after the restore\n", round, last[0], last[1]); quit = 1; diag(pg); return 1; }
     }
     quit = 1;
     for (int i = 0; i < 2; i++) pthread_join(th[i], 0);

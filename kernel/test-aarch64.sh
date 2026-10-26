@@ -285,9 +285,10 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     bootx 90 "talaria.test=dyn" kernel/target/disk-a64-dyn.img
     assert 'dyn-hello: zlibVersion=1\.'                                       'dyn: a PIE through PT_INTERP (ld-musl-aarch64), threads, dlopen of libz'
     assert 'dyn-hello: ALL OK'                                                'dyn: the dynamic hello finishes'
-    bootx 90 "talaria.test=dyn talaria.cont=1" kernel/target/disk-a64-dyn.img
-    assert 'dyn-hello: ALL OK'                                                'dyn+cont: the PIE and ld-musl in 64 KB Contiguous groups, threads, dlopen'
-    assert 'contiguous 64 KB groups folded [1-9]'                              'dyn+cont: the loader folded the PIE'"'"'s and the interpreter'"'"'s text'
+    assert 'contiguous 64 KB groups folded [1-9]'                              'dyn: the Contiguous hint is the default — the PIE'"'"'s, the interpreter'"'"'s and libz'"'"'s text folded (ARM64-PLAN §12 item 3)'
+    bootx 90 "talaria.test=dyn talaria.cont=0" kernel/target/disk-a64-dyn.img
+    assert 'dyn-hello: ALL OK'                                                'dyn, talaria.cont=0: the same without the hint'
+    assertnot 'contiguous 64 KB groups'                                       'dyn, talaria.cont=0: nothing folded'
   else echo "  SKIP  dyn: there is no kernel/target/disk-a64-dyn.img (services/build-aarch64-db.sh dyn)"; fi
   boot 120 "talaria.test=smp2"
   if [ "$KVM" = 1 ]; then
@@ -356,7 +357,12 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     run 300 "talaria.test=cowstalet" ext2
     assert 'cowstale: ALL OK 200 threads'                                     'cowstalet: a sibling thread on the other core sees the writer'"'"'s COW copy (shootdown before the free; a stale read-only translation is a spurious fault)'
     assertnot "$BAD|\[fault\]"                                              'cowstalet: no fault'
-    run 300 "talaria.test=conttext talaria.cont=1" ext2
+    # Under TCG with one thread: QEMU 8.2's MTTCG kept a translation of the old code for good
+    # (every core, the data reading the new word) in ~1 of 7 boots WITHOUT the knob too — a vCPU
+    # translating the page while another wrote it; one thread: 0 of 15. KVM runs as it is.
+    A0=$ACCEL; [ "$KVM" = 1 ] || ACCEL="-accel tcg,thread=single -cpu max"
+    run 600 "talaria.test=conttext" ext2
+    ACCEL=$A0
     assert 'conttext: ALL OK 50 rounds'                                       'conttext: 64 KB Contiguous text runs, forks, and two cores see a COW write into a folded group and its restore (ARM64-PLAN §12 item 3)'
     assert 'contiguous 64 KB groups folded [1-9][0-9]*, unfolded by a write [1-9]' 'conttext: the loader folded the text, the write unfolded its group'
     assertnot "$BAD|\[fault\]"                                              'conttext: no fault'

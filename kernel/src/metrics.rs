@@ -302,12 +302,17 @@ pub fn dump() {
                 crate::paging::SHOOT_HOSTFLUSH.load(R), crate::paging::SHOOT_HALTED.load(R));
         }
     }
-    // The Contiguous hint (`talaria.cont=1`, arm64): 64 KB groups the loader folded, the
+    // The Contiguous hint (arm64; `talaria.cont=0` — off): 64 KB groups the loader folded, the
     // writes that had to unfold one, the TLB conflict aborts resolved meanwhile.
-    if crate::paging::cont_on() {
+    if crate::paging::cont_on() || crate::paging::cont_ever() {
         use core::sync::atomic::Ordering::Relaxed as R;
-        crate::println!("stat: tlb: contiguous 64 KB groups folded {}, unfolded by a write {}, TLB conflicts resolved {}",
+        crate::print!("stat: tlb: contiguous 64 KB groups folded {}, unfolded by a write {}, TLB conflicts resolved {}; the unfolds by line:",
             crate::paging::CONT_FOLDS.load(R), crate::paging::CONT_UNFOLDS.load(R), crate::paging::CONT_CONFLICTS.load(R));
+        for i in 0..crate::paging::CU_N {
+            let h = crate::paging::CU_HITS[i].load(R);
+            if h != 0 { crate::print!(" {}:{}", crate::paging::CU_LINE[i].load(R), h); }
+        }
+        crate::println!();
     }
     // The breakdown of the price of removing a mapping: the walk / the local flush / the acknowledgements.
     {   use core::sync::atomic::Ordering::Relaxed as R;
