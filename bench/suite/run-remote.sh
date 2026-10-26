@@ -133,7 +133,14 @@ rm -f "$OUT/.warm.json"
 # here is the ladder, and three probes at the ceiling (3x10 s at 53 thousand req/s
 # on postgresql) put twice as many round trips into the cumulative counters of the stat block
 # as the measurement at a low rate itself, and the serial analysis then judges the wrong thing.
-CAPS="$OUT/.caps"; : > "$CAPS"
+# ab-phase.sh runs one case per call (ONLY=) into the same OUT: truncating the whole file kept
+# only the last case's ceiling, and genboard's table printed "—" for pk under the Linux generator
+CAPS="$OUT/.caps"
+if [ -n "${ONLY:-}" ] && [ -f "$CAPS" ]; then
+    grep -v "^$ONLY " "$CAPS" > "$CAPS.tmp" || true; mv "$CAPS.tmp" "$CAPS"
+else
+    : > "$CAPS"
+fi
 old_ifs=$IFS
 [ "${CAP:-1}" = 0 ] && [ -n "${RATES:-}" ] && echo "-- the ceiling is not measured (CAP=0, the ladder is given by RATES=)"
 for stand in talaria linux; do
