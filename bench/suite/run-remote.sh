@@ -4,6 +4,7 @@
 #   run-remote.sh <workload> [case label]
 #   env: STAND_DIR= (where the stand's state lives, by default ~/.talaria-lab/stand)
 #        DUR= WARM= CONNS= REPEAT= RATES= CAP=0 (do not measure the ceiling when RATES= is set)
+#        DURING=1 (a Linux snapshot in the middle of each point: the per-request PMU split)
 #
 # The stand is brought up by stand-up.sh (terraform + ansible) and torn down by stand-down.sh.
 # Here there is only the run: it creates and deletes no resources, so it can be
@@ -211,6 +212,16 @@ for stand in talaria linux; do
                     TALARIA_ID="${talaria_server_id:-}" \
                         "$HERE/lib/metrics-remote.sh" "$stand" "$srvpub" "$OUT/metrics-$stand-$label-r$rate-$r.txt" before || true
                     echo "    $rate (repeat $r):"
+                    # DURING=1: one more Linux snapshot in the middle of the measurement — the
+                    # whole machine's ring 3 / kernel counters per request (statd's perfall
+                    # block); before/after see an idle server. Off by default: perf on the
+                    # server's cores during the run would be the board's thumb on Linux's tail.
+                    duringpid=""
+                    if [ "${DURING:-0}" = 1 ] && [ "$stand" = linux ]; then
+                        ( sleep $((WARM + DUR / 3)); "$HERE/lib/metrics-remote.sh" "$stand" "$srvpub" \
+                            "$OUT/metrics-$stand-$label-r$rate-$r.txt" during ) &
+                        duringpid=$!
+                    fi
                     if eval "job $gen '$f' --proto $PROTO --host $srv --port $PORT $args \
                         --conns $CONNS --rate $rate --duration $DUR --warmup $WARM --spin \
                         --name '$WL/$label' --stand $stand \
@@ -218,6 +229,7 @@ for stand in talaria linux; do
                     then gendown=0
                     else [ $? = 3 ] && gendown=$((gendown + 1)) || gendown=0
                     fi
+                    [ -n "$duringpid" ] && wait "$duringpid"
                     TALARIA_ID="${talaria_server_id:-}" \
                         "$HERE/lib/metrics-remote.sh" "$stand" "$srvpub" "$OUT/metrics-$stand-$label-r$rate-$r.txt" after || true
                     r=$((r + 1))

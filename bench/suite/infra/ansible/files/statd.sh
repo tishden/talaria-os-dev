@@ -17,6 +17,18 @@ snap() {
         -p "$PID" -x, sleep 1 2>&1 | sed 's/^/perf /' || echo "perf is unavailable"
     echo "--- syscalls (a count over one second) ---"
     timeout 3 perf stat -e raw_syscalls:sys_enter -p "$PID" -x, sleep 1 2>&1 | sed 's/^/syscalls /' || true
+    # THE WHOLE MACHINE, RING 3 AND THE KERNEL APART (ARM64-PLAN §12 item 3). `-p` above follows
+    # the postmaster alone — PostgreSQL's backends are its forked children, so the line read
+    # 21 k instructions at IPC 0.26 a second, nothing of the queries. The server's machine runs
+    # the workload only, so `-a` divided by the rung's rate is the per-request price to set
+    # beside Talaria's (talaria.pmuel0=1 / talaria.pmuev=). A c7g guest's PMU has two event
+    # counters and the cycle counter: one set of three a second, never multiplexed.
+    # 0x2D L2D_TLB_REFILL, 0x02 L1I_TLB_REFILL, 0x05 L1D_TLB_REFILL (the PMUv3 common events).
+    echo "--- perf, the whole machine (one second a set) ---"
+    for ev in cycles:u,instructions:u,r2D:u cycles:k,instructions:k,r2D:k r02:u,r05:u r02:k,r05:k \
+              raw_syscalls:sys_enter,context-switches,cpu-migrations; do
+        timeout 3 perf stat -a -e "$ev" -x, sleep 1 2>&1 | sed 's/^/perfall /' || echo "perfall unavailable $ev"
+    done
     echo "--- the task ---"
     sed 's/^/status /' "/proc/$PID/status" 2>/dev/null || true
     sed 's/^/io /'     "/proc/$PID/io"     2>/dev/null || true

@@ -49,8 +49,9 @@ fi
     # STATD_PORT is only for selfcheck (the same client against statd on its own port)
     python3 - "$SRV" "${STATD_PORT:-9999}" <<'PY' 2>&1 || echo "the snapshot is unavailable"
 import socket, sys
-s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=10)
-s.settimeout(10)
+# 30 s: statd computes the whole snapshot before the first byte (~7 s with the perfall sets).
+s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=30)
+s.settimeout(30)
 buf = b""
 while True:
     try:
