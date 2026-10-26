@@ -569,6 +569,8 @@ fn parse_tuning_opts(cmdline: &str) {
         if m != 0 { TUNE_FROM_CMDLINE.fetch_or(m, core::sync::atomic::Ordering::SeqCst); }
     }
     pmu::configure_from_cmdline(cmdline);
+    #[cfg(target_arch = "aarch64")]
+    pmu::configure_late(cmdline);           // talaria.pmuel0=1 / talaria.pmuev=<event> (arm64)
     netsys::pollgap_from_cmdline(cmdline);   // talaria.pollgap=<ns>: an idle stack pass no more often than that
     netsys::idlepoll_from_cmdline(cmdline);  // talaria.idlepoll=<ns>: a core without work runs the stack
     netsys::netscan_from_cmdline(cmdline);   // talaria.netscan=<ns>: the back stop for skipping the set scan

@@ -341,6 +341,8 @@ pub const KNOBS: &[Knob] = &[
     once("talaria.pci", Kind::Flag, "bring PCI up (ECAM/ivshmem)"),
     many("talaria.pin", Kind::Text, "a thread placement rule"),
     once("talaria.pmuchain", Kind::Flag, "arm64: use a declared CHAIN for 64-bit counter pairs (off: a Graviton VM declares it and does not carry)"),
+    once("talaria.pmuel0", Kind::Flag, "arm64: the PMU counts EL0 alone (ring 3's own cycles and events)"),
+    once("talaria.pmuev", Kind::Num, "arm64: the event the LLC-miss slot counts instead (e.g. 0x2D L2D_TLB_REFILL)"),
     once("talaria.pmunarrow", Kind::Flag, "arm64: the PMU's counters at 32 bits, widened by the reader (a test of the no-CHAIN path)"),
     once("talaria.pmutick", Kind::Num, "taking the PMU counters in the tick, ms (0 — off)"),
     once("talaria.pollgap", Kind::Num, "an idle stack pass no more often than every N ns"),

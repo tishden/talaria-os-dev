@@ -855,13 +855,37 @@ unsafe fn cr3_root() -> *mut Pte {
 /// P5: a CR3 reload on THIS core. It must be called after the table changes it
 /// publishes (P4), and never while another core is mid-walk of a table this core is
 /// freeing — that ordering is the shootdown's business.
+#[track_caller]
 unsafe fn flush_tlb() {
+    full_flush_note(core::panic::Location::caller().line());
     // arm64 with ASIDs: this core's flush is not enough any more — a core that ran a space
     // keeps its translations past the switch (`mmu::asid_on`), so the flush that relied on the
     // switch to clean the other cores is the broadcast one (ARM64-PLAN §12 item 3).
     #[cfg(target_arch = "aarch64")]
     if mmu::asid_on() { mmu::flush_all_is(); return; }
     mmu::flush_all();
+}
+
+/// WHO EMPTIES THE TLB. A full flush is the broadcast one on arm64 with ASIDs, and after it every
+/// core walks its whole working set again: PostgreSQL's pk on a `c7g` paid ~800 L2-TLB refills
+/// and ~930 L1I-TLB refills per request in ring 3, at an IPC of 0.6 (MEASUREMENTS §10.20). The
+/// count by the caller's line in this file (`flush_tlb`, and the direct `flush_all_is` sites),
+/// for the stat block.
+pub const FF_N: usize = 12;
+pub static FF_LINE: [core::sync::atomic::AtomicU64; FF_N] = [const { core::sync::atomic::AtomicU64::new(0) }; FF_N];
+pub static FF_HITS: [core::sync::atomic::AtomicU64; FF_N] = [const { core::sync::atomic::AtomicU64::new(0) }; FF_N];
+pub static FF_OTHER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+fn full_flush_note(line: u32) {
+    use core::sync::atomic::Ordering;
+    let l = line as u64;
+    for i in 0..FF_N {
+        let v = FF_LINE[i].load(Ordering::Relaxed);
+        if v == l { FF_HITS[i].fetch_add(1, Ordering::Relaxed); return; }
+        if v == 0 && FF_LINE[i].compare_exchange(0, l, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            FF_HITS[i].fetch_add(1, Ordering::Relaxed); return;
+        }
+    }
+    FF_OTHER.fetch_add(1, Ordering::Relaxed);
 }
 
 /// How many pages it still makes sense to knock out one by one (`invlpg`) rather than extinguishing the TLB
@@ -911,7 +935,7 @@ unsafe fn flush_range_all(start: u64, pages: u64, shoot: fn(u64, u64)) {
     {
         let _ = shoot;
         // 0 is "everything" for the shootdown the pair ended with
-        if pages == 0 || pages > INVLPG_MAX { mmu::flush_all_is(); } else { mmu::flush_range_is(start & !0xFFF, pages); }
+        if pages == 0 || pages > INVLPG_MAX { full_flush_note(line!()); mmu::flush_all_is(); } else { mmu::flush_range_is(start & !0xFFF, pages); }
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
@@ -1569,10 +1593,22 @@ pub fn map_lazy_pages(vaddr: u64, pages: u64, writable: bool, exec: bool, none: 
         if none { e |= PTE_PNONE; }
         let end = vaddr + pages * 4096;
         let mut a = vaddr;
+        // A FLUSH ONLY OVER WHAT A TLB CAN HOLD. The entries written here are not present, and a
+        // non-present entry is cached by no TLB (x86 or arm64); what was mapped in the range
+        // `unmap_proc` above has already removed and flushed. What is left is an entry this loop
+        // overwrites while it is still PRESENT — a leaf `unmap_proc` put back (the identity
+        // window's supervisor leaf), a 2 MB block `pt_for` splits, a directory entry pointing at a
+        // table (the walk caches hold it). Only then the flush. It was unconditional: on arm64
+        // with ASIDs `flush_tlb` is the broadcast `tlbi vmalle1is`, and PostgreSQL's one mmap per
+        // query emptied every core's TLB — ~800 L2-TLB refills a request in ring 3, its IPC 0.6
+        // (MEASUREMENTS §10.20).
+        let mut held = false;
         while a < end {
+            let de = pte_r(pde_ptr_in(cr3, a));
             // An aligned piece of 2 MB goes as ONE PD entry (and one TLB page
             // for all the 512 pages when it is materialised).
             if a & 0x1F_FFFF == 0 && end - a >= 0x20_0000 {
+                if de & PTE_P != 0 { held = true; } // a block or a table pointer is replaced
                 // An aligned 2 MB goes as ONE directory entry. As a huge page
                 // (one TLB line per 2 MB, materialisation in its entirety) — only
                 // if that is justified by the memory; otherwise as the same reservation but with
@@ -1585,16 +1621,23 @@ pub fn map_lazy_pages(vaddr: u64, pages: u64, writable: bool, exec: bool, none: 
                 continue;
             }
             // The descent over the levels is one per 2 MB, after that go 512 neighbouring entries.
+            if de & PTE_P != 0 && de & PTE_PS != 0 { held = true; } // a present 2 MB block `pt_for` splits
             let stop = chunk_end(a, end);
             match pt_for(cr3, a, true) {
-                Some(pt) => while a < stop { pte_w(pt.add(pt_idx(a)), e); a += 4096; },
-                None => return false, // there is nothing to build a table from — an honest ENOMEM
+                Some(pt) => while a < stop {
+                    let p = pt.add(pt_idx(a));
+                    if pte_r(p) & PTE_P != 0 { held = true; }
+                    pte_w(p, e); a += 4096;
+                },
+                None => { if held { flush_tlb(); } return false; } // there is nothing to build a table from — an honest ENOMEM
             }
         }
-        flush_tlb();
+        if held { flush_tlb(); } else { LAZY_MAP_NOFLUSH.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
     }
     true
 }
+/// The `mmap` reservations that needed no TLB flush (`map_lazy_pages`), for the stat block.
+pub static LAZY_MAP_NOFLUSH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// A TLB shootdown: make THE OTHER cores reload CR3. It is called after the removal
 /// or the tightening of mappings (munmap/mprotect/MADV_DONTNEED). The installation of a NEW
@@ -2005,7 +2048,7 @@ fn shootdown_impl(start: u64, pages: u64, _only_cr3: Option<u64>) {
     // A large range or "everything" (pages == 0) is the broadcast full flush: `flush_range`
     // would take the LOCAL one for it (and nothing at all for 0).
     unsafe {
-        if pages == 0 || pages > INVLPG_MAX { mmu::flush_all_is(); } else { flush_range(start, pages); }
+        if pages == 0 || pages > INVLPG_MAX { full_flush_note(line!()); mmu::flush_all_is(); } else { flush_range(start, pages); }
     }
 }
 

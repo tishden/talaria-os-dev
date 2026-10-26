@@ -366,11 +366,59 @@ pub fn read_branch() -> (u64, u64) {
 /// A full snapshot of the CURRENT core's counters.
 pub fn sample() -> Sample {
     if !available() { return Sample { tsc: super::cpu::counter(), ..Sample::ZERO }; }
+    late_apply();
     Sample {
         cycles: pmccntr_r(), instrs: read_logical(L_INS), ref_cycles: 0,
         llc_miss: read_logical(L_LLCM), llc_ref: read_logical(L_LLCR),
         br_ret: read_logical(L_BRR), br_miss: read_logical(L_BRM),
         tsc: super::cpu::counter(),
+    }
+}
+
+/// THE COUNTERS OF RING 3 ALONE, AND ANOTHER EVENT. `talaria.pmuel0=1` counts the cycles and the
+/// events at EL0 only (PMCCFILTR/PMEVTYPER's P bit), `talaria.pmuev=<event>` puts that event (a
+/// decimal or 0x number, e.g. 0x2D L2D_TLB_REFILL, 0x02 L1I_TLB_REFILL, 0x01 L1I_CACHE_REFILL) in
+/// the LLC-miss slot — the stat block's "LLC misses" then count it. Why: PostgreSQL's pk on a
+/// `c7g` spends 64 us of a core per request in ring 3 between its read and its write, Linux's
+/// whole user time per request is 37 (MEASUREMENTS §10.20), and only the core's own counters
+/// say whether those are more instructions or slower ones. The knobs come with user-data, after
+/// the boot core's PMU is up: each core applies them at its next sample (`late_apply`).
+static EL0_ONLY: AtomicBool = AtomicBool::new(false);
+static EV_LATE: AtomicU32 = AtomicU32::new(0);
+static LATE_GEN: AtomicU32 = AtomicU32::new(0);
+static LATE_DONE: [AtomicU32; MAXCPU] = [const { AtomicU32::new(0) }; MAXCPU];
+pub fn configure_late(cmdline: &str) {
+    let el0 = crate::cmdline::flag(cmdline, "talaria.pmuel0");
+    let ev = crate::cmdline::num(cmdline, "talaria.pmuev").unwrap_or(0) as u32;
+    if !el0 && ev == 0 { return; }
+    EL0_ONLY.store(el0, Ordering::Relaxed);
+    EV_LATE.store(ev, Ordering::Relaxed);
+    LATE_GEN.fetch_add(1, Ordering::Release);
+    crate::println!("talaria: the PMU: {} counted, the LLC-miss slot carries {}", if el0 { "EL0 alone" } else { "EL0 and EL1" },
+        if ev != 0 { if has_event(ev) { "the event as asked" } else { "the event as asked (NOT declared by PMCEID)" } } else { "its own event" });
+    if ev != 0 { crate::println!("talaria: the PMU: the LLC-miss slot's event {:#x}", ev); }
+}
+#[inline]
+fn late_apply() {
+    let g = LATE_GEN.load(Ordering::Acquire);
+    let c = super::cpu::cpu_index().min(MAXCPU - 1);
+    if LATE_DONE[c].load(Ordering::Relaxed) == g { return; }
+    LATE_DONE[c].store(g, Ordering::Relaxed);
+    let p = if EL0_ONLY.load(Ordering::Relaxed) { 1u64 << 31 } else { 0 };
+    let ev = EV_LATE.load(Ordering::Relaxed);
+    unsafe {
+        pmccfiltr_w(p);
+        for l in 0..NL {
+            let i = IDX[l].load(Ordering::Relaxed);
+            if i == NONE { continue; }
+            if l == L_LLCM && ev != 0 {
+                EVT[l].store(ev, Ordering::Relaxed);
+                evcnt_w(i, 0);
+                LO[c][l].store(0, Ordering::Relaxed);
+            }
+            evtype_w(i, EVT[l].load(Ordering::Relaxed) as u64 | p);
+        }
+        super::cpu::isb();
     }
 }
 
