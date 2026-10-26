@@ -2916,6 +2916,17 @@ traffic (MEASUREMENTS §10.18). PostgreSQL's manifest takes 1 ms: the select1 ce
 36.0 → 58.0 k (Linux 44.3 k), pk 18.4 → 21.2 k (Linux 24.6 k), the top rungs' p99 ÷2..÷6.
 Left of item 3: pk's ceiling (21.2 against 24.6 k).
 
+### 12.4. Progress (2026-10-26)
+
+Item 3, pk's ceiling (MEASUREMENTS §10.19): the arm64 double TLB invalidation is gone
+(munmap 3.3 → 2.0 us; KVM gate clean), and nine knob phases did not move the ceiling —
+netmix's ceiling, the card line with and without parking, netyield, wakeidle, wakepull,
+wakepreempt. The tick profile booked the kernel's masked syscall time to ring 3; counted
+apart, PostgreSQL's ring 3 is ~29 us per request (Linux's user time 37), a quarter of the
+cores sleep at the ceiling: it is the round trip (183 against 159 us with 4 connections),
+not the processor. Left of item 3: those 24 us — the backend's runnable-but-not-running
+time between its read and its write is the next instrument.
+
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and

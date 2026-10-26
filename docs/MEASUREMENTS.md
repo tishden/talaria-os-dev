@@ -1243,6 +1243,54 @@ past Linux's; pk's is 21.2 against 24.6 k — what is left of item 3. The gate i
 second phase (a holder with no events, a waiter fed every 5 ms takes the slot, the old
 holder's pipe still wakes it at once) on both machines.
 
+### 10.19. PostgreSQL's pk ceiling: what it is not, and a profile that lied (2026-10-26)
+
+After §10.18 pk's ceiling was 21.2 k against Linux's 24.6 k. Six stands in us-west-2
+(`kernprobe-a64-postgresql-2026102{5,6}-*`), each phase A on both sides and then one phase
+per hypothesis on the same rise; the ceilings below are Talaria's pk unless said.
+
+**The double TLB invalidation (fixed, 4da5e4c).** On arm64 `flush_range` is already the
+broadcast `TLBI VAAE1IS`; munmap/mprotect/madvise/relazy/unmap_ident then shot the same
+range down a second time with IPIs. `paging::flush_range_all` does one or the other: the
+per-request munmap 3.3 → 2.0 us, the stat block's acknowledgements 899 → 0 ns. KVM
+c7g.metal gate (`infra/aws/logs/aarch64-20261025-230038`): 394/0, the databases 15/0 twice,
+soak 13×50 and the races 6×96 without a failure. The ceiling did not move with it.
+
+**Rejected by measurement** (each against phase A of its own rise):
+
+| knob | pk ceiling | A | Linux |
+|---|---|---|---|
+| `netmix` 20 ms / 100 ms (`-222113`) | = the control | | |
+| `netirq=1 netpark=1ms` / `netyield=2` (`-232442`) | ~21.9 k | | 25.3 k |
+| `netirq=1 netpark=1ms` / `netirq=1` / stat only (`-012354`) | 21.2 / 21.9 / 21.0 k | | |
+| `wakeidle=1` / `wakepull=1` / `wakepreempt=20us` / both pulls (`-035450`) | 20.2 / 20.7 / 21.9 / 20.9 k | 21.8 k | 25.2 k |
+
+Linux's generator against Talaria's server gives 20.9 k (G1): the gap is the server's.
+The card line does what it is for — the ring→pass of the 60-99 us class 19 → 6-8 us, of
+the slow class 30 → 13-14, the top rung's p99 495 → 273 us — and the ceiling stays.
+
+**The profile booked the kernel to ring 3.** Syscalls run with the interrupts masked;
+a tick that comes meanwhile is taken at the first instruction the mask lets through, the
+one after the `svc`. `talaria.prof` put 60 % of PostgreSQL's ring-3 samples on the libc
+page of `epoll_pwait`'s `svc`. The stat block now counts a ring-3 sample on the task's last
+syscall's return address separately (`sched::PROF_SYSTAIL`): 48-51 % of the "ring 3"
+samples, 98 % of them within 5 us of the syscall's exit (`-023124`). The top pk rung with
+that taken out (`bench/suite/lib/profdelta.py`, the difference of consecutive blocks):
+
+| ring 3 | the kernel under the mask | the waiter's spin (`yield_window`) | cores asleep | the stat block's own print |
+|---|---|---|---|---|
+| 28-29 % | 29-30 % (`epoll_pwait` 14, `sendto` 7, `recvfrom` 3, `munmap` 3) | 16 % | 15 % | 10 % |
+
+Ring 3 is ~29 us of a core per request; Linux's `/proc/stat` at 19.6 k gives 37 us of user
+time per request (user 33 %, sys 58 %, idle 8 %) — PostgreSQL itself is not slower here.
+`talaria.sysprof` per request at the top rung (`-031707`): sendto 5.2 us, munmap 2.0, mmap
+1.5, recvfrom 2 × 1.0, lseek 2 × 0.5, one page fault. And a quarter of the cores sleep and
+a sixth spin: the ceiling is not the processor's. With the generator's 4 connections it is
+the round trip — 4 / 21.8 k = 183 us against Linux's 159 — and the 24 us are not named yet.
+The turnaround histogram puts the server's read→write at 70 us on average for the
+60-99 us class while the processor work between them is about 35: the next instrument is
+the backend's runnable-but-not-running time inside that interval.
+
 ## 11. Reproducing any of this
 
 ```sh
