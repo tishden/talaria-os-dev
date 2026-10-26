@@ -686,7 +686,7 @@ unsafe fn pte_r(p: *const Pte) -> u64 { mmu::dec(core::ptr::read_volatile(p).0) 
 #[track_caller]
 unsafe fn pte_w(p: *mut Pte, canonical: u64) {
     #[cfg(target_arch = "aarch64")]
-    let canonical = cont_guard(p, canonical);
+    let canonical = cont_guard(p, canonical, core::panic::Location::caller().line());
     pte_w_raw(p, canonical)
 }
 /// `pte_w` without the Contiguous guard: the caller writes a CONT entry it means
@@ -765,9 +765,9 @@ unsafe fn pte_cas(p: *mut Pte, expect: u64, new: u64) -> bool {
     // A slot of a Contiguous group is unfolded before it is swapped (`cont_guard`); the
     // caller's `expect` was read with the bit, the slot holds it no more.
     #[cfg(target_arch = "aarch64")]
-    let (expect, new) = if CONT_ON.load(core::sync::atomic::Ordering::Relaxed)
+    let (expect, new) = if CONT_EVER.load(core::sync::atomic::Ordering::Relaxed)
         && pte_r(p) & PTE_CONT != 0 && expect & PTE_CONT != 0 {
-        let n = cont_guard(p, new);
+        let n = cont_guard(p, new, core::panic::Location::caller().line());
         (if n & PTE_CONT != 0 { expect } else { expect & !PTE_CONT }, n)
     } else { (expect, new & !PTE_CONT) };
     let a = &*(p as *const core::sync::atomic::AtomicU64);
@@ -777,7 +777,7 @@ unsafe fn pte_cas(p: *mut Pte, expect: u64, new: u64) -> bool {
     ok
 }
 
-// ── THE CONTIGUOUS HINT (arm64, `talaria.cont=1`; ARM64-PLAN §12 item 3) ───────────────────
+// ── THE CONTIGUOUS HINT (arm64, on by default, `talaria.cont=0` — off; ARM64-PLAN §12 item 3) ───────────────────
 //
 // Sixteen level-3 entries that map sixteen consecutive frames, the first 64 KB-aligned in
 // both spaces, with the same attributes, may carry the Contiguous bit: the TLB then holds
@@ -805,8 +805,12 @@ pub(crate) const PTE_CONT: u64 = 1 << 56;
 /// GUARD (`mmu` puts them in 55..58).
 #[cfg(target_arch = "aarch64")]
 const CONT_SW: u64 = PTE_COW | PTE_PRIV | PTE_LAZY | PTE_GUARD;
-/// `talaria.cont=1` (arm64): the loader folds read-only segments.
+/// arm64 by default (`talaria.cont=0` — off): the loader and a read-only file mmap fold.
 pub static CONT_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// A group was ever folded: the guard holds from then on, whatever CONT_ON says later (a
+/// `talaria.cont=0` from user-data after the boot's default must not leave a group unguarded).
+static CONT_EVER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+pub fn cont_ever() -> bool { CONT_EVER.load(core::sync::atomic::Ordering::Relaxed) }
 /// Groups folded / unfolded by a write / TLB conflict aborts resolved (the stat block).
 pub static CONT_FOLDS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static CONT_UNFOLDS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -817,13 +821,28 @@ pub fn cont_on() -> bool { CONT_ON.load(core::sync::atomic::Ordering::Relaxed) }
 /// break it. # Safety: as `pte_w`.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn cont_guard(p: *mut Pte, new: u64) -> u64 {
-    if !CONT_ON.load(core::sync::atomic::Ordering::Relaxed) { return new & !PTE_CONT; }
+unsafe fn cont_guard(p: *mut Pte, new: u64, line: u32) -> u64 {
+    if !CONT_EVER.load(core::sync::atomic::Ordering::Relaxed) { return new & !PTE_CONT; }
     let old = pte_r(p);
     if old & PTE_P == 0 || old & PTE_CONT == 0 { return new & !PTE_CONT; }
     if new & PTE_P != 0 && (old ^ new) & !CONT_SW == 0 { return new; }    // the software bits only
     cont_unfold(p);
+    cont_line_note(line);
     new & !PTE_CONT
+}
+
+/// Who unfolds: the writes that broke a group, by the line of paging.rs (the stat block).
+pub const CU_N: usize = 6;
+pub static CU_LINE: [core::sync::atomic::AtomicU32; CU_N] = [const { core::sync::atomic::AtomicU32::new(0) }; CU_N];
+pub static CU_HITS: [core::sync::atomic::AtomicU64; CU_N] = [const { core::sync::atomic::AtomicU64::new(0) }; CU_N];
+#[cfg(target_arch = "aarch64")]
+fn cont_line_note(line: u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    for i in 0..CU_N {
+        let v = CU_LINE[i].load(Relaxed);
+        if v == line { CU_HITS[i].fetch_add(1, Relaxed); return; }
+        if v == 0 && CU_LINE[i].compare_exchange(0, line, Relaxed, Relaxed).is_ok() { CU_HITS[i].fetch_add(1, Relaxed); return; }
+    }
 }
 
 /// Clear the Contiguous bit on the sixteen slots of `p`'s group and flush every core.
@@ -850,7 +869,8 @@ unsafe fn cont_unfold(p: *mut Pte) {
 /// Fold every whole 64 KB group of [lo, hi) in the space `pml4` that qualifies: sixteen
 /// present user 4K leaves, read-only, the frames consecutive from a 64 KB-aligned one, the
 /// same bits. The space must not be running on any core yet (the loader's, before the first
-/// entry): nothing can hold its old translations. Returns the groups folded.
+/// entry): nothing can hold its old translations — `cont_fold_live` is the running space's.
+/// Returns the groups folded.
 #[cfg(target_arch = "aarch64")]
 pub fn cont_fold(pml4: u64, lo: u64, hi: u64) -> u64 {
     if !cont_on() { return 0; }
@@ -868,6 +888,7 @@ pub fn cont_fold(pml4: u64, lo: u64, hi: u64) -> u64 {
                     && e0 & PTE_CONT == 0 && pa0 & 0xFFFF == 0
                     && (1..16).all(|i| pte_r(first.add(i)) == e0 + (i as u64) * 4096);
                 if ok {
+                    CONT_EVER.store(true, core::sync::atomic::Ordering::SeqCst); // before the first CONT entry
                     for i in 0..16 { pte_w_raw(first.add(i), (e0 + (i as u64) * 4096) | PTE_CONT); }
                     n += 1;
                 }
@@ -2569,6 +2590,51 @@ pub fn map_fresh_pages(vaddr: u64, pages: u64) -> bool {
     // SAFETY: P4 — the new entries are published, the TLB may hold the old (absent) ones.
     unsafe { flush_tlb(); }
     true
+}
+
+/// `map_fresh_pages` for a mapping that will be read-only (`talaria.cont=1`): every whole
+/// 64 KB of [vaddr, +pages) gets sixteen consecutive frames from a 64 KB-aligned one, so that
+/// `cont_fold_live` can fold it after the content and the final rights are in.
+pub fn map_fresh_pages_cont(vaddr: u64, pages: u64) -> bool {
+    let cr3 = current_cr3();
+    unmap_proc(vaddr, pages);
+    let node = crate::affinity::my_node();
+    let (mut a, end) = (vaddr, vaddr + pages * 4096);
+    while a < end {
+        let n = if a & 0xFFFF == 0 && a + 0x1_0000 <= end { 16 } else { 1 };
+        let fr = if n == 16 { crate::mem::alloc_workload_aligned(16, 0x1_0000) } else { None }
+            .filter(|&f| virt_to_phys(f) == f);
+        let (fr, n) = match fr {
+            Some(f) => (f, 16),
+            None => {
+                let mut fr = 0u64;
+                for _ in 0..8 { match crate::mem::alloc_contig_node(1, node) { Some(f) => { if virt_to_phys(f) == f { fr = f; break; } }
+                    None => return false } }
+                if fr == 0 { return false; }
+                (fr, 1)
+            }
+        };
+        // SAFETY: P1 — frames straight from the allocator, zeroed before anybody can see them.
+        unsafe { core::ptr::write_bytes(kptr::<u8>(fr), 0, (n * 4096) as usize); }
+        for k in 0..n { map_leaf(cr3, a + k * 4096, fr + k * 4096, true, true, false); }
+        a += n * 4096;
+    }
+    // SAFETY: P4 — as `map_fresh_pages`.
+    unsafe { flush_tlb(); }
+    true
+}
+
+/// `cont_fold` on the CURRENT space, live: the range was mapped by this very syscall and its
+/// address is not handed out yet, so only this core can hold its (non-Contiguous)
+/// translations — the fold is followed by the broadcast flush, and a TLB conflict meanwhile is
+/// the abort handlers' retry.
+pub fn cont_fold_live(vaddr: u64, len: u64) -> u64 {
+    if !cont_on() { return 0; }
+    let n = cont_fold(current_cr3() & ADDR_MASK, vaddr, vaddr + len);
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: P5 — every core drops what it held of the range.
+    if n != 0 { unsafe { mmu::flush_all_is(); } }
+    n
 }
 
 /// Make a page a guard page: remove present -> an access gives a clear #PF.

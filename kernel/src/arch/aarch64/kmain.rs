@@ -356,7 +356,7 @@ extern "C" fn rust_main_aarch64(x0: u64) -> ! {
         super::pmu::USE_CHAIN.store(crate::cmdline::flag(cmdline, "talaria.pmuchain"), Ordering::Relaxed);
         // before the first space: a space created with ASIDs off runs on ASID 0 for good
         super::mmu::ASID_ON.store(!crate::cmdline::has(cmdline, "talaria.asid", "0"), Ordering::Relaxed);
-        crate::paging::CONT_ON.store(crate::cmdline::flag(cmdline, "talaria.cont"), Ordering::Relaxed);
+        crate::paging::CONT_ON.store(!crate::cmdline::has(cmdline, "talaria.cont", "0"), Ordering::Relaxed);
         crate::boot_shared(si, cmdline, cpu::counter_hz(), None);
     }
     // The bring-up's EL0 probes call the vDSO through the KERNEL's tables, so the image is

@@ -571,10 +571,10 @@ fn parse_tuning_opts(cmdline: &str) {
     pmu::configure_from_cmdline(cmdline);
     #[cfg(target_arch = "aarch64")]
     pmu::configure_late(cmdline);           // talaria.pmuel0=1 / talaria.pmuev=<event> (arm64)
-    // talaria.cont=1 from user-data too (the boot's own cmdline set it in `kmain`): only the
-    // spaces loaded from here on are folded, the guard holds from the first fold.
+    // talaria.cont= from user-data too (the boot's own cmdline is read in `kmain`): it decides
+    // for the spaces loaded from here on; the guard holds from the first fold either way.
     #[cfg(target_arch = "aarch64")]
-    if cmdline::flag(cmdline, "talaria.cont") { paging::CONT_ON.store(true, core::sync::atomic::Ordering::Relaxed); }
+    if let Some(v) = cmdline::value(cmdline, "talaria.cont") { paging::CONT_ON.store(v != "0", core::sync::atomic::Ordering::Relaxed); }
     netsys::pollgap_from_cmdline(cmdline);   // talaria.pollgap=<ns>: an idle stack pass no more often than that
     netsys::idlepoll_from_cmdline(cmdline);  // talaria.idlepoll=<ns>: a core without work runs the stack
     netsys::netscan_from_cmdline(cmdline);   // talaria.netscan=<ns>: the back stop for skipping the set scan
