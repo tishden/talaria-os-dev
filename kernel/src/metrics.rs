@@ -183,6 +183,19 @@ pub fn dump() {
         }
         let (st, lo) = (crate::netsys::NET_MIX_STEALS.load(Relaxed), crate::netsys::NET_MIX_LOST.load(Relaxed));
         if st | lo != 0 { crate::println!("stat: net: the slot taken by traffic {} times, holders that saw it gone {}", st, lo); }
+        {   // the network waits' time by phase, summed over the tasks (`netsys::NW_PH_T`): a phase
+            // owns the time to the next one recorded, so "the exit" runs on into ring 3 and the
+            // next syscall. The stat block's difference is what a rung's waits cost by phase —
+            // the tick cannot see it, the waits run with the interrupts masked (MEASUREMENTS §10.19).
+            let mut ph = [0u64; 16];
+            for t in 0..crate::sched::NTASKS { for k in 0..16 { ph[k] += crate::netsys::NW_PH_T[t][k].load(Relaxed); } }
+            if ph.iter().any(|&v| v != 0) {
+                let us = |c: u64| c / (crate::tsc::hz() / 1_000_000).max(1);
+                crate::print!("stat: net: the waits by phase, us:");
+                for k in 1..16 { if ph[k] != 0 { crate::print!(" {}={}", k, us(ph[k])); } }
+                crate::println!(" (1 the entry 2 the top 3 the poll 4 the pass 5 the lock 6 the scan 7 the window 8 the spin 9 the yield 10 back 11 NIC 12 parked 13 the exit 14 read 15 write)");
+            }
+        }
         // Who held the polling slot (the top four by time): the one a mixed set leaves spinning.
         let hz = crate::tsc::hz().max(1);
         let mut top = [(0u64, usize::MAX); 4];
@@ -959,6 +972,22 @@ pub fn top_code() {
         shown[best] = true;
         let (page, hits) = crate::sched::prof_slot(best);
         crate::println!("stat:   {:#x}: {} ({}%)", page, hits, hits * 100 / total);
+    }
+    {   // the kernel's masked time booked to ring 3 (sched::PROF_SYSTAIL)
+        let mut all = 0u64;
+        for nr in 0..512 { all += crate::sched::prof_systail(nr); }
+        if all != 0 {
+            let mut top = [(0usize, 0u64); 4];
+            for k in 0..4 {
+                for nr in 0..512 {
+                    let v = crate::sched::prof_systail(nr);
+                    if v > top[k].1 && !top[..k].iter().any(|e| e.0 == nr) { top[k] = (nr, v); }
+                }
+            }
+            crate::println!("stat: of them on a syscall's return address {} ({}%), within 5 us of its exit {} — the kernel's masked time; \
+                by syscall: #{} {} #{} {} #{} {} #{} {}", all, all * 100 / total, crate::sched::prof_systail_near(),
+                top[0].0, top[0].1, top[1].0, top[1].1, top[2].0, top[2].1, top[3].0, top[3].1);
+        }
     }
 }
 

@@ -315,6 +315,16 @@ static PROFK_ADDR: [core::sync::atomic::AtomicU64; PROF_N] =
     [const { core::sync::atomic::AtomicU64::new(0) }; PROF_N];
 static PROFK_HITS: [core::sync::atomic::AtomicU64; PROF_N] =
     [const { core::sync::atomic::AtomicU64::new(0) }; PROF_N];
+/// THE RING-3 SAMPLES THAT ARE THE KERNEL'S. A tick that comes while the kernel runs with its
+/// interrupts masked is taken at the first instruction the masking lets through — after the
+/// `eret`/`sysret`, the user instruction right behind the syscall. The page table then books the
+/// kernel's masked time to the libc page holding the wrapper: PostgreSQL's pk on a `c7g` showed
+/// 60 % of its "ring 3" on the one page of `epoll_pwait`'s `svc` (MEASUREMENTS §10.19). A sample
+/// on exactly the task's last syscall's return address is counted here by the syscall's number,
+/// and the share of them within 5 us of that syscall's exit stamp, which a ring-3 instruction
+/// executed by chance would not keep.
+static PROF_SYSTAIL: [core::sync::atomic::AtomicU64; 512] = [const { core::sync::atomic::AtomicU64::new(0) }; 512];
+static PROF_SYSTAIL_NEAR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// The watchdog "the workload has stalled": how many ticks in a row the core executes ONE and the same
 /// task. A waiter in an mwait is "executing" too, so this counter alone means nothing
@@ -424,6 +434,8 @@ pub fn prof_ring_get(i: usize, stk: &mut [u64; PROFR_D]) -> (usize, usize, usize
 pub fn prof_ring_reset() {
     PROFR_W.store(0, Ordering::SeqCst);
     PROF_SKIP.store(0, Ordering::SeqCst);
+    for c in PROF_SYSTAIL.iter() { c.store(0, Ordering::Relaxed); }
+    PROF_SYSTAIL_NEAR.store(0, Ordering::Relaxed);
     for i in 0..PROF_N { PROF_PAGE[i].store(0, Ordering::Relaxed); PROF_HITS[i].store(0, Ordering::Relaxed);
                          PROFK_ADDR[i].store(0, Ordering::Relaxed); PROFK_HITS[i].store(0, Ordering::Relaxed); }
 }
@@ -473,6 +485,17 @@ fn prof_note(frame: u64) {
         }
         return;
     }
+    let t = crate::percpu::cur_task() as usize;
+    if t < NTASKS {
+        let ls = crate::syscall::LAST_SYS[t].load(Relaxed);
+        if ls != u64::MAX && ls & 0xFFFF_FFFF_FFFF == rip & 0xFFFF_FFFF_FFFF {
+            PROF_SYSTAIL[(ls >> 48) as usize & 511].fetch_add(1, Relaxed);
+            let near = (crate::tsc::hz() / 200_000).max(1);
+            if crate::tsc::rdtsc().wrapping_sub(crate::syscall::LAST_SYS_T1[t].load(Relaxed)) < near {
+                PROF_SYSTAIL_NEAR.fetch_add(1, Relaxed);
+            }
+        }
+    }
     let page = rip & !0xFFF;
     for i in 0..PROF_N {
         let p = PROF_PAGE[i].load(Relaxed);
@@ -491,6 +514,10 @@ pub fn prof_slot(i: usize) -> (u64, u64) {
     (PROF_PAGE[i].load(Relaxed), PROF_HITS[i].load(Relaxed))
 }
 pub fn prof_len() -> usize { PROF_N }
+/// The ring-3 samples on a syscall's return address, by the syscall's number (see `PROF_SYSTAIL`).
+pub fn prof_systail(nr: usize) -> u64 { PROF_SYSTAIL.get(nr).map_or(0, |c| c.load(Ordering::Relaxed)) }
+/// Of them, within 5 us of the syscall's exit.
+pub fn prof_systail_near() -> u64 { PROF_SYSTAIL_NEAR.load(Ordering::Relaxed) }
 /// The same for ring 0 (the address with an accuracy of 64 bytes, the hits).
 pub fn profk_slot(i: usize) -> (u64, u64) {
     use core::sync::atomic::Ordering::Relaxed;
