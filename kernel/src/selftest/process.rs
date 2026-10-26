@@ -186,6 +186,14 @@ pub fn run(name: &str, cmdline: &str) -> bool {
             if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/cowstale", args, &[b"HOME=/"]); } }
             crate::suite::park()
         }
+        "conttext" => {
+            // The Contiguous hint (`talaria.cont=1`, arm64; ARM64-PLAN §12 item 3): 256 KB of
+            // text folded into 64 KB groups runs, forks, and keeps running on two cores while
+            // one page of a group is COW-written and restored — the write must unfold the group.
+            crate::smp::start_from_cmdline(cmdline);
+            if crate::fs::init() { unsafe { crate::user::run_process_disk(b"/conttext", &[b"conttext"], &[b"HOME=/"]); } }
+            crate::suite::park()
+        }
         "umarkt" => {
             // The slow-interval instrument (`umark`, ARM64-PLAN §11 item 2b): a hog spinning on
             // core 1, the main thread names its 2 ms sleeps on core 0; the `stat:` block at the

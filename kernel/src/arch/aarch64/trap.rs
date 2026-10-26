@@ -691,6 +691,7 @@ extern "C" fn sync_el1_entry(kind: u64, f: &mut Frame) -> u64 {
         f.pc = fix;
         return me;
     }
+    if (ec == 0x21 || ec == 0x25) && f.esr & 0x3F == 0x30 { tlb_conflict(); return me; } // see `user_fault`
     if ec == 0x25 {
         // The profiler's guarded load on a foreign stack (`obs::unwind`): resume after it.
         if let Some(fixup) = crate::obs::unwind::fault_fixup() { f.pc = fixup; return me; }
@@ -704,6 +705,14 @@ extern "C" fn sync_el1_entry(kind: u64, f: &mut Frame) -> u64 {
     // The debugger: its `brk`s in the kernel, a step of kernel code (`gdb.rs`).
     if super::gdb::on_exception(f, ec) { return me; }
     trap(kind, f)
+}
+
+/// Resolve a TLB conflict abort: this core's TLB emptied (the entries that conflicted were
+/// all correct translations of the same frames — `paging::cont_unfold`).
+fn tlb_conflict() {
+    crate::paging::CONT_CONFLICTS.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: a local invalidation of every translation; nothing is lost but warm entries.
+    unsafe { super::mmu::flush_all(); }
 }
 
 unsafe extern "C" {
@@ -777,6 +786,9 @@ fn user_fault(f: &mut Frame) -> bool {
     let ec = (f.esr >> 26) & 0x3F;
     let (abort, no_page, write, _ifetch) = super::signal::fault_kind(f);
     let far = f.far;
+    // A TLB conflict (FSC 0x30): a Contiguous group was being unfolded under this walk
+    // (`paging::cont_unfold`) — this core's TLB is emptied and the access retried.
+    if abort && f.esr & 0x3F == 0x30 { tlb_conflict(); return true; }
     if abort {
         if ec == 0x24 { crate::metrics::inc_page_fault(); }
         if ec == 0x24 && write && !no_page && crate::paging::cow_fault(far) { crate::metrics::inc_cow_fault(); note_retry(f); return true; }

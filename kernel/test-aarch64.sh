@@ -285,6 +285,9 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     bootx 90 "talaria.test=dyn" kernel/target/disk-a64-dyn.img
     assert 'dyn-hello: zlibVersion=1\.'                                       'dyn: a PIE through PT_INTERP (ld-musl-aarch64), threads, dlopen of libz'
     assert 'dyn-hello: ALL OK'                                                'dyn: the dynamic hello finishes'
+    bootx 90 "talaria.test=dyn talaria.cont=1" kernel/target/disk-a64-dyn.img
+    assert 'dyn-hello: ALL OK'                                                'dyn+cont: the PIE and ld-musl in 64 KB Contiguous groups, threads, dlopen'
+    assert 'contiguous 64 KB groups folded [1-9]'                              'dyn+cont: the loader folded the PIE'"'"'s and the interpreter'"'"'s text'
   else echo "  SKIP  dyn: there is no kernel/target/disk-a64-dyn.img (services/build-aarch64-db.sh dyn)"; fi
   boot 120 "talaria.test=smp2"
   if [ "$KVM" = 1 ]; then
@@ -318,7 +321,7 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     [ $rc = 0 ] && [ -s "$REPO/$TD/$name.img" ]
   }
   if command -v mkfs.ext2 >/dev/null 2>&1 \
-     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace cowstale umarkt sleeplat gatecost wakedef wakesleep \
+     && mkimg ext2 64M 'binary=/sigtest\nargs=sigtest\nenv=HOME=/\n' sigtest execmt fputest memrace mbench fsinfo schedapi forksrv forktls chldrace cowstale umarkt sleeplat gatecost wakedef wakesleep conttext \
      && mkimg ms 64M '' mapshared && mkimg core 32M '' crashme \
      && mkimg wd 32M 'binary=/wakedef\nargs=wakedef 1000 5000 20000\nenv=HOME=/\nrestart=0\n' wakedef \
      && mkimg coremt 32M 'binary=/crashme\nargs=crashme mt\nrestart=0\n' crashme \
@@ -353,6 +356,10 @@ if [ -f "$REPO/kernel/user/aarch64/mhello" ] && [ -f "$REPO/kernel/user/aarch64/
     run 300 "talaria.test=cowstalet" ext2
     assert 'cowstale: ALL OK 200 threads'                                     'cowstalet: a sibling thread on the other core sees the writer'"'"'s COW copy (shootdown before the free; a stale read-only translation is a spurious fault)'
     assertnot "$BAD|\[fault\]"                                              'cowstalet: no fault'
+    run 300 "talaria.test=conttext talaria.cont=1" ext2
+    assert 'conttext: ALL OK 50 rounds'                                       'conttext: 64 KB Contiguous text runs, forks, and two cores see a COW write into a folded group and its restore (ARM64-PLAN §12 item 3)'
+    assert 'contiguous 64 KB groups folded [1-9][0-9]*, unfolded by a write [1-9]' 'conttext: the loader folded the text, the write unfolded its group'
+    assertnot "$BAD|\[fault\]"                                              'conttext: no fault'
     run 120 "talaria.test=umarkt" ext2
     assert 'umarkt: ALL OK 50'                                                'umarkt: prctl(PR_TALARIA_SLOW) takes 50 named intervals, refuses an empty and an inverted one (ARM64-PLAN §11 item 2b)'
     assert 'slow intervals marked by the workload: 50 '                       'umarkt: the stat block counts the 50 marks'

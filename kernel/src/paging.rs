@@ -685,6 +685,15 @@ unsafe fn pte_r(p: *const Pte) -> u64 { mmu::dec(core::ptr::read_volatile(p).0) 
 #[inline(always)]
 #[track_caller]
 unsafe fn pte_w(p: *mut Pte, canonical: u64) {
+    #[cfg(target_arch = "aarch64")]
+    let canonical = cont_guard(p, canonical);
+    pte_w_raw(p, canonical)
+}
+/// `pte_w` without the Contiguous guard: the caller writes a CONT entry it means
+/// (`cont_fold`, fork's copy into the child) or knows the slot holds none.
+#[inline(always)]
+#[track_caller]
+unsafe fn pte_w_raw(p: *mut Pte, canonical: u64) {
     if PTLOG_ON.load(core::sync::atomic::Ordering::Relaxed) { ptlog(crate::mem::vaddr(p), core::ptr::read_volatile(p).0, mmu::enc(canonical), core::panic::Location::caller().line()); }
     core::ptr::write_volatile(p, Pte(mmu::enc(canonical)))
 }
@@ -753,12 +762,124 @@ pub fn ptlog_dump(root: u64, vaddr: u64) {
 #[inline(always)]
 #[track_caller]
 unsafe fn pte_cas(p: *mut Pte, expect: u64, new: u64) -> bool {
+    // A slot of a Contiguous group is unfolded before it is swapped (`cont_guard`); the
+    // caller's `expect` was read with the bit, the slot holds it no more.
+    #[cfg(target_arch = "aarch64")]
+    let (expect, new) = if CONT_ON.load(core::sync::atomic::Ordering::Relaxed)
+        && pte_r(p) & PTE_CONT != 0 && expect & PTE_CONT != 0 {
+        let n = cont_guard(p, new);
+        (if n & PTE_CONT != 0 { expect } else { expect & !PTE_CONT }, n)
+    } else { (expect, new & !PTE_CONT) };
     let a = &*(p as *const core::sync::atomic::AtomicU64);
     let ok = a.compare_exchange(mmu::enc(expect), mmu::enc(new), core::sync::atomic::Ordering::SeqCst,
                        core::sync::atomic::Ordering::SeqCst).is_ok();
     if ok && PTLOG_ON.load(core::sync::atomic::Ordering::Relaxed) { ptlog(crate::mem::vaddr(p), mmu::enc(expect), mmu::enc(new), core::panic::Location::caller().line()); }
     ok
 }
+
+// ── THE CONTIGUOUS HINT (arm64, `talaria.cont=1`; ARM64-PLAN §12 item 3) ───────────────────
+//
+// Sixteen level-3 entries that map sixteen consecutive frames, the first 64 KB-aligned in
+// both spaces, with the same attributes, may carry the Contiguous bit: the TLB then holds
+// one entry for the 64 KB. Linux 6.18 maps an executable's text that way from its large
+// page-cache folios — PostgreSQL's `select1` on the same `c7g` took 11 L2-TLB refills a
+// request in ring 3 there against ~100 here, with the same 34.6 k instructions.
+//
+// The architecture's price: a group whose entries disagree (one changed, the others still
+// CONT) is a misprogramming — the TLB may keep the 64 KB translation over the changed page.
+// So EVERY write of a slot that holds CONT goes through `cont_guard`: a write that changes
+// only the software bits (fork's COW mark on a read-only page) keeps the group; anything
+// else unfolds the whole group first (the bit cleared on all sixteen by CAS, then the
+// broadcast flush), and the write itself lands without the bit. Clearing the bit is
+// changing the Contiguous hint, which wants break-before-make; it is done without the
+// invalid window instead — the entries before and after translate identically, so a walk in
+// between either uses one of the two or takes a TLB conflict abort (FSC 0x30), which the
+// abort handlers resolve by a local `tlbi vmalle1` and a retry.
+//
+// Only `cont_fold` sets the bit (on a space no core runs yet) and fork's copy carries it
+// into the child (`pte_w_raw`, the parent's group already whole). Off — no slot ever holds
+// it and the guard is one relaxed load.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub(crate) const PTE_CONT: u64 = 1 << 56;
+/// The canonical bits the hardware never reads in a present leaf: COW/PNONE, PRIV, LAZY and
+/// GUARD (`mmu` puts them in 55..58).
+#[cfg(target_arch = "aarch64")]
+const CONT_SW: u64 = PTE_COW | PTE_PRIV | PTE_LAZY | PTE_GUARD;
+/// `talaria.cont=1` (arm64): the loader folds read-only segments.
+pub static CONT_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Groups folded / unfolded by a write / TLB conflict aborts resolved (the stat block).
+pub static CONT_FOLDS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static CONT_UNFOLDS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static CONT_CONFLICTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub fn cont_on() -> bool { CONT_ON.load(core::sync::atomic::Ordering::Relaxed) }
+
+/// The value to write into `p` (canonical), the group unfolded first when the write would
+/// break it. # Safety: as `pte_w`.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn cont_guard(p: *mut Pte, new: u64) -> u64 {
+    if !CONT_ON.load(core::sync::atomic::Ordering::Relaxed) { return new & !PTE_CONT; }
+    let old = pte_r(p);
+    if old & PTE_P == 0 || old & PTE_CONT == 0 { return new & !PTE_CONT; }
+    if new & PTE_P != 0 && (old ^ new) & !CONT_SW == 0 { return new; }    // the software bits only
+    cont_unfold(p);
+    new & !PTE_CONT
+}
+
+/// Clear the Contiguous bit on the sixteen slots of `p`'s group and flush every core.
+/// # Safety: `p` points into a live level-3 table.
+#[cfg(target_arch = "aarch64")]
+#[inline(never)]
+unsafe fn cont_unfold(p: *mut Pte) {
+    let base = p.map_addr(|a| a & !(16 * 8 - 1));
+    for i in 0..16 {
+        let a = &*(base.add(i) as *const core::sync::atomic::AtomicU64);
+        loop {
+            let h = a.load(core::sync::atomic::Ordering::SeqCst);
+            let c = mmu::dec(h);
+            if c & PTE_P == 0 || c & PTE_CONT == 0 { break; }
+            if a.compare_exchange(h, mmu::enc(c & !PTE_CONT), core::sync::atomic::Ordering::SeqCst,
+                                  core::sync::atomic::Ordering::SeqCst).is_ok() { break; }
+        }
+    }
+    // Every core: a thread of this space elsewhere may hold the 64 KB entry (the ASID tags it).
+    mmu::flush_all_is();
+    CONT_UNFOLDS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Fold every whole 64 KB group of [lo, hi) in the space `pml4` that qualifies: sixteen
+/// present user 4K leaves, read-only, the frames consecutive from a 64 KB-aligned one, the
+/// same bits. The space must not be running on any core yet (the loader's, before the first
+/// entry): nothing can hold its old translations. Returns the groups folded.
+#[cfg(target_arch = "aarch64")]
+pub fn cont_fold(pml4: u64, lo: u64, hi: u64) -> u64 {
+    if !cont_on() { return 0; }
+    let mut n = 0;
+    let mut g = (lo + 0xFFFF) & !0xFFFF;
+    // SAFETY: P1 + P2 — the walk of a space the caller owns; the writes go to a space no core
+    // runs (no flush is owed: no TLB holds anything of a fresh ASID).
+    unsafe {
+        while g + 0x1_0000 <= hi {
+            if let Some(pt) = pt_for(pml4, g, false) {
+                let first = pt.add(pt_idx(g));
+                let e0 = pte_r(first);
+                let pa0 = e0 & ADDR_MASK;
+                let ok = e0 & PTE_P != 0 && e0 & PTE_PS == 0 && e0 & PTE_US != 0 && e0 & PTE_RW == 0
+                    && e0 & PTE_CONT == 0 && pa0 & 0xFFFF == 0
+                    && (1..16).all(|i| pte_r(first.add(i)) == e0 + (i as u64) * 4096);
+                if ok {
+                    for i in 0..16 { pte_w_raw(first.add(i), (e0 + (i as u64) * 4096) | PTE_CONT); }
+                    n += 1;
+                }
+            }
+            g += 0x1_0000;
+        }
+    }
+    CONT_FOLDS.fetch_add(n, core::sync::atomic::Ordering::Relaxed);
+    n
+}
+#[cfg(not(target_arch = "aarch64"))]
+pub fn cont_fold(_pml4: u64, _lo: u64, _hi: u64) -> u64 { 0 }
 
 const PTE_P:  u64 = 1;         // present
 const PTE_RW: u64 = 1 << 1;    // writable
@@ -3172,7 +3293,9 @@ pub fn fork_cow_space(src: u64) -> u64 {
                         // The untying of the COW happens at a write #PF (cow_fault) or at an mprotect(RW) (protect).
                         let cow = (e1 & !PTE_RW) | PTE_COW;
                         pte_w(e1p, cow);                 // the parent's side
-                        pte_w(pte_ptr_in(dst, vaddr), cow); // the child's side (the same phys)
+                        // the child's side (the same phys); a Contiguous group is copied whole,
+                        // slot by slot, into a space no core runs (`cont_fold`)
+                        pte_w_raw(pte_ptr_in(dst, vaddr), cow);
                         crate::mem::rc_share(e1 & ADDR_MASK);
                     }
                 }

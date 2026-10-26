@@ -50,6 +50,9 @@ const SH_INNER: u64 = 0b11 << 8;
 const AF: u64 = 1 << 10;
 const NG: u64 = 1 << 11;
 const DBM: u64 = 1 << 51;
+/// The Contiguous hint of a level-3 page: sixteen aligned entries that map sixteen
+/// consecutive frames with the same attributes share one TLB entry (`paging::cont_fold`).
+const CONT: u64 = 1 << 52;
 const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
 /// The output address of a 4K-granule descriptor: bits 47:12. NOT x86's 51:12 — bit 51 is
@@ -69,6 +72,9 @@ const C_SW9: u64 = 1 << 9;
 const C_SW10: u64 = 1 << 10;
 const C_SW11: u64 = 1 << 11;
 const C_SW55: u64 = 1 << 55;
+/// The canonical Contiguous bit of a present entry (`paging::PTE_CONT`): bit 56, because
+/// the hardware's own bit 52 is LAZY_W in the canonical format (a non-present entry's).
+const C_CONT: u64 = 1 << 56;
 // Where they live in a hardware descriptor: the software-defined bits 55..58.
 const H_SW9: u64 = 1 << 55;
 const H_SW10: u64 = 1 << 56;
@@ -107,6 +113,7 @@ pub fn enc(c: u64) -> u64 {
     if c & C_SW10 != 0 { h |= H_SW10; }
     if c & C_SW11 != 0 { h |= H_SW11; }
     if c & C_SW55 != 0 { h |= H_SW55; }
+    if c & C_CONT != 0 { h |= CONT; }
     h
 }
 
@@ -126,6 +133,7 @@ pub fn dec(h: u64) -> u64 {
     if h & H_SW10 != 0 { c |= C_SW10; }
     if h & H_SW11 != 0 { c |= C_SW11; }
     if h & H_SW55 != 0 { c |= C_SW55; }
+    if h & CONT != 0 { c |= C_CONT; }
     c
 }
 

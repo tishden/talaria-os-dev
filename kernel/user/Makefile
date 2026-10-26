@@ -100,8 +100,9 @@ LDFA64 := -static -no-pie -Wl,-Ttext-segment=0x50000000
 # assembler); fastapp/fastflood take the machine's call and spin hint from tal_arch.h.
 # The `.s` files (but hello) and libtsync's fibers are not ported yet.
 A64CBINS := $(filter-out sysbench,$(CBINS))
-A64 := $(addprefix aarch64/,$(A64CBINS) mhello mprintf hello.elf crashme profdeep launcher idregs)
-# idregs: arm64 only (the EL0 reads of the ID registers, HWCAP_CPUID)
+A64 := $(addprefix aarch64/,$(A64CBINS) mhello mprintf hello.elf crashme profdeep launcher idregs conttext)
+# idregs: arm64 only (the EL0 reads of the ID registers, HWCAP_CPUID); conttext: arm64 only
+# (the Contiguous hint; it writes arm64 instructions into its own text)
 # The C++ set needs a g++ whose libstdc++ was built against musl for aarch64: the
 # `aarch64-linux-musl-cross` toolchain (musl.cc; unpack it and put its bin/ on the PATH, or
 # name the compiler: `make aarch64 CXXA64=/path/aarch64-linux-musl-g++`). Without it the
