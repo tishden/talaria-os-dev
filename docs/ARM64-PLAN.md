@@ -2944,6 +2944,10 @@ generators pk's ceiling is 25.5 / 25.4 k against Linux's 24.9 k, select1's 55.0 
 against 43.0 k. Item 3's p99 is not: the lowest rungs' p99-p99.9 are Linux's by 9-16 % (the
 wakeup of an idle server), and select1's top rung p99 (104 against 85 us). The top rungs'
 medians are Linux's because its cores stop sleeping there while its tail goes to milliseconds.
+Followed on three rises: the low points change hands from rise to rise (a boot is not the
+variable — five boots agree to a microsecond); netmixsteal's age, netmix=0 and idlepoll do not
+move them. The steady one is select1's lowest rung (p99 79-84 against 74-75): its next
+instrument is Linux's own side (`perf` in the Linux guest), which the harness does not have.
 
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
