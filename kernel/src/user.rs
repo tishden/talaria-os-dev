@@ -319,23 +319,33 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
         // frames and is read by ONE request to the disk (ext2::pread_direct past the cache).
         // Page-by-page reading cost 134 000 requests of 4 KB on ClickHouse's 525 MB
         // image — eleven seconds for the loading alone.
-        const CHUNK: u64 = 512; // 2 MB
+        //
+        // THE CONTIGUOUS HINT (`talaria.cont=1`, arm64): a read-only segment's pieces come
+        // 64 KB-aligned, the 2 MB ones and then 64 KB ones down to the segment's tail, so that
+        // `paging::cont_fold` can give every 64 KB of text one TLB entry (Linux's large-folio
+        // text on the same machine, ARM64-PLAN §12 item 3). A writable segment stays as it was:
+        // its pages part at the first COW.
+        let cont = ext && !writable && crate::paging::cont_on();
         let mut q = 0u64;
-        if ext {
-            while q + CHUNK <= npages {
+        for &chunk in if cont { &[512u64, 16][..] } else { &[512u64][..] } {
+            if !ext { break; }
+            while q + chunk <= npages {
                 let va = start + q * 4096;
                 // we take a piece only where nothing is mapped yet
                 let mut free = true;
-                for k in 0..CHUNK { if crate::paging::phys_of_in(pml4, va + k * 4096).is_some() { free = false; break; } }
+                for k in 0..chunk { if crate::paging::phys_of_in(pml4, va + k * 4096).is_some() { free = false; break; } }
                 if !free { break; }
                 // The image is the workload's memory: the high area first (§10.16 stage 6) —
                 // ClickHouse's 525 MB took them from below 4 GB, where the kernel lives.
-                let fr = match crate::mem::alloc_contig_node(CHUNK, crate::affinity::launch_node()) { Some(f) => f, None => break };
-                if crate::paging::virt_to_phys(fr) != fr && fr < 0x1_0000_0000 { crate::mem::free_contig(fr, CHUNK); break; }
-                core::ptr::write_bytes(crate::mem::kptr::<u8>(fr), 0, (CHUNK * 4096) as usize);
+                if cont && va & 0xFFFF != 0 { break; }   // the segment does not start on 64 KB: as before
+                let fr = if cont { crate::mem::alloc_workload_aligned(chunk, 0x1_0000) }
+                         else { crate::mem::alloc_contig_node(chunk, crate::affinity::launch_node()) };
+                let Some(fr) = fr else { break };
+                if crate::paging::virt_to_phys(fr) != fr && fr < 0x1_0000_0000 { crate::mem::free_contig(fr, chunk); break; }
+                core::ptr::write_bytes(crate::mem::kptr::<u8>(fr), 0, (chunk * 4096) as usize);
                 // the part of the piece covered by the file (the segment's tail is .bss, it stays zeroes)
                 let chunk_lo = va.max(vaddr);
-                let chunk_hi = (va + CHUNK * 4096).min(vaddr + filesz as u64);
+                let chunk_hi = (va + chunk * 4096).min(vaddr + filesz as u64);
                 if chunk_hi > chunk_lo {
                     let foff = off + (chunk_lo - vaddr);
                     let dst = crate::mem::kptr::<u8>(fr + (chunk_lo - va));
@@ -348,9 +358,10 @@ unsafe fn load_elf_into_space_disk(pml4: u64, path: &[u8], dyn_base: u64) -> Opt
                         while done < n { let got = readat(foff + done as u64, dst.add(done), n - done); if got == 0 { break; } done += got; }
                     }
                 }
-                if exec_ { crate::arch::icache::sync(crate::mem::kva(fr), CHUNK * 4096); }
-                for k in 0..CHUNK { crate::paging::map_leaf(pml4, va + k * 4096, fr + k * 4096, writable, true, exec_); }
-                q += CHUNK;
+                if exec_ { crate::arch::icache::sync(crate::mem::kva(fr), chunk * 4096); }
+                for k in 0..chunk { crate::paging::map_leaf(pml4, va + k * 4096, fr + k * 4096, writable, true, exec_); }
+                if cont { crate::paging::cont_fold(pml4, va, va + chunk * 4096); }
+                q += chunk;
             }
         }
         // Segments may share a page (PIE/ld.so without -z separate-code): if the page is already
