@@ -1327,7 +1327,9 @@ select1 50.0 k against 42.7-44.3):
 | pk p50 at the low rungs | 117-122 us | 106-113 | |
 
 select1 runs 34.6 k instructions per request in ring 3 at IPC 1.0 and kept its ceiling
-(56.9 k against Linux's 50.0 k). Gates: arm64 TCG 413/0, x86 573/0, host 22/0.
+(56.9 k against Linux's 50.0 k). Gates: arm64 TCG 413/0, x86 573/0, host 22/0; KVM c7g.metal
+(`infra/aws/logs/aarch64-20261026-115259`): 394/0, the databases 15/0 twice, soak 13×50 and
+the races 6×96 without a failure, the loop 0/1.
 
 ## 11. Reproducing any of this
 
