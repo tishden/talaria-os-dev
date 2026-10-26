@@ -1331,6 +1331,42 @@ select1 runs 34.6 k instructions per request in ring 3 at IPC 1.0 and kept its c
 (`infra/aws/logs/aarch64-20261026-115259`): 394/0, the databases 15/0 twice, soak 13×50 and
 the races 6×96 without a failure, the loop 0/1.
 
+### 10.21. The PostgreSQL board after the TLB fix: both ceilings ours (2026-10-26)
+
+The whole PostgreSQL board on `731883c` (kernel `17a6a5f2`, the image of the KVM gate in
+§10.20), us-west-2, three repeats a point, the Talaria generator and then the Linux
+generator over the same ladder on the same rise (`ec2all-a64-20261026-145401`). The ceilings,
+req/s, the median of three probes:
+
+| case | Talaria server, Talaria generator | Talaria server, Linux generator | Linux server, Linux generator | on 2026-10-23 (`-070520`), Talaria / Linux |
+|---|---:|---:|---:|---:|
+| pk | 25 546 | 25 386 | 24 903 | 9.9 k / 27.3 k |
+| select1 | 54 963 | 55 040 | 42 963 | 24.6 k / 46.7 k |
+
+The points (faster / parity / slower), Talaria generator, then the Linux generator:
+
+| | p50 | p99 | p99.9 | p99.99 |
+|---|---|---|---|---|
+| 2026-10-23, 31 points | 0 / 2 / 6 | 1 / 0 / 7 | 1 / 0 / 7 | 1 / 0 / 6 |
+| now, 40 points | 2 / 4 / 4 | 4 / 1 / 5 | 6 / 0 / 4 | 7 / 2 / 1 |
+| now, Linux generator | 1 / 4 / 5 | 4 / 1 / 5 | 6 / 0 / 4 | 7 / 1 / 2 |
+
+The two generators agree point for point, so what is left is the server's. It is two classes:
+
+- **The top two rungs' median** (pk 18 677 and 22 412: 114-121 against 80-93 us; select1
+  32 222 and 38 666: 57-60 against 46). Linux's median falls as the rate rises while its tail
+  explodes — at pk 22 412 its p99 is 4.4-5.5 ms with 50 946 requests over 1 ms (ours 467 us,
+  1 957) — its cores stop sleeping and the requests that are served at once are served
+  without a wakeup. Ours stays flat (pk 110-121 us at every rung) — whether that is a wakeup
+  ours pays at every rate is not measured. The same rungs' p99-p99.99 are ours by 1.7-70x, except select1 38 666's p99
+  (104 against 85 us; Linux's p99.9 there is 10 ms).
+- **The low rungs' p99-p99.9** (pk 2 490: p99 151 against 135, p99.9 170 against 147;
+  select1 4 296 and 10 740: p99 81-84 against 73-74, p99.9 97 against 83-86) at an equal
+  median (pk 121 against 117, select1 64-66 against 62-65). A request that arrives at an
+  idle server pays for waking it, and our tenth slowest per thousand pays ~15 us more (a
+  suspect, not a measurement).
+
+
 ## 11. Reproducing any of this
 
 ```sh

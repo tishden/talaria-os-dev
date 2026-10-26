@@ -2937,6 +2937,14 @@ same rise (was 20.7 against 25.2). Left of item 3: pk's ring 3 is still ~120 k c
 request with ~120-230 L2-TLB refills; whether Linux's is less is not measured (its guest
 has no PMU access in the harness).
 
+### 12.6. Progress (2026-10-26, the board)
+
+Item 3's ceiling is accepted (MEASUREMENTS §10.21): on the PostgreSQL board under both
+generators pk's ceiling is 25.5 / 25.4 k against Linux's 24.9 k, select1's 55.0 / 55.0 k
+against 43.0 k. Item 3's p99 is not: the lowest rungs' p99-p99.9 are Linux's by 9-16 % (the
+wakeup of an idle server), and select1's top rung p99 (104 against 85 us). The top rungs'
+medians are Linux's because its cores stop sleeping there while its tail goes to milliseconds.
+
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and
