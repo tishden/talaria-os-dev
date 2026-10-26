@@ -1291,6 +1291,44 @@ The turnaround histogram puts the server's read→write at 70 us on average for 
 60-99 us class while the processor work between them is about 35: the next instrument is
 the backend's runnable-but-not-running time inside that interval.
 
+### 10.20. The read->write that was a cold TLB: every mmap emptied it (2026-10-26)
+
+§10.19 left 24 us of pk's round trip unnamed. The server's turnaround now splits its
+read->write by the reader's own counters (`sched::run_cycles`, `rq_cycles`,
+`syscall::SYS_CYC`, the page faults): over the 60-99 us turnarounds — pk's — the backend was
+**on a core 67-69 us**, ready off a core 1, asleep 2-3, in syscalls 4, with one page fault
+(`kernprobe-a64-postgresql-20261026-080640`, `-084949`). No queue: the time was ring 3's.
+The tick profile had said ~29 us because the tick's period follows the network waiters
+(`retune_timer`) — its samples are not evenly spaced in time. §10.19's two conclusions drawn
+from it — PostgreSQL's ring 3 not slower than Linux's, the ceiling not the processor's — are
+withdrawn.
+
+`talaria.pmuel0=1` counts the cycles and events at EL0 alone, `talaria.pmuev=<event>` puts
+another event in the LLC-miss slot (arm64; both arrive with user-data, each core applies
+them at its next sample). pk per request in ring 3 (`-093454`): 100 k instructions, 160 k
+cycles — IPC 0.6 — with ~800 L2-TLB refills (0x2D) and ~930 L1I-TLB refills (0x02). A
+count of the full TLB flushes by the caller's line in `paging.rs` named it: 2.2 M in a run,
+all from `map_lazy_pages`, one per query. An mmap reservation writes non-present entries and
+ended with an unconditional `flush_tlb`, which on arm64 with ASIDs (§10.17) is the broadcast
+`tlbi vmalle1is` — every core walked its whole working set again after each query's mmap.
+A TLB holds no non-present entry and `unmap_proc` has already flushed whatever the range
+held, so the reservation now flushes only when it overwrites a present entry (a block
+`pt_for` splits, a directory entry it replaces).
+
+One rise, us-west-2 (`-111215`; this rise ran Linux faster than the earlier ones —
+select1 50.0 k against 42.7-44.3):
+
+| | before (`-093454`) | after | Linux (same rise) |
+|---|---|---|---|
+| full TLB flushes in a run | 2.2 M | 443 | |
+| pk, ring 3 per request: cycles / instructions / L2-TLB refills | 160 k / 100 k / ~800 | 120 k / 100 k / 117-230 | |
+| pk read->write on a core (60-99 us class) | 67-69 us | 56 us | |
+| pk ceiling | 20.7 k (Linux 25.2) | 25.6 k / 26.2 k (A / P1) | 26.8 k |
+| pk p50 at the low rungs | 117-122 us | 106-113 | |
+
+select1 runs 34.6 k instructions per request in ring 3 at IPC 1.0 and kept its ceiling
+(56.9 k against Linux's 50.0 k). Gates: arm64 TCG 413/0, x86 573/0, host 22/0.
+
 ## 11. Reproducing any of this
 
 ```sh
