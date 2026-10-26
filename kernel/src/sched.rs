@@ -1872,6 +1872,9 @@ pub fn run_cycles(t: usize) -> u64 {
     }
     c
 }
+/// The TSC cycles the task has stood ready and off a core, the closed intervals (`RQ_TSC`):
+/// the server's turnaround takes its difference over the read->write (`netsys::tr_close`).
+pub fn rq_cycles(t: usize) -> u64 { if t >= NTASKS { 0 } else { RQ_TSC[t].load(Ordering::Relaxed) } }
 /// How many nanoseconds the slot has been occupied by this task (the thread's uptime).
 pub fn age_ns(t: usize) -> u64 {
     if t >= NTASKS { return 0; }

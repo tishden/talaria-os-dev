@@ -83,6 +83,10 @@ pub static LAST_SYS_T0: [core::sync::atomic::AtomicU64; crate::sched::NTASKS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; crate::sched::NTASKS];
 pub static LAST_SYS_T1: [core::sync::atomic::AtomicU64; crate::sched::NTASKS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; crate::sched::NTASKS];
+/// The cycles a task has spent inside syscalls (entry to exit, the wall: a sleeping syscall
+/// counts its sleep) — the server's turnaround splits its read->write by it (`netsys::tr_close`).
+pub static SYS_CYC: [core::sync::atomic::AtomicU64; crate::sched::NTASKS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::sched::NTASKS];
 pub static NO_SHOOTDOWN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 pub static THREADED: AtomicBool = AtomicBool::new(false);
 /// A10: about a refusal of sched_setaffinity (the core is not among the online ones) we speak ONCE —
@@ -1228,9 +1232,12 @@ pub extern "C" fn rust_syscall(f: *mut Frame) -> u64 {
     let me = crate::sched::current_id();
     LAST_SYS[me].store((fr.nr << 48) | (fr.pc & 0xFFFF_FFFF_FFFF), Ordering::Relaxed);
     LAST_ARG0[me].store(fr.a1, Ordering::Relaxed);
-    LAST_SYS_T0[me].store(crate::tsc::rdtsc(), Ordering::Relaxed);
+    let t0 = crate::tsc::rdtsc();
+    LAST_SYS_T0[me].store(t0, Ordering::Relaxed);
     let r = rust_syscall_inner(fr);
-    LAST_SYS_T1[me].store(crate::tsc::rdtsc(), Ordering::Relaxed);
+    let t1 = crate::tsc::rdtsc();
+    LAST_SYS_T1[me].store(t1, Ordering::Relaxed);
+    if me < crate::sched::NTASKS { SYS_CYC[me].fetch_add(t1.wrapping_sub(t0), Ordering::Relaxed); }
     if STRACE_LEFT.load(Ordering::Relaxed) != 0 { strace(fr, r); }
     stop_if_dead(fr);
     // the delivery of the signals at the exit from a syscall (a frame on the user stack, rip -> the handler)

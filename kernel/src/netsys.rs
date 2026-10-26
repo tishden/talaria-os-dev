@@ -124,6 +124,13 @@ struct Tcp {
     trrd: u64,
     trdus: u32,
     trdla: u32,
+    /// The reader's processor and ready-queue cycles at the read (`sched::run_cycles`,
+    /// `rq_cycles`) and the reader: the read->write is split by their differences.
+    trrun: u64,
+    trrq: u64,
+    trsys: u64,
+    trpf: u64,
+    trtask: u16,
 }
 // `K::Closing` IS AN ORPHAN: the descriptor is already closed, while the FIN handshake is still going.
 // Previously `close()` waited for it itself for up to 200 ms, spinning on the core UNDER THE STACK'S LOCK,
@@ -147,7 +154,7 @@ const ORPHAN_CAP_MS: i64 = 10_000;  // for the whole untying — no more than th
 
 const TCP0: Tcp = Tcp { k: K::Free, nonblock: false, port: 0, owner: 0, connecting: false, err: 0, nodelay: false, rx: 0, tx: 0, ifx: 0, tid: 255, h: None,
     rdy: 0, armed: false, dl: 0, dlx: 0, dlc: 0, dlo: 0, dlr: 0, dls: 0, dlp: 0, dlcpu: 255, dlby: 255, dlpt: [0; 16], dlwhy: [0; WHY_N], trd: 0, trrd: 0,
-    trdus: 0, trdla: 0 };
+    trdus: 0, trdla: 0, trrun: 0, trrq: 0, trsys: 0, trpf: 0, trtask: 0 };
 // ── the common lock of the network stack ──────────────────────────────────────
 //
 // smoltcp's interfaces, the table of sockets and the card's rings are mut statics and RefCells.
@@ -1911,6 +1918,12 @@ fn dl_close(i: usize) {
     let now = tsc::rdtsc();
     let us = now.wrapping_sub(t0).saturating_mul(1_000_000) / unsafe { HZ }.max(1);
     tt()[i].trd = t0; tt()[i].trrd = now; tt()[i].trdus = us.min(u32::MAX as u64) as u32;
+    let me = crate::sched::current_id();
+    // the reader + 1 (0 — none): a zero initialiser keeps the socket table in .bss
+    tt()[i].trtask = if me < crate::sched::NTASKS { me as u16 + 1 } else { 0 };
+    tt()[i].trrun = crate::sched::run_cycles(me); tt()[i].trrq = crate::sched::rq_cycles(me);
+    if me < crate::sched::NTASKS { tt()[i].trsys = crate::syscall::SYS_CYC[me].load(Relaxed); }
+    tt()[i].trpf = crate::metrics::faults_of(me);
     DL_HIST[c][dl_bucket(us)].fetch_add(1, Relaxed);
     DL_SUM_US[c].fetch_add(us, Relaxed);
     let x = tt()[i].dlx;
@@ -2001,6 +2014,15 @@ pub static TR_MID_N: AtomicU64 = AtomicU64::new(0);
 pub static TR_MID_TOP: [AtomicU64; TR_ST] = [const { AtomicU64::new(0) }; TR_ST];
 /// In the slow turnarounds — which interval was THE LARGEST.
 pub static TR_SLOW_TOP: [AtomicU64; TR_ST] = [const { AtomicU64::new(0) }; TR_ST];
+/// THE READ->WRITE SPLIT, us summed per class (all / average 60..99 / slow >= 100): the
+/// reader on a core (ring 3 and its syscalls), standing ready off a core, and the rest — asleep
+/// (a futex, the disk, a halted wait) or a ready interval still open. PostgreSQL's pk on a
+/// `c7g` gave a 70 us read->write for about 35 us of work (MEASUREMENTS §10.19).
+/// The fourth column is the part of "on a core" inside syscalls (`syscall::SYS_CYC`), the fifth
+/// the page faults (a count, not us).
+pub const TR_SPLIT_NAMES: [&str; 4] = ["on a core", "ready off a core", "asleep/other", "of the core's in syscalls"];
+pub static TR_SPLIT: [[AtomicU64; 5]; 3] = [const { [const { AtomicU64::new(0) }; 5] }; 3];
+pub static TR_SPLIT_N: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy)]
 pub struct TrEx { pub us: u32, pub st: [u32; TR_ST], pub t: u8, pub cpu: u8, pub by: u8, pub c: u8, pub ot: u16 }
 pub const TR_EX_N: usize = 6;
@@ -2023,6 +2045,19 @@ fn tr_close(i: usize, t_w0: u64, t_wl: u64) {
     let st = [(tt()[i].trdla as u64).min(10_000), tt()[i].trdus as u64, us(t_w0.wrapping_sub(tt()[i].trrd)),
               us(t_wl.wrapping_sub(t_w0)), us(now.wrapping_sub(t_wl))];
     TR_HIST[tr_bucket(total)].fetch_add(1, Relaxed);
+    let me = crate::sched::current_id();
+    if tt()[i].trtask as usize == me + 1 {
+        let a = st[2];
+        let run = us(crate::sched::run_cycles(me).wrapping_sub(tt()[i].trrun)).min(a);
+        let rq = us(crate::sched::rq_cycles(me).wrapping_sub(tt()[i].trrq)).min(a - run);
+        // the syscalls closed since the read: the read's own remainder after this stamp, those between
+        let sys = us(crate::syscall::SYS_CYC[me].load(Relaxed).wrapping_sub(tt()[i].trsys)).min(run);
+        let pf = crate::metrics::faults_of(me).wrapping_sub(tt()[i].trpf);
+        let sp = [run, rq, a - run - rq, sys, pf];
+        let cls = if total < 60 { 0 } else if total < 100 { 1 } else { 2 };
+        for k in 0..5 { TR_SPLIT[0][k].fetch_add(sp[k], Relaxed); if cls != 0 { TR_SPLIT[cls][k].fetch_add(sp[k], Relaxed); } }
+        TR_SPLIT_N.fetch_add(1, Relaxed);
+    }
     for k in 0..TR_ST { TR_SUM[k].fetch_add(st[k], Relaxed); }
     if total < 60 { return; }
     if total < 100 {

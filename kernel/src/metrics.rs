@@ -37,6 +37,8 @@ static FRAMES_BY_TASK: [AtomicU64; NT] = [const { AtomicU64::new(0) }; NT];
     let t = crate::sched::current_id();
     if t < NT { PF_BY_TASK[t].fetch_add(1, Ordering::Relaxed); }
 }
+/// The page faults of the task `t` so far (the server's turnaround takes their difference).
+pub fn faults_of(t: usize) -> u64 { if t < NT { PF_BY_TASK[t].load(Ordering::Relaxed) } else { 0 } }
 #[inline] pub fn inc_cow_fault() { COW_FAULTS.fetch_add(1, Ordering::Relaxed); }
 #[inline] pub fn add_frames(n: u64) {
     FRAME_ALLOCS.fetch_add(1, Ordering::Relaxed);
@@ -307,6 +309,16 @@ pub fn dump() {
             let hz = crate::tsc::calibrate_cached().max(1);
             let ns = |c: u64| c.saturating_mul(1_000_000_000 / 1000) / (hz / 1000).max(1);
             let hit = crate::paging::UNMAP_HIT.load(R).max(1);
+            {   // the full TLB flushes by the caller's line in paging.rs
+                use crate::paging::{FF_LINE, FF_HITS, FF_N, FF_OTHER};
+                let tot: u64 = (0..FF_N).map(|k| FF_HITS[k].load(R)).sum::<u64>() + FF_OTHER.load(R);
+                if tot != 0 {
+                    crate::print!("stat: tlb: full flushes {}, by the caller's line in paging.rs:", tot);
+                    for k in 0..FF_N { let h = FF_HITS[k].load(R); if h != 0 { crate::print!(" {}:{}", FF_LINE[k].load(R), h); } }
+                    crate::println!(" other {}; mmap reservations without a flush {}", FF_OTHER.load(R),
+                        crate::paging::LAZY_MAP_NOFLUSH.load(R));
+                }
+            }
             crate::println!("stat: unmap: calls {} ({} with a removal), pages {} ({} per call); the walk {} ns/call, the flush {} ns, the acknowledgements {} \
                 ns (per removal)",
                 n, crate::paging::UNMAP_HIT.load(R), crate::paging::UNMAP_PAGES.load(R),
@@ -435,6 +447,19 @@ pub fn dump() {
                         crate::print!("; the largest interval:");
                         for k in 0..TR_ST { crate::print!(" {} {}", TR_ST_NAMES[k], TR_MID_TOP[k].load(R)); }
                         crate::println!();
+                    }
+                    {   // the read->write split (netsys::TR_SPLIT): on a core / ready off a core / asleep
+                        use crate::netsys::{TR_SPLIT, TR_SPLIT_N, TR_SPLIT_NAMES};
+                        let k = TR_SPLIT_N.load(R);
+                        if k != 0 {
+                            let (mn, sn) = (TR_MID_N.load(R).max(1), TR_SLOW_N.load(R).max(1));
+                            crate::print!("stat:     the read->the write split, us on average (all {} / average ones / slow ones):", k);
+                            for j in 0..4 { crate::print!(" {} {}/{}/{}", TR_SPLIT_NAMES[j], TR_SPLIT[0][j].load(R) / k,
+                                TR_SPLIT[1][j].load(R) / mn, TR_SPLIT[2][j].load(R) / sn); }
+                            crate::print!(" page faults per 100 {}/{}/{}", TR_SPLIT[0][4].load(R) * 100 / k,
+                                TR_SPLIT[1][4].load(R) * 100 / mn, TR_SPLIT[2][4].load(R) * 100 / sn);
+                            crate::println!();
+                        }
                     }
                     let sn = TR_SLOW_N.load(R);
                     if sn != 0 {
