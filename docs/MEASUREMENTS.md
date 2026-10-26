@@ -1382,6 +1382,69 @@ on `-191127` (73.9 against 79.7), pk 6 304 is Linux's there (138 against 125) an
 kernel can change — the park and the idle core's sleep — are not it.
 
 
+### 10.22. Linux's side counted: its text is 64 KB TLB entries, ours was 4 KB (2026-10-26/27)
+
+§10.21 left select1's lowest rung to an instrument on Linux's side. The harness had one and it
+measured nothing: statd ran `perf stat -p <postmaster>` — PostgreSQL's backends are its
+children, so the line read 21 k instructions a second at IPC 0.26 — and only before and after a
+point, on an idle server. statd now adds `perf stat -a` in sets of three (a `c7g` guest has two
+event counters and the cycle counter) at EL0 and EL1 apart; `run-remote.sh DURING=1` takes a
+snapshot in the middle of each point, `lib/pmureq.py` divides it by the rung's rate, and
+`lib/talpmu.py` gives ours from the stat blocks (`kernprobe-a64-postgresql-20261026-213154`).
+
+Per request in ring 3 at the same instruction count (select1 34.6 k, pk 100 k), Linux took
+42.8 k / 123 k cycles at the lowest rungs and **11 / 67 L2-TLB refills**; ours 47.6 k / 139 k
+cycles and ~100 / ~233. Its kernel side is not comparable — `net.core.busy_poll=50` on the
+stand spins 115-270 k cycles a request in EL1 — but ring 3 is the same program. The difference
+was in the map: `/proc/<pid>/pagemap` + `kpageflags` on the Linux server show the postgres
+text, ld-musl and libicu in large page-cache folios (75 heads, 1 105 tails over 9 MB), which
+Linux 6.18 maps with the Contiguous bit — 64 KB a TLB entry. Anonymous THP is off on both
+sides, the shared buffers are 4 KB pages on both.
+
+The kernel now does the same (`a13d069`, `ac80bba`, on by default since `c5aade8`,
+`talaria.cont=0` — off): the ELF loader takes a read-only segment's pieces 64 KB-aligned and
+folds every whole group of sixteen; a read-only file `mmap` (a `.so`'s text) gets aligned
+frames and is folded after its content; fork copies the groups whole. A write that changes a
+folded slot unfolds the whole group first (`cont_guard`; the software bits — fork's COW mark —
+keep it), and a TLB conflict abort in between is a local flush and a retry. On one rise
+(`-230304`, us-west-2), two phases without the hint and three with it, each pair agreeing:
+
+| ring 3 per request | without | with | Linux |
+|---|---|---|---|
+| select1 4 350: cycles / L2-TLB refills | 46.8 k / 97-101 | 38.8 k / 9 | 42.8 k / 11 |
+| select1 39 156 | 35.4 k / 50 | 31.3 k / 6 | 18.1 k / 1 |
+| pk 2 501 | 146 k / 233 | 128 k / 38 | 123 k / 67 |
+| pk 12 509 | 125.5 k / 176 | 105.5 k / 27 | 129 k / 37 |
+
+| latency, us (p50 / p99) | Linux (phase A) | without | with |
+|---|---|---|---|
+| select1 4 350 | 62.7 / 72.3 | 63.2 / 78.1 | 58.8 / 74.4 |
+| select1 10 876 | 60.8 / 73.1 | 61.2 / 76.5 | 57.0 / 73.7 |
+| select1 39 154 | 43.7 / 81.8 | 60.0 / 111.2 | 56.3 / 89.1 |
+| pk 2 501 | 115.3 / 131.5 | 114.2 / 140.0 | 107.7 / 134.0 |
+| pk 6 254 | 116.7 / 131.8 | 107.1 / 136.1 | 99.1 / 122.8 |
+| pk 22 515 | 78.9 / 3 338 | 119.0 / 460.8 | 110.9 / 323.1 |
+
+Every median moved 5-8 %, every p99 down or level; select1's steady loss of §10.21 (p99 79-84
+against 74-75) is 74.4 against 72.3 — parity by the board's 1.05 on this rise. A second rise
+with the hint by default (`-001538`: phase A and P1 with it, P2/P3 `talaria.cont=0`) moved the
+same way (select1 4 503 p50/p99 60.8-62.6/76.0-77.2 against 64.9-65.2/80.9-81.5 without; pk
+2 528 109.9-111.5/131.0-132.6 against 118.0-119.4/142.7-143.5), but its Linux was faster at the
+bottom (select1 4 503: 61.4/70.3) — select1's lowest p99 is Linux's there by 8-10 % while our
+ring 3 is 38.4 k cycles against its 42.8 k: what is left of that point is not ring 3. The top
+rungs' medians stay Linux's (its cores stop sleeping there), and so does select1's top-rung
+ring 3 (IPC 1.1 against 1.9).
+
+The stat block names the writes that unfold a group: of 422 in a run, 414 were a new address
+space's or a split's writes into a FRESH table frame, whose old bytes the guard read as
+Contiguous entries — they are written with `pte_w_raw` now; 8 were real (ld-musl's MAP_FIXED
+over its folded reservation of a library). The KVM `c7g.metal` gate on `c5aade8`, the hint on
+(`infra/aws/logs/aarch64-20261027-001522`): 397/0, the databases 15/0 twice, the soak 13 modes
+x 50 boots and the race detector 6 x 96 with no failure, the loop 0 of 1. Gates: `conttext` (256 KB of counted increments run, forked, COW-rewritten and restored
+under two runner cores) and `dyn` with and without the knob; arm64 TCG 418/0, x86 573/0. Under
+QEMU 8.2's multi-threaded TCG `conttext` kept the old code of the rewritten page on every vCPU
+in ~1 of 7 boots without the hint too (0 of 15 with one thread): the gate runs it with one.
+
 ## 11. Reproducing any of this
 
 ```sh

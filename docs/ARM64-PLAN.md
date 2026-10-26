@@ -2949,6 +2949,21 @@ variable — five boots agree to a microsecond); netmixsteal's age, netmix=0 and
 move them. The steady one is select1's lowest rung (p99 79-84 against 74-75): its next
 instrument is Linux's own side (`perf` in the Linux guest), which the harness does not have.
 
+### 12.7. Progress (2026-10-27)
+
+Item 3's low rungs: the instrument on Linux's side exists now (statd's `perf stat -a` at EL0
+and EL1 in the middle of a point, `DURING=1`) and named the difference at once — the same
+instructions per request took 4-10x the L2-TLB refills here, because Linux maps PostgreSQL's
+text from 64 KB page-cache folios with the Contiguous bit (MEASUREMENTS §10.22). The hint is
+ours by default on arm64 (`c5aade8`, `talaria.cont=0` — off): select1's lowest rung p50/p99
+58.8/74.4 us against Linux's 62.7/72.3 (was 63.2/78.1), pk's 107.7/134.0 against 115.3/131.5,
+every median of the low and middle rungs ours; a second rise moved the same way, with its
+Linux faster at select1's bottom (p99 70.3 against our 76-77 while our ring 3 is the cheaper,
+38.4 k cycles against 42.8 k). KVM `c7g.metal` gate clean with the hint on. Left of item 3:
+select1's lowest p99 on a fast-Linux rise (the wakeup, not ring 3), the top rungs' medians
+(Linux's cores stop sleeping), select1's ring 3 at the top rung (IPC 1.1 against 1.9 — the
+next instrument is L1I/L1D-TLB and the cache events per request on both sides).
+
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and
