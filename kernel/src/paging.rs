@@ -796,6 +796,10 @@ unsafe fn pte_cas(p: *mut Pte, expect: u64, new: u64) -> bool {
 // between either uses one of the two or takes a TLB conflict abort (FSC 0x30), which the
 // abort handlers resolve by a local `tlbi vmalle1` and a retry.
 //
+// A table being built in a fresh frame is written with `pte_w_raw`: the frame's old bytes are
+// not entries, and a guard reading them unfolded "groups" of garbage (the stat block counted
+// them: new_process_space and the splits, ~90 % of the unfolds of a PostgreSQL run).
+//
 // Only `cont_fold` sets the bit (on a space no core runs yet) and fork's copy carries it
 // into the child (`pte_w_raw`, the parent's group already whole). Off — no slot ever holds
 // it and the guard is one relaxed load.
@@ -1159,7 +1163,7 @@ unsafe fn split_1g(e3: *mut Pte) {
     let flags = parent & (INHERIT); // inherit RW/US/NX/the cacheability
     let pd = kptr::<Pte>(crate::mem::alloc_any_frame().expect("split_1g: there is no frame"));
     for m in 0..512u64 {
-        pte_w(pd.add(m as usize), (base + m * 0x20_0000) | flags | PTE_PS);
+        pte_w_raw(pd.add(m as usize), (base + m * 0x20_0000) | flags | PTE_PS); // a fresh frame: no group to guard
     }
     if !install_table(e3, parent, kpa_of(pd), PTE_P | PTE_RW | PTE_US) {
         crate::mem::free_contig(kpa_of(pd), 1);   // we lost the race — the neighbour's table is already in place
@@ -1182,7 +1186,7 @@ unsafe fn split_2m_lazy(e2: *mut Pte) {
     HUGE_SPLIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let flags = parent & (PTE_LAZY | PTE_PRIV | PTE_PNONE | LAZY_W | LAZY_X); // without PS and LAZY_4K: they are about the directory entry
     let pt = kptr::<Pte>(crate::mem::alloc_any_frame().expect("split_2m_lazy: there is no frame"));
-    for m in 0..512usize { pte_w(pt.add(m), flags); }
+    for m in 0..512usize { pte_w_raw(pt.add(m), flags); } // a fresh frame: no group to guard
     if !install_table(e2, parent, kpa_of(pt), PTE_P | PTE_RW | PTE_US) {
         crate::mem::free_contig(kpa_of(pt), 1);
     }
@@ -1200,7 +1204,7 @@ unsafe fn split_2m(e2: *mut Pte) {
     let flags = parent & (INHERIT);
     let pt = kptr::<Pte>(crate::mem::alloc_any_frame().expect("split_2m: there is no frame"));
     for m in 0..512u64 {
-        pte_w(pt.add(m as usize), (base + m * 0x1000) | flags);
+        pte_w_raw(pt.add(m as usize), (base + m * 0x1000) | flags); // a fresh frame: no group to guard
     }
     if !install_table(e2, parent, kpa_of(pt), PTE_P | PTE_RW | PTE_US) {
         crate::mem::free_contig(kpa_of(pt), 1);
@@ -3045,7 +3049,7 @@ pub fn new_address_space() -> u64 {
         core::ptr::write_bytes(kptr::<u8>(new_pml4), 0, 4096);
         copy_kernel_pml4(base_pml4, new_pml4);
         for i in 0..512usize { // a copy of the kernel PDPT (0..3 are filled, 4.. are free for the private one)
-            pte_w(kptr::<Pte>(new_pdpt).add(i), pte_r(kern_pdpt.add(i)));
+            pte_w_raw(kptr::<Pte>(new_pdpt).add(i), pte_r(kern_pdpt.add(i))); // a fresh frame
         }
         pte_w(kptr::<Pte>(new_pml4), new_pdpt | PTE_P | PTE_RW | PTE_US);
         AS_LIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -3085,7 +3089,7 @@ pub fn new_process_space() -> u64 {
         // only explicitly — a `protect()` on a handed-out region (MAP_SHARED,
         // shm, a zero-syscall region), and `fork` carries it over to the child.
         for i in 0..512usize {
-            pte_w(kptr::<Pte>(pdpt).add(i), pte_r(kern_pdpt.add(i)));
+            pte_w_raw(kptr::<Pte>(pdpt).add(i), pte_r(kern_pdpt.add(i))); // a fresh frame
             let e = pte_r(kern_pd0.add(i));
             if e & PTE_P != 0 && e & PTE_PS == 0 {
                 // the entry is already split into 4K ones (e.g. the kernel's heap after nx_range): a DEEP COPY of the PT,
@@ -3095,12 +3099,12 @@ pub fn new_process_space() -> u64 {
                 for j in 0..512usize {
                     let v = pte_r(src_pt.add(j));
                     let v = if v & PTE_PRIV == 0 { v & !PTE_US } else { v };
-                    pte_w(kptr::<Pte>(new_pt).add(j), v);
+                    pte_w_raw(kptr::<Pte>(new_pt).add(j), v);
                 }
-                pte_w(kptr::<Pte>(pd0).add(i), (new_pt & ADDR_MASK) | (e & 0xFFF));
+                pte_w_raw(kptr::<Pte>(pd0).add(i), (new_pt & ADDR_MASK) | (e & 0xFFF));
             } else {
                 let e = if e & PTE_P != 0 && e & PTE_PRIV == 0 { e & !PTE_US } else { e };
-                pte_w(kptr::<Pte>(pd0).add(i), e); // a 2M identity (supervisor) or empty
+                pte_w_raw(kptr::<Pte>(pd0).add(i), e); // a 2M identity (supervisor) or empty
             }
         }
         pte_w(kptr::<Pte>(pdpt).add(kgb), pd0 | PTE_P | PTE_RW | PTE_US); // the private PD of the kernel's GB
