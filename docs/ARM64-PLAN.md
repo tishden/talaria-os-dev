@@ -2927,6 +2927,16 @@ cores sleep at the ceiling: it is the round trip (183 against 159 us with 4 conn
 not the processor. Left of item 3: those 24 us — the backend's runnable-but-not-running
 time between its read and its write is the next instrument.
 
+### 12.5. Progress (2026-10-26, later)
+
+Item 3: the instrument split the read->write — 67 us on a core, not in a queue — and the
+PMU at EL0 showed ring 3 at IPC 0.6 with ~800 L2-TLB refills a request: every mmap
+reservation ended with the broadcast full flush (MEASUREMENTS §10.20). It flushes now only
+over a present entry it overwrites: pk's ceiling 25.6-26.2 k against Linux's 26.8 k on the
+same rise (was 20.7 against 25.2). Left of item 3: pk's ring 3 is still ~120 k cycles a
+request with ~120-230 L2-TLB refills; whether Linux's is less is not measured (its guest
+has no PMU access in the harness).
+
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and
