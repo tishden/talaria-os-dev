@@ -1367,6 +1367,21 @@ The two generators agree point for point, so what is left is the server's. It is
   suspect, not a measurement).
 
 
+**The low rungs, followed** (`kernprobe-a64-postgresql-20261026-171413`, `-180520`, `-191127`).
+The first suspect — under `netmixsteal`'s 1 ms a connection's requests come 1.6 ms apart at
+2.5 k req/s, so no backend counts as having traffic and every request wakes a parked one — is
+dead: `talaria.netmixsteal=5000000` moved pk's lowest rung by as much as a phase with nothing
+changed (`=`: p50/p99 124.7/154.2 → 117.1/139.3; the knob 115.9/143.9). Five boots of one kernel
+on one rise agree to a microsecond (pk 2 428: p50 117.9-119.0, p99 141.8-143.5) — a boot is not
+the variable, the rise is. `talaria.netmix=0` (the backends spin instead of parking) makes every
+rung worse, the low ones included (select1 4 266: p99 79 → 91 us); `talaria.idlepoll=50000` is
+the control's twin. Across the three rises the low points change hands: select1 10 666 is ours
+on `-191127` (73.9 against 79.7), pk 6 304 is Linux's there (138 against 125) and parity on
+`-180520`; select1's lowest rung is the steady one (p99 79-84 against 74-75, p50 64-65 against
+62). What remains below 6 k req/s is the size of the rise-to-rise spread, and the two waits the
+kernel can change — the park and the idle core's sleep — are not it.
+
+
 ## 11. Reproducing any of this
 
 ```sh
