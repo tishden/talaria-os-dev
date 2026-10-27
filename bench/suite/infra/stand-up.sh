@@ -66,7 +66,11 @@ esac
 # (SMT neighbours). At smp=2 (= meta.env = Linux) mongodb WON find/insert p50.
 # Now the AMI and user-data take ONE number — from meta.env; TF_VAR_talaria_smp
 # still overrides it (an A/B on the number of cores).
-WL_SMP=$(. "$SUITE/workloads/$WL/meta.env"; echo "${SMP:-4}")
+# SMP_ARM64 / LINUX_CORES_ARM64 in a passport: the Graviton stand gives BOTH sides the whole
+# instance (the owner's decision, 2026-10-27, MEASUREMENTS §10.23): Talaria on every core and the
+# Linux server unpinned from 2-N. The x86 stand keeps SMP= until its board is re-taken.
+WL_SMP=$(. "$SUITE/workloads/$WL/meta.env"; if [ "$ARCH" = arm64 ] && [ -n "${SMP_ARM64:-}" ]; then echo "$SMP_ARM64"; else echo "${SMP:-4}"; fi)
+[ -n "${LINUX_SERVER_CORES:-}" ] || LINUX_SERVER_CORES=$(. "$SUITE/workloads/$WL/meta.env"; [ "$ARCH" = arm64 ] && echo "${LINUX_CORES_ARM64:-}" || true)
 echo "== terraform (talaria_smp=${TF_VAR_talaria_smp:-$WL_SMP} from the meta.env of $WL)"
 terraform -chdir="$TF" init -input=false >/dev/null
 terraform -chdir="$TF" apply -auto-approve -input=false \

@@ -398,6 +398,8 @@ check "stand.yml: the workload's root is made traversable AFTER unpacking, there
   "grep -q 'loop: \[\"\", proc, sys, dev, tmp\]' $Y && grep -q 'ss -Hltn' $Y && grep -q 'server_port' $HERE/infra/stand-up.sh"
 check "stand.yml: /dev and /sys into the workload's root use rbind (otherwise /dev/shm is empty and postgres does not start)" \
   "grep -q 'mount --rbind /dev' $Y && grep -q 'mount --rbind /sys' $Y && ! grep -q 'mount --bind /dev' $Y"
+check "the Graviton stand gives both sides the whole instance for postgresql (SMP_ARM64=4 into mk-ami and terraform, LINUX_CORES_ARM64 into the Linux unit), the x86 one keeps SMP=2" \
+  "grep -q 'CPUAffinity={{ server_cores | default(dp_cores) }}' $Y && (. $HERE/workloads/postgresql/meta.env; [ \"\$SMP_ARM64\" = 4 ] && [ \"\$LINUX_CORES_ARM64\" = 0-3 ] && [ \"\$SMP\" = 2 ]) && grep -q 'SMP=\$SMP_ARM64' $HERE/infra/mk-ami.sh && grep -q 'LINUX_CORES_ARM64' $HERE/infra/stand-up.sh"
 check "stand.yml: isolcpus only for the generator (a server on isolated cores lives on ONE)" \
   "grep -q \"'isolcpus=' ~ dp_cores if role == 'loadgen'\" $Y && ! grep -q '^ *grubby.*args=\"isolcpus' $Y"
 check "run-remote.sh: the Linux server's counters (statd :9999) are taken over the PUBLIC address (over the private one it was \"the snapshot is unavailable\" in every suite)" \
