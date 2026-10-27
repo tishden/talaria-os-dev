@@ -2975,7 +2975,12 @@ all four (`LINUX_SERVER_CORES=0-3`) its ceilings double: select1 91 k, pk 50.6 k
 Talaria on four cores keeps the low and middle rungs and loses the top of both ladders (select1's
 ceiling 75.7 k, the top-rung median 48-51 us against 41). The owner chose the whole instance
 for both (`SMP_ARM64=4`, `LINUX_CORES_ARM64=0-3` in the passport), so the next item is the
-four-core ceiling and the top rungs on it.
+four-core ceiling and the top rungs on it. That ceiling is a latency (4 connections, one
+request each), and ring 3 is the cheaper on four cores (select1 16.6 k cycles a request against
+18.1 k, which closes item 2). A Linux generator takes 4.5-5.5 us off every rung of the same
+Talaria server. Measured that way the server keeps all of the ladder but select1's last rung
+(46.4 against 44.6 us) and pk's top-rung p99. The next targets are our generator's ~5 us (the
+client path of the same kernel) and those ~2 us at the server's last rung.
 
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an

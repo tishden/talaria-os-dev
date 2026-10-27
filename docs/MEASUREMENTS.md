@@ -1492,6 +1492,24 @@ the whole instance for both: the PostgreSQL passport now carries `SMP_ARM64=4` a
 `LINUX_CORES_ARM64=0-3` (the Graviton stand only; x86 keeps `SMP=2` until its board is re-taken),
 and the work it points at is the four-core ceiling (75.7 k against 91 k).
 
+**What the top of the four-core ladder is made of.** The ceiling here is a latency, not a cycle
+budget. The generator keeps 4 connections, each with one request in flight, so the ceiling is
+about 4 divided by the time of one request: 4 / 53 us ≈ 75 k for us, 4 / 46 us ≈ 87 k for Linux.
+At the 67 k rung our four cores are about 60 % busy (90 k cycles a request), while Linux's are
+all busy busy-polling. Ring 3 is the cheaper here now (`-20261027-224552`, the PMU on both
+sides): select1 16.6 k cycles a request at IPC 2.08 against Linux's 18.1 k at 1.92, pk 53.8 k
+against 70 k. That closes item 2's "IPC 1.1 against 1.9", which was two cores shared by four
+backends. The server's own turnaround is about 14 us (the ring 3, the delivery->the read 3,
+the read->the write 7, the sending 1). The rest of the 50 us is the wire, the cards and the
+generator. The generator swap on one rise (`-20261027-234204`, phases: ours, `GEN=linux`,
+ours again) names the generator's part. The same Talaria server measured by the Linux
+generator is 4.5-5.5 us faster at every rung (select1 at 66 k: p50 46.4 against 51.6 / 52.6 with
+ours; 7.3 k: 53.1 against 57.9 / 58.9; pk at 11.8 k: 69.4 against 74.9 / 74.5). Measured that
+way the server keeps every rung but select1's top one (p50 46.4 against Linux's 44.6, p99 68.0
+against 63.2) and pk's top-rung p99 (130 against 107). So about 5 us of the board's top is our
+generator, the client side of the same kernel. What is left of the server is ~2 us at the
+last rung before the ceiling.
+
 The stand also learned two things on the way. `stand-up.sh` names the Linux hosts' interpreter
 (`/usr/bin/python3`): discovery on a host still booting answered "Platform unknown" and took
 `/usr/bin/python`, and a stand died after three attempts. And a bring-up that loses the
