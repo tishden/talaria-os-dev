@@ -23,6 +23,8 @@ WD="$SUITE/workloads/$WL"
 [ -d "$WD" ] || { echo "no workload $WL"; exit 1; }
 . "$WD/meta.env"
 . "$SUITE/lib/arch.sh"
+# A passport may name another number of cores for the Graviton stand (SMP_ARM64, see stand-up.sh).
+[ "$ARCH" = arm64 ] && [ -n "${SMP_ARM64:-}" ] && SMP=$SMP_ARM64 || true
 [ -x "$TLGEN_BIN" ] || { echo "no $TLGEN_BIN — run make -C bench/suite/tlgen$([ "$ARCH" = arm64 ] && echo ' a64')"; exit 1; }
 
 # `|| true`: under `set -e` an assignment takes the status of its command substitution, and a

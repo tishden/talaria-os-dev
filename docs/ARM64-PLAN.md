@@ -2973,9 +2973,9 @@ between phases (MEASUREMENTS §10.23). The top rungs then turned out to be partl
 the stand. The Linux server runs PostgreSQL on cores 2-3 with its interrupts on 0-1, and given
 all four (`LINUX_SERVER_CORES=0-3`) its ceilings double: select1 91 k, pk 50.6 k. Against that,
 Talaria on four cores keeps the low and middle rungs and loses the top of both ladders (select1's
-ceiling 75.7 k, the top-rung median 48-51 us against 41). The board's setting (two server cores
-each, or the whole instance each) waits for the owner. Either way the next item is the
-four-core ceiling.
+ceiling 75.7 k, the top-rung median 48-51 us against 41). The owner chose the whole instance
+for both (`SMP_ARM64=4`, `LINUX_CORES_ARM64=0-3` in the passport), so the next item is the
+four-core ceiling and the top rungs on it.
 
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an

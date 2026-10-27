@@ -1487,10 +1487,10 @@ against Linux's two for the backends is not the board's comparison, so the stand
 So the low and middle rungs stay ours on a whole machine against a whole machine, and the top
 of both ladders is Linux's: select1's ceiling is 20 % higher there, and its top-rung median is
 17-25 % lower. The earlier "the top rungs' medians are Linux's because its cores stop sleeping"
-was, in part, two of our cores against Linux's two plus two for its interrupts. Which of the two
-settings is the board's (both confined to two cores for the server, or both given the whole
-instance) is the owner's decision, so the passport keeps `SMP=2` until it is made. The work it
-points at either way is the four-core ceiling (75.7 k against 91 k).
+was, in part, two of our cores against Linux's two plus two for its interrupts. The owner chose
+the whole instance for both: the PostgreSQL passport now carries `SMP_ARM64=4` and
+`LINUX_CORES_ARM64=0-3` (the Graviton stand only; x86 keeps `SMP=2` until its board is re-taken),
+and the work it points at is the four-core ceiling (75.7 k against 91 k).
 
 The stand also learned two things on the way. `stand-up.sh` names the Linux hosts' interpreter
 (`/usr/bin/python3`): discovery on a host still booting answered "Platform unknown" and took
