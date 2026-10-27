@@ -87,6 +87,7 @@ except Exception:
 {
     echo "STAND_TYPE=$(terraform -chdir="$TF" output -raw instance_type)"
     echo "STAND_ARCH=$ARCH"
+    echo "STAND_LINUX_SERVER_CORES=${LINUX_SERVER_CORES:-2-N}"
     echo "STAND_AZ=$(terraform -chdir="$TF" output -raw az)"
     echo "STAND_REGION=$AWS_DEFAULT_REGION"
     echo "STAND_KEY=$TF/$(basename "$(terraform -chdir="$TF" output -raw key_file)")"
@@ -134,6 +135,10 @@ cp "$TLGEN_BIN" "$A/files/tlgen"
     echo
     echo "[linux_stand:vars]"
     echo "ansible_user=ec2-user"
+    # The interpreter by name: discovery on a host still booting answered "Platform unknown"
+    # and took /usr/bin/python, which Amazon Linux 2023 does not have — three attempts,
+    # a refusal, a stand paid for nothing (2026-10-27). The playbook checks python3 anyway.
+    echo "ansible_python_interpreter=/usr/bin/python3"
     echo "ansible_ssh_private_key_file=$STAND_KEY"
     echo "ansible_ssh_common_args=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
     echo "workload=$WL"
@@ -156,7 +161,10 @@ SRV_UID=$(echo "$EXEC" | cut -d"|" -f2)
 SRV_GID=$(echo "$EXEC" | cut -d"|" -f3)
 SRV_CHOWN=$(echo "$EXEC" | cut -d"|" -f4)
 SRV_PORT=$(. "$SUITE/workloads/$WL/meta.env"; echo "${PORT:-}")
-echo "   on the Linux server: $SRV_EXEC (uid $SRV_UID)"
+echo "   on the Linux server: $SRV_EXEC (uid $SRV_UID)${LINUX_SERVER_CORES:+, cores $LINUX_SERVER_CORES}"
+# LINUX_SERVER_CORES=0-3 — the Linux server on the cores named instead of the data-plane ones
+# (2-N, the NIC's interrupts stay on 0-1): the control for a Talaria phase given every core
+# (talaria.smp=4), so that the comparison does not hand one side twice the cores.
 # VARIABLES ARE PASSED ONLY AS JSON. `ansible-playbook -e "k=v"` splits the value
 # BY SPACES and makes SEVERAL variables out of it: the server's start command
 # (`/usr/bin/mongod --dbpath /data/db --bind_ip_all ...`) turned into
@@ -168,8 +176,9 @@ VARS=$(python3 -c "
 import json, sys
 print(json.dumps({'workload': sys.argv[1], 'server_exec': sys.argv[2],
                   'server_uid': sys.argv[3], 'server_gid': sys.argv[4],
-                  'server_chown': sys.argv[5], 'server_port': sys.argv[6]}))" \
-    "$WL" "$SRV_EXEC" "$SRV_UID" "$SRV_GID" "$SRV_CHOWN" "$SRV_PORT")
+                  'server_chown': sys.argv[5], 'server_port': sys.argv[6],
+                  **({'server_cores': sys.argv[7]} if sys.argv[7] else {})}))" \
+    "$WL" "$SRV_EXEC" "$SRV_UID" "$SRV_GID" "$SRV_CHOWN" "$SRV_PORT" "${LINUX_SERVER_CORES:-}")
 # THE FULL ANSIBLE LOG, NOT A TAIL. `| tail -25` left only the RECAP of a run:
 # for mongoose in the suite ec2all-20260905-133810 the Linux generator's stand ended with
 # `failed=1`, and WHICH task failed could no longer be learned from the log. The full

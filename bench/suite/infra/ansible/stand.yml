@@ -230,7 +230,7 @@
           ExecStart=/usr/sbin/chroot --userspec={{ server_uid | default(0) }}:{{ server_gid | default(0) }} {{ wl_root }} {{ server_exec }}
           Restart=no
           LimitNOFILE=65536
-          CPUAffinity={{ dp_cores }}
+          CPUAffinity={{ server_cores | default(dp_cores) }}
           [Install]
           WantedBy=multi-user.target
         mode: "0644"

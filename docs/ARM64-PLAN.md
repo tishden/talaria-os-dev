@@ -2964,6 +2964,19 @@ select1's lowest p99 on a fast-Linux rise (the wakeup, not ring 3), the top rung
 (Linux's cores stop sleeping), select1's ring 3 at the top rung (IPC 1.1 against 1.9 — the
 next instrument is L1I/L1D-TLB and the cache events per request on both sides).
 
+### 12.8. Progress (2026-10-27, later)
+
+Item 3's select1 bottom: the 3.4 % of frames that wait 10-50 us in the ring while the slot's
+holder is in ring 3 were named, and a parked waiter that drives the stack meanwhile
+(`talaria.parkpoll`) was built, measured and reverted. Its A/B did not rise above the drift
+between phases (MEASUREMENTS §10.23). The top rungs then turned out to be partly a matter of
+the stand. The Linux server runs PostgreSQL on cores 2-3 with its interrupts on 0-1, and given
+all four (`LINUX_SERVER_CORES=0-3`) its ceilings double: select1 91 k, pk 50.6 k. Against that,
+Talaria on four cores keeps the low and middle rungs and loses the top of both ladders (select1's
+ceiling 75.7 k, the top-rung median 48-51 us against 41). The board's setting (two server cores
+each, or the whole instance each) waits for the owner. Either way the next item is the
+four-core ceiling.
+
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and

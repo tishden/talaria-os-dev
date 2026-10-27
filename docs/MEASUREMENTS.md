@@ -1445,6 +1445,60 @@ under two runner cores) and `dyn` with and without the knob; arm64 TCG 418/0, x8
 QEMU 8.2's multi-threaded TCG `conttext` kept the old code of the rewritten page on every vCPU
 in ~1 of 7 boots without the hint too (0 of 15 with one thread): the gate runs it with one.
 
+### 10.23. A parked waiter driving the stack does not pay; four cores against four (2026-10-27)
+
+**A parked waiter driving the stack (`talaria.parkpoll`, not kept).** The stat block of
+`kernprobe-a64-postgresql-20261027-001538` split select1's lowest rung (4.5 k req/s) by
+delivery: a quarter of the requests reached the backend that holds the polling slot (read in
+under 5 us); three quarters reached a backend parked on the other core, woken by its doorbell
+(5-10 us); and 3.4 % of the frames waited 10-50 us in the ring. That last band is the p99. The
+holder had left for ring 3 with its own request, and nobody drove the stack while the other core
+slept. With the knob, the leaving holder woke one parked waiter on an idle core, and that waiter
+polled until the holder came back (the slot stayed with the holder). It worked as built: 5.4 M
+drives, 51 s of polling a run, 1.36 M frames picked up. The A/B
+(`kernprobe-a64-postgresql-20261027-075723`, phases 1/0/1/0) found no effect above the drift
+between phases: the pair 1/0 said it helps and the pair 1/0 after it said the opposite, and the
+best phase of the four (select1 4.5 k p50/p99 54.8/69.3 us against Linux's 60.3/71.0) had the
+knob off. The code is reverted.
+
+**`talaria.smp=4` for PostgreSQL, and what it really compared.** The passport's `SMP=2` dates from
+session 30 on x86 (the comment above `WL_SMP` in `bench/suite/infra/stand-up.sh`). On the arm64
+stand (`-20261027-153147`, phases 4/2/4/2, the two 4s within a microsecond of each other), four
+cores took every pk point from Linux (the top rung 22.2 k: p50/p99 72.6/113 us against
+77.4/4 473) and select1's middle and tails. Then the stand's playbook was read: the Linux server
+runs PostgreSQL under `CPUAffinity=2-3`, with the NIC's interrupts on 0-1. Four of our cores
+against Linux's two for the backends is not the board's comparison, so the stand got
+`LINUX_SERVER_CORES` (the Linux server on the cores named; recorded as
+`STAND_LINUX_SERVER_CORES` in stand.env). With `LINUX_SERVER_CORES=0-3` and `TF_VAR_talaria_smp=4`
+(`-20261027-172637`), Linux's ceilings doubled. select1 went from 43 k to 91 k req/s and pk from
+25.7 k to 50.6 k; ours are 75.7 k and 48.5 k on four cores:
+
+| case, rung | Linux 0-3 p50/p99 | Talaria smp=4 (two phases) | Talaria smp=2 |
+|---|---|---|---|
+| pk 4.9 k | 115.3/133.4 | 100.7/119.1, 105.3/129.1 | 104.3/128.8 |
+| pk 12.1 k | 92.6/143.4 | 70.5/102.7, 73.9/110.4 | 101.8/129.5 |
+| pk 24.3 k | 82.7/107.8 | 68.7/107.9, 75.8/119.4 | 121.7/493.8 |
+| pk 43.7 k | 76.2/105.9 | 68.7/139.0, 74.9/145.9 | 138.5/454.7 |
+| select1 7.6 k | 55.0/70.6 | 53.8/65.8, 58.5/73.8 | 58.7/71.2 |
+| select1 18.9 k | 46.2/79.4 | 45.7/59.6, 51.0/69.2 | 57.4/71.3 |
+| select1 37.8 k | 45.7/100.0 | 43.4/57.9, 47.5/64.0 | 55.1/74.0 |
+| select1 68.1 k | 41.0/63.4 | 48.0/63.6, 51.5/70.2 | 60.0/152.8 |
+
+So the low and middle rungs stay ours on a whole machine against a whole machine, and the top
+of both ladders is Linux's: select1's ceiling is 20 % higher there, and its top-rung median is
+17-25 % lower. The earlier "the top rungs' medians are Linux's because its cores stop sleeping"
+was, in part, two of our cores against Linux's two plus two for its interrupts. Which of the two
+settings is the board's (both confined to two cores for the server, or both given the whole
+instance) is the owner's decision, so the passport keeps `SMP=2` until it is made. The work it
+points at either way is the four-core ceiling (75.7 k against 91 k).
+
+The stand also learned two things on the way. `stand-up.sh` names the Linux hosts' interpreter
+(`/usr/bin/python3`): discovery on a host still booting answered "Platform unknown" and took
+`/usr/bin/python`, and a stand died after three attempts. And a bring-up that loses the
+network halfway leaves instances behind (terraform's `data "http" "myip"` cannot be read, so
+the destroy fails). `stand-down.sh` run by hand afterwards cleared them, but check the regions
+after every failed rise.
+
 ## 11. Reproducing any of this
 
 ```sh
