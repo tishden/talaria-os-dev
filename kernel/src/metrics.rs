@@ -456,6 +456,18 @@ pub fn dump() {
                     crate::print!("stat:     the average intervals, us:");
                     for k in 0..TR_ST { crate::print!(" {} {}", TR_ST_NAMES[k], TR_SUM[k].load(R) / n); }
                     crate::println!();
+                    {   // the same since the previous block, ns: one block = one rung
+                        use crate::netsys::{TR_SUM_NS, TR_TOT_NS};
+                        static PREV: [AtomicU64; TR_ST + 2] = [const { AtomicU64::new(0) }; TR_ST + 2];
+                        let cur: [u64; TR_ST + 2] = core::array::from_fn(|k| match k {
+                            0 => n, 1 => TR_TOT_NS.load(R), _ => TR_SUM_NS[k - 2].load(R) });
+                        let d: [u64; TR_ST + 2] = core::array::from_fn(|k| cur[k].wrapping_sub(PREV[k].swap(cur[k], R)));
+                        if d[0] != 0 {
+                            crate::print!("stat:     since the previous block {} turnarounds, ns on average: the whole {}", d[0], d[1] / d[0]);
+                            for k in 0..TR_ST { crate::print!(" {} {}", TR_ST_NAMES[k], d[k + 2] / d[0]); }
+                            crate::println!();
+                        }
+                    }
                     let mn = TR_MID_N.load(R);
                     if mn != 0 {
                         crate::print!("stat:     average ones (60..99 us) {}: the average intervals", mn);
@@ -591,6 +603,30 @@ pub fn dump() {
                 t, c, c * 100 / t, ms(crate::netsys::NET_WAIT_TSC.load(R)),
                 ms(crate::netsys::NET_HELD_TSC.load(R)), us(crate::netsys::NET_HELD_MAX.load(R)),
                 h[0].load(R), h[1].load(R), h[2].load(R), h[3].load(R));
+            // by site (netsys::NET_SITE), cumulative: takes / held us / waited us
+            crate::print!("stat: the stack's lock by site (takes/held us/waited us):");
+            for e in crate::netsys::NET_SITE.iter() {
+                let k = e.0.load(R);
+                if k == u32::MAX { continue; }
+                let base = k & !crate::netsys::NET_SITE_PASS;
+                let pass = if k & crate::netsys::NET_SITE_PASS != 0 { "+pass" } else { "" };
+                match base {
+                    0x1_0000 => crate::print!(" tick{}", pass),
+                    0x2_0000 => crate::print!(" line{}", pass),
+                    0xffff => crate::print!(" notask{}", pass),
+                    n => crate::print!(" sys{}{}", n, pass),
+                }
+                crate::print!("={}/{}/{}", e.1.load(R), us(e.2.load(R)), us(e.3.load(R)));
+            }
+            crate::println!();
+            // the write's pass by phase (netsys::WR_PH), cumulative ns
+            let w = &crate::netsys::WR_PH;
+            let ns = |c: u64| c.saturating_mul(1_000) / (hz / 1_000_000).max(1);
+            crate::println!("stat: the write's pass (cumulative): writes {} ns: the copy {} the preamble {} the poll {} the flush {} the tail {}; frames received {}",
+                w[0].load(R), ns(w[1].load(R)), ns(w[2].load(R)), ns(w[3].load(R)), ns(w[4].load(R)), ns(w[5].load(R)), w[6].load(R));
+            let x = &crate::netsys::WR_TX;
+            crate::println!("stat: the write's transmit (cumulative): frames {} ns: the slot {} the formatting {} the record {} (reaping {} the copy {} the fence {})",
+                x[0].load(R), ns(x[1].load(R)), ns(x[2].load(R)), ns(x[3].load(R)), ns(x[4].load(R)), ns(x[5].load(R)), ns(x[6].load(R)));
         }
     }
     // Cancelled idle passes of the stack and the trust in the "the card is silent" sign.
@@ -608,8 +644,8 @@ pub fn dump() {
         // request (991 million over a mysql run).
         let (sd, ss) = (crate::netsys::SCAN_DONE.load(R), crate::netsys::SCAN_SKIPPED.load(R));
         if sd + ss != 0 {
-            crate::println!("stat: the set scan by a waiter: under the lock {}, rejected without the lock {} ({}%)",
-                sd, ss, ss.saturating_mul(100) / (sd + ss).max(1));
+            crate::println!("stat: the set scan by a waiter: under the lock {}, rejected without the lock {} ({}%), of them a mixed set {}",
+                sd, ss, ss.saturating_mul(100) / (sd + ss).max(1), crate::netsys::SCAN_SKIPPED_MIX.load(R));
         }
         let ip = crate::netsys::IDLE_POLLS.load(R);
         if ip != 0 {
