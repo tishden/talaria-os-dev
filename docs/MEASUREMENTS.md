@@ -1501,14 +1501,25 @@ sides): select1 16.6 k cycles a request at IPC 2.08 against Linux's 18.1 k at 1.
 against 70 k. That closes item 2's "IPC 1.1 against 1.9", which was two cores shared by four
 backends. The server's own turnaround is about 14 us (the ring 3, the delivery->the read 3,
 the read->the write 7, the sending 1). The rest of the 50 us is the wire, the cards and the
-generator. The generator swap on one rise (`-20261027-234204`, phases: ours, `GEN=linux`,
-ours again) names the generator's part. The same Talaria server measured by the Linux
-generator is 4.5-5.5 us faster at every rung (select1 at 66 k: p50 46.4 against 51.6 / 52.6 with
-ours; 7.3 k: 53.1 against 57.9 / 58.9; pk at 11.8 k: 69.4 against 74.9 / 74.5). Measured that
-way the server keeps every rung but select1's top one (p50 46.4 against Linux's 44.6, p99 68.0
-against 63.2) and pk's top-rung p99 (130 against 107). So about 5 us of the board's top is our
-generator, the client side of the same kernel. What is left of the server is ~2 us at the
-last rung before the ceiling.
+generator. A generator swap on one rise (`-20261027-234204`, phases: ours, `GEN=linux`,
+ours again) first looked like it named the generator's part: the same Talaria server measured
+by the Linux generator was 4.5-5.5 us faster at every rung (select1 at 66 k: p50 46.4 against
+51.6 / 52.6 with ours). Two more rises did not repeat it. On `-20261028-010933` the Linux
+generator took 0-1 us off (select1 at 68 k: 51.0 against 51.8). Our generator with its own stat
+block switched on (`ROLES=loadgen`) lost nothing measurable (51.7). On `-20261028-021005`, with
+no stat block anywhere and the generators alternated (ours, Linux's, ours, Linux's), it took
+0.6-1.6 us off the middle and top rungs and nothing at the bottom. Each generator is its own
+instance, so the swap moves the OS and the instance's place in the network together. Read
+over three rises, our generator's own share is about 1 us. kp27's 5 us was placement.
+
+What is left belongs to the server, and it grows with the rate. On `-021005` the Linux
+generator measures Linux's server at 55.4 / 44.4 / 45.3 / 41.6 / 40.1 us up select1's ladder
+(8 k to 73 k) and ours at 56.5 / 50.4 / 45.6 / 48.2 / 50.1. The bottom rung is even. Linux's
+latency falls by 15 us as the rate rises, ours by 6 and then climbs back. The gap at the top
+rung varies by rise: 1.8 us (`-234204`), 6.3 (`-010933`), 10.0 (`-021005`). The shape is
+Linux's busy-poll: at a high rate the next frame lands inside the 50 us poll window and no
+wakeup is paid. That is the next thing to measure on our side: what one request costs
+between the frame and the read at the top rung against the bottom one.
 
 The stand also learned two things on the way. `stand-up.sh` names the Linux hosts' interpreter
 (`/usr/bin/python3`): discovery on a host still booting answered "Platform unknown" and took

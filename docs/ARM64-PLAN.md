@@ -2977,10 +2977,13 @@ ceiling 75.7 k, the top-rung median 48-51 us against 41). The owner chose the wh
 for both (`SMP_ARM64=4`, `LINUX_CORES_ARM64=0-3` in the passport), so the next item is the
 four-core ceiling and the top rungs on it. That ceiling is a latency (4 connections, one
 request each), and ring 3 is the cheaper on four cores (select1 16.6 k cycles a request against
-18.1 k, which closes item 2). A Linux generator takes 4.5-5.5 us off every rung of the same
-Talaria server. Measured that way the server keeps all of the ladder but select1's last rung
-(46.4 against 44.6 us) and pk's top-rung p99. The next targets are our generator's ~5 us (the
-client path of the same kernel) and those ~2 us at the server's last rung.
+18.1 k, which closes item 2). One generator swap (kp27) put 5 us of every rung on our
+generator, but two more rises did not repeat it: the swap moves the instance's place in the
+network along with the OS, and over three rises our generator's own share is about 1 us. What
+is left is the server's, and it grows with the rate: the bottom rung is even, and the top
+rung's median is 2-10 us behind Linux's depending on the rise. Linux gets faster as the rate
+rises (busy-poll catches the next frame without a wakeup), and ours does not. The next target
+is the cost between the frame and the read at the top rung against the bottom one.
 
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
