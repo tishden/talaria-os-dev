@@ -2984,6 +2984,9 @@ is left is the server's, and it grows with the rate: the bottom rung is even, an
 rung's median is 2-10 us behind Linux's depending on the rise. Linux gets faster as the rate
 rises (busy-poll catches the next frame without a wakeup), and ours does not. The next target
 is the cost between the frame and the read at the top rung against the bottom one.
+Not the wakeup: `talaria.netmixspin` (off by default) replaced most of the top rung's parks
+with a watch and bought 1.4 us of median there, while pk's middle p99 lost 33 us. The knob
+stays out of the manifest (MEASUREMENTS §10.23).
 
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an

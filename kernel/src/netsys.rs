@@ -760,6 +760,10 @@ pub fn configure_from_cmdline(cmdline: &str) {
             // cost MariaDB 29 times (see `wait_frame_w`).
             NETSOLO.store(true, core::sync::atomic::Ordering::SeqCst);
         }
+        else if let Some(v) = tok.strip_prefix("talaria.netmixspin=") {
+            // Under netmix: a non-polling waiter spins on its word this long before parking (see NETMIXSPIN_NS).
+            if let Ok(ns) = v.parse::<u64>() { NETMIXSPIN_NS.store(ns, core::sync::atomic::Ordering::SeqCst); }
+        }
         else if let Some(v) = tok.strip_prefix("talaria.netmixsteal=") {
             // Under netmix: the polling slot goes to the waiter with traffic (see NETMIXSTEAL_NS).
             if let Ok(ns) = v.parse::<u64>() { NETMIXSTEAL_NS.store(ns, core::sync::atomic::Ordering::SeqCst); }
@@ -2598,6 +2602,39 @@ pub fn poll_holder() -> Option<(usize, u64)> {
     if h >= crate::sched::NTASKS { return None; }
     Some((h, tsc::rdtsc().wrapping_sub(POLL_SINCE.load(core::sync::atomic::Ordering::Relaxed))))
 }
+/// A SPIN ON ONE'S OWN WORD BEFORE THE PARK (`talaria.netmixspin=<ns>`, off by default).
+///
+/// Under `netmix` a non-polling waiter parks at once, and a delivery wakes it: on four cores
+/// with four PostgreSQL backends that is ~0.7 of the requests paying a wakeup even at 56 k
+/// req/s (kp28's stat block, `-20261028-010933`), while Linux's busy-poll catches the next
+/// frame inside its 50 us window and pays none. With the knob the waiter first watches its
+/// word for this many nanoseconds — the delivery (`wake_owner`) and `mix_kick` move it, so
+/// the watch sees every source the park would — and parks only if the word stood still or
+/// its core has another ready task (the spin never keeps a neighbour off the core).
+/// Measured (MEASUREMENTS §10.23): the parks at select1's top fall 0.75 -> 0.15 a request but the
+/// median gains 1.4 us and pk's middle p99 loses 33 us, so it is an instrument, not in a manifest.
+static NETMIXSPIN_NS: AtomicU64 = AtomicU64::new(0);
+/// The watches the word ended (the waiter got its frame without a park) and the ones that ran out.
+pub static NET_MIX_SPIN_HIT: AtomicU64 = AtomicU64::new(0);
+pub static NET_MIX_SPIN_MISS: AtomicU64 = AtomicU64::new(0);
+/// The watch: true — the word moved (the frame or a kick came, no park needed).
+fn mix_spin(t: usize, seq: u32, ns: u64) -> bool {
+    use core::sync::atomic::Ordering::{Relaxed, SeqCst};
+    let end = crate::tsc::mono_ns() + ns;
+    let cpu = crate::percpu::cpu_id();
+    let mut i = 0u32;
+    loop {
+        if NW_WORD[t].load(SeqCst) != seq { NET_MIX_SPIN_HIT.fetch_add(1, Relaxed); return true; }
+        core::hint::spin_loop();
+        i = i.wrapping_add(1);
+        if i & 63 == 0 {
+            crate::paging::tlb_service();
+            if crate::tsc::mono_ns() >= end || crate::sched::cpu_has_other_runnable(cpu, t) {
+                NET_MIX_SPIN_MISS.fetch_add(1, Relaxed); return false;
+            }
+        }
+    }
+}
 /// THE SLOT TO THE ONE WITH TRAFFIC (`talaria.netmixsteal=<ns>`, off by default).
 ///
 /// Under `netmix` the polling slot is first come, first kept: PostgreSQL's postmaster enters
@@ -2863,6 +2900,8 @@ fn wait_frame_w(seq: u32, cap_ns: u64, w: &mut NetWaiter, only_sock: bool) -> bo
     if mix != 0 && !only_sock && !w.take_poll() {
         let t = crate::sched::current_id();
         if t < crate::sched::NTASKS && !crate::console::in_tick() {
+            let spin = NETMIXSPIN_NS.load(core::sync::atomic::Ordering::Relaxed);
+            if spin != 0 && mix_spin(t, seq, if cap_ns == 0 { spin } else { spin.min(cap_ns) }) { return false; }
             let cap = if cap_ns == 0 { mix } else { mix.min(cap_ns) };
             NET_MIX_PARKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let r = crate::sync::wait_on_coarse(NW_WORD[t].as_ptr(), seq, crate::tsc::mono_ns() + cap);

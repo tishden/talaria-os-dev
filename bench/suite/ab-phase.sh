@@ -94,6 +94,13 @@ if ! JOB_RETRY_S=$PROBE_RETRY_S python3 "$HERE/lib/job.py" "$talaria_loadgen_pub
     say "   REFUSAL: after tail $TAG THE SERVER does not answer within ${PROBE_RETRY_S} s — the phase is cancelled"
     say "          look in serial for: \"user-data touches the network (token ...)\" and \"ena: ... sts=\""
     say "          and for the probe's error: $(python3 -c "import json;print(json.load(open('$ALL/.probe-$TAG.json')).get('error',''))" 2>/dev/null)"
+    # The serial of the server that did not answer: the phase's watcher starts only after the
+    # answer, so without this one snapshot a refusal leaves nothing to read (kp31-32 lost three).
+    rid=${talaria_server_id:-}
+    if [ -n "$rid" ]; then
+        "$HERE/infra/console-watch.sh" once "$rid" "$ALL/console-$TAG-refusal.txt" >> "$LOG" 2>&1 || true
+        say "          the server's serial: $ALL/console-$TAG-refusal.txt"
+    fi
     exit 2
 fi
 say "   the server answers"

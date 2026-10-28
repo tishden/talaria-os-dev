@@ -221,6 +221,10 @@ pub fn dump() {
             crate::println!("stat: net: mixed-set waiters parked {} (woken {}, by the ceiling {}); non-socket kicks that woke one {}",
                 m, crate::netsys::NET_MIX_WAKE.load(Relaxed), crate::netsys::NET_MIX_TMO.load(Relaxed), crate::netsys::NET_MIX_KICKS.load(Relaxed));
         }
+        let (h, x) = (crate::netsys::NET_MIX_SPIN_HIT.load(Relaxed), crate::netsys::NET_MIX_SPIN_MISS.load(Relaxed));
+        if h + x != 0 {
+            crate::println!("stat: net: mixed-set watches before a park (netmixspin): the word moved {}, ran out or yielded {}", h, x);
+        }
     }
     if crate::sched::RUNHIST_ON.load(core::sync::atomic::Ordering::Relaxed) {
         let mut line = [0u64; 9];

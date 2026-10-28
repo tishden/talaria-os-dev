@@ -1521,6 +1521,28 @@ Linux's busy-poll: at a high rate the next frame lands inside the 50 us poll win
 wakeup is paid. That is the next thing to measure on our side: what one request costs
 between the frame and the read at the top rung against the bottom one.
 
+**The wakeup is not the gap.** On four cores `netmix` (the manifest's 1 ms) still parks every
+non-polling backend at once: kp28's stat block counts ~0.75 deliveries a request finding the
+reader asleep even at 56 k (each paying 4-5 us), where Linux's busy-poll pays none. Switching
+`netmix` off is no answer (`-20261028-031941`: select1's ceiling 74 k -> 43-45 k, pk's top p99
+450 us). `talaria.netmixspin=<ns>` (off by default) lets a non-polling waiter watch its wakeup
+word that long before it parks, and leaves at once if its core has another ready task. At
+50 us it does what it is for: at select1's top rungs the parks fall from 0.75-0.9 to 0.1-0.3 a
+request, and the watch catches the frame instead. But on one rise with two pairs
+(`-20261028-080712`, ours on/off/on/off) it bought select1's last rung 1.4 us of median
+(49.5 / 49.1 against 50.3 / 51.1, Linux 45.7) and 3.5 us of p99. pk's 24 k p99 got 33 us worse
+in both pairs (145 / 146 against 111 / 113): there the frame rarely comes inside 50 us, and the
+watch only burns the core before the same park. So the knob stays an instrument and is not in
+the manifest. The top rung's remaining 3.5-5 us are not the wakeup.
+
+The knob's first three rises lost four phases to a dead NIC. `netmixspin` was missing from
+`NET_LIVE_OPTS`, so a user-data tail carrying it (any value) reopened the card on the live
+node, and that node sometimes goes silent (PostgreSQL ready, the lease the same, SYNs
+unanswered). The cmdline self-check names exactly this, but it runs in the x86 gate, and only
+the arm64 one had run. `ab-phase.sh` now saves the server's serial when a phase is refused
+(`console-<tag>-refusal.txt`): until now the watcher started only after the server answered,
+so a refused phase left nothing to read.
+
 The stand also learned two things on the way. `stand-up.sh` names the Linux hosts' interpreter
 (`/usr/bin/python3`): discovery on a host still booting answered "Platform unknown" and took
 `/usr/bin/python`, and a stand died after three attempts. And a bring-up that loses the
