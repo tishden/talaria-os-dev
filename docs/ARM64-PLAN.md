@@ -2988,6 +2988,22 @@ Not the wakeup: `talaria.netmixspin` (off by default) replaced most of the top r
 with a watch and bought 1.4 us of median there, while pk's middle p99 lost 33 us. The knob
 stays out of the manifest (MEASUREMENTS §10.23).
 
+### 12.9. Progress (2026-10-28)
+
+The top rung's server path was split by instruments (MEASUREMENTS §10.24): the turnaround in
+ns per block, the stack lock by site, the write's pass by phase and the device's transmit
+inside it. Two changes came out of it, both live knobs in `NET_LIVE_OPTS` and both on by
+default. `talaria.netscanmix`: under `netmix` a mixed epoll set (socket + latch) may skip the
+scan under the lock while neither `rx_seen` nor the waiter's wakeup word has moved. The
+epoll's lock takes at the top rung fell from 7.3 to 2.8 a request and the lock's waits fell
+everywhere, but the median moved ~0.5 us. `talaria.netwcblk`: on arm64 the LLQ record goes as
+whole 64-byte blocks with no fence after it, ordered by the doorbell's `dmb oshst` as in
+Linux. The record went from 1.1 us a frame to 0.3, and the write's pass is 0.5-0.9 us shorter,
+but the medians stay inside the drift between phases. So neither the lock nor the transmit is
+the 4-6 us that the top rung still gives Linux. PostgreSQL's own read->write is a flat 7.2 us
+on every rung. The next target is the delivery->read interval, which grows with the rate
+(4.3 -> 5.8 us), and the part of the end-to-end the turnaround does not cover.
+
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and

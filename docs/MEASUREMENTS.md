@@ -1550,6 +1550,63 @@ network halfway leaves instances behind (terraform's `data "http" "myip"` cannot
 the destroy fails). `stand-down.sh` run by hand afterwards cleared them, but check the regions
 after every failed rise.
 
+### 10.24. The top rung's stack lock and the LLQ record (2026-10-28)
+
+Four cores both sides, `kernprobe-a64-postgresql-20261028-*` on us-west-2. Two instruments went
+into the stat block first. The server's turnaround is now summed in ns and printed per block
+("since the previous block"). The stack lock is split by site: tick, the card's line, or the
+syscall the task is in, and whether the take was a pass of the stack. At select1's top rung
+(~66 k) the end-to-end minus the server is a flat ~33 us, so the ladder's shape is the server:
+16.5 us turnaround at the top against 13.8 at 55 k. The lock is ~55 % busy there, 12 takes a
+request (`-121542`). By site (`-133641`), a request costs epoll_pwait 6.9 non-pass takes
+(2.7 us held, 6.7 us waited), recvfrom 2 takes (1.7 held) and sendto 1 take holding 3.65 us.
+`talaria.netirq=1 talaria.netpark=0` gave nothing (top p50 50.6/51.6 against 50.3/50.3). The
+stat block's "the ring->the pass" average is not a signal at this rate: a few thousand
+first-after-a-pause passes are clamped at 10 ms and add ~4 us to the mean, while 93 % of
+the passes are under 5 us.
+
+**Mixed sets may be rejected too (`talaria.netscanmix`, default 1, live).** The set-scan
+rejection without the lock (`talaria.netscan`, session 28's mysql finding) never applied to PostgreSQL: a backend's
+set holds its socket and its latch (a pipe, an eventfd or a signalfd), and a non-socket's
+readiness does not move `rx_seen`. Under `netmix`, `mix_kick` already moves every network
+waiter's wakeup word on such readiness. So a mixed set is now rejected when neither `rx_seen`
+nor the waiter's word has moved since the snapshot taken before the last scan. The 20 us
+backstop stays. A/B on one rise (`-143255`, on/off/on/off): scans under the lock 54 M / 53 M
+against 425 M / 458 M (92 % rejected). The epoll takes at the top rung fell from 7.3 to 2.8 a
+request, held 2.8 -> 1.3 us, waited 6.3 -> 4.1 us, and recvfrom's and sendto's waits fell with
+them. But the top rung's median moved only ~0.5 us (52.1 / 52.0 against 52.6 / 52.4), and pk
+did not move. The lock is not the gap to Linux. The knob only acts under `netmix` (PostgreSQL's
+manifest), and it is on by default because it takes the load off the lock.
+
+**sendto's 3.2 us is one frame's way out.** The write's pass was split by phase (`-155342`):
+the copy into the socket 130 ns, the preamble (orphans, listeners) 200, `iface.poll` 1.7-2.0
+us, `dev.flush` 70, the tail 50-300. Such a pass meets almost no foreign frames (0-0.2 a
+write). Inside `iface.poll` the device's transmit (`-163331`) took 160 ns for the slot and
+140 ns for smoltcp formatting the segment. Writing the 256-byte LLQ record took ~1 us, and of
+that the copy itself was 35 ns, reaping 24 ns, and the `fence(SeqCst)` after the copy 650 ns
+(`-183942`). That fence is a `dmb ish` waiting for 32 separate 8-byte stores to drain into
+write-combining memory.
+
+**The LLQ record as Linux writes it (`talaria.netwcblk`, default 1, live).** On arm64 the
+record now goes as whole 64-byte blocks (four `ldp` then four `stp` back to back, then a
+`dgh`), the shape of Linux's `__iowrite64_copy`. And it goes without a fence after it: every
+doorbell write is preceded by `dma_wmb` (`dmb oshst`), which orders the record before the
+doorbell as the device sees it (Linux: `__iowrite64_copy`, then `writel`). x86 keeps its loop
+and its `mfence` (`WC_ORDERED_BY_DOORBELL = false`), so its datapath is unchanged. `=0` is the
+old loop with the fence, `=2` the blocks with the fence. The blocks alone halve the fence
+(650 -> 330 ns, `-183942`). Dropping the fence moves the rest of the drain to the doorbell's
+barrier: the record 1.1 us -> 0.3 us, but `dev.flush` 70 -> 190-345 ns. Net, the write's pass
+is 0.5-0.9 us shorter, the turnaround's "sending" interval 2.95 -> 2.1-2.6 us, and the whole
+turnaround 0.1-0.3 and 1.3 us shorter in the two pairs (`-192604`, on/off/on/off). The medians
+stay inside the drift between phases (select1 top 53.1 / 50.2 against 51.5 / 51.6; the first
+pair's "on" phase was the slow one on pk as well). An earlier rise with the blocks and the
+fence (`-171901`) gave select1's two top rungs ~1 us in both pairs.
+
+What is left of the top rung is not in the transmit either. The server's turnaround at the top
+rung is ~15-17 us. read->write (PostgreSQL's own work between the read and the answer, on the
+core) is a flat 7.2 us from the 7 k rung to the 66 k one, so the growth with the rate is in
+the delivery->read interval (4.3 -> 5.8 us) and in what the turnaround does not cover.
+
 ## 11. Reproducing any of this
 
 ```sh

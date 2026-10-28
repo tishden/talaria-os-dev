@@ -195,6 +195,16 @@ pub static WANT_INTR: core::sync::atomic::AtomicBool = core::sync::atomic::Atomi
 /// we spend two writes into the BAR per pass on it.
 pub static WANT_NOCQDB: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// `talaria.netwcblk=0|1|2` (live, default 1): how an LLQ record goes into the device's memory.
+/// 0 — as it was: a loop of single 8-byte stores and a full fence after them. 1 — whole 64-byte
+/// blocks (`arch::barrier::wc_copy64`) and, where the arch allows it
+/// (`arch::barrier::WC_ORDERED_BY_DOORBELL`), no fence: the doorbell's own `dma_wmb` orders the
+/// record before it, as in Linux (`__iowrite64_copy`, then `writel`). 2 — the blocks with the
+/// fence (an A/B of the fence alone). On a Graviton (ARM64-PLAN §12.9, the write's transmit at
+/// select1's top) the loop + fence cost ~920 ns a frame, the fence alone 650 of it; the blocks
+/// halve the fence (~330 ns), which is then a `dmb ish` waiting for the record to drain.
+pub static WC_MODE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(1);
+
 // LLQ (ena_admin_defs.h)
 const LLQ_HEADER_INLINE: u32 = 0x1;
 const LLQ_ENTRY_128B: u32 = 0x1;
@@ -540,7 +550,9 @@ impl Ena {
     fn transmit_llq(&mut self, slot: usize, addr: u64, len: usize) {
         let hdr = len.min(self.llq_hdr_max);
         let rem = len - hdr;
-        let mut e = [0u8; 256];
+        #[repr(align(64))] struct Rec([u8; 256]);
+        let mut rec = Rec([0u8; 256]);
+        let e = &mut rec.0;
         let req_id = slot as u32;
         let buf_addr = if rem > 0 { crate::mem::Pa::of_kva(addr).add(hdr as u64).get() } else { 0 }; // the device's address of the frame's rest
         // Slot 0 is the meta descriptor if the device does not cache the meta (accel_mode).
@@ -565,18 +577,33 @@ impl Ena {
         // the header goes AFTER the slots for the descriptors (descs_num_before_header=2 -> 32 B)
         unsafe { core::ptr::copy_nonoverlapping(crate::mem::vptr::<u8>(addr), e.as_mut_ptr().add(32), hdr); }
         let dst = self.llq_base + ((self.tx_tail as u64) & (Q_DEPTH as u64 - 1)) * self.llq_entry as u64;
+        let wr = crate::netsys::WR_IN.load(Ordering::Relaxed);
+        let mode = WC_MODE.load(Ordering::Relaxed);
+        let t0 = if wr { crate::tsc::rdtsc() } else { 0 };
         unsafe {
             let src = e.as_ptr() as *const u64;
-            for i in 0..(self.llq_entry / 8) {
-                core::ptr::write_volatile(crate::mem::devptr::<u64>(dst + (i * 8) as u64), core::ptr::read_unaligned(src.add(i)));
+            if mode != 0 && self.llq_entry % 64 == 0 && dst % 64 == 0 {
+                crate::arch::barrier::wc_copy64(crate::mem::devptr::<u64>(dst), src, self.llq_entry / 8);
+            } else {
+                for i in 0..(self.llq_entry / 8) {
+                    core::ptr::write_volatile(crate::mem::devptr::<u64>(dst + (i * 8) as u64), core::ptr::read_unaligned(src.add(i)));
+                }
             }
         }
-        fence(Ordering::SeqCst);
+        let t1 = if wr { crate::tsc::rdtsc() } else { 0 };
+        if mode != 1 || !crate::arch::barrier::WC_ORDERED_BY_DOORBELL { fence(Ordering::SeqCst); }
+        if wr {
+            crate::netsys::WR_TX[5].fetch_add(t1 - t0, Ordering::Relaxed);
+            crate::netsys::WR_TX[6].fetch_add(crate::tsc::rdtsc() - t1, Ordering::Relaxed);
+        }
     }
 
     /// Post a frame into the transmit ring WITHOUT a call (the call goes in flush(), §7.2).
     pub fn transmit_no_notify(&mut self, slot: usize, addr: u64, len: usize) -> bool {
+        let wr = crate::netsys::WR_IN.load(Ordering::Relaxed);
+        let t0 = if wr { crate::tsc::rdtsc() } else { 0 };
         self.reap_tx();
+        if wr { crate::netsys::WR_TX[4].fetch_add(crate::tsc::rdtsc() - t0, Ordering::Relaxed); }
         if !self.tx_free[slot] { return false; }
         if self.llq_base != 0 {
             // LIMIT_TX_BURST: between two calls the device accepts not more than

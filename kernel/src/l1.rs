@@ -465,6 +465,8 @@ impl<'a> TxToken for SmolTx<'a> {
         F: FnOnce(&mut [u8]) -> R,
     {
         note_holder(3);
+        let wr = crate::netsys::WR_IN.load(core::sync::atomic::Ordering::Relaxed);
+        let t0 = if wr { tsc::rdtsc() } else { 0 };
         let Some(mut sh) = self.sh.take_bounded() else {
             let mut tmp = [0u8; BUF];
             return f(&mut tmp[..len]);   // the card is unavailable — we lose the frame, the machine lives
@@ -500,8 +502,16 @@ impl<'a> TxToken for SmolTx<'a> {
             }
         };
         let hdr = sh.q.tx_hdr(slot);
+        let t1 = if wr { tsc::rdtsc() } else { 0 };
         let r = f(&mut sh.q.tx_buf(slot)[hdr..hdr + len]);
+        let t2 = if wr { tsc::rdtsc() } else { 0 };
         sh.q.tx_send(slot, hdr + len);
+        if wr {
+            use core::sync::atomic::Ordering::Relaxed;
+            let w = &crate::netsys::WR_TX;
+            w[0].fetch_add(1, Relaxed); w[1].fetch_add(t1 - t0, Relaxed);
+            w[2].fetch_add(t2 - t1, Relaxed); w[3].fetch_add(tsc::rdtsc() - t2, Relaxed);
+        }
         crate::netprof::mark_tx(); // §7.1
         if sh.last_rx != 0 {
             let c = tsc::rdtsc() - sh.last_rx;

@@ -122,8 +122,8 @@ struct Tcp {
     /// that frame; it is closed in `write` (`tr_close`).
     trd: u64,
     trrd: u64,
-    trdus: u32,
-    trdla: u32,
+    trdns: u32,
+    trdlans: u32,
     /// The reader's processor and ready-queue cycles at the read (`sched::run_cycles`,
     /// `rq_cycles`) and the reader: the read->write is split by their differences.
     trrun: u64,
@@ -154,7 +154,7 @@ const ORPHAN_CAP_MS: i64 = 10_000;  // for the whole untying — no more than th
 
 const TCP0: Tcp = Tcp { k: K::Free, nonblock: false, port: 0, owner: 0, connecting: false, err: 0, nodelay: false, rx: 0, tx: 0, ifx: 0, tid: 255, h: None,
     rdy: 0, armed: false, dl: 0, dlx: 0, dlc: 0, dlo: 0, dlr: 0, dls: 0, dlp: 0, dlcpu: 255, dlby: 255, dlpt: [0; 16], dlwhy: [0; WHY_N], trd: 0, trrd: 0,
-    trdus: 0, trdla: 0, trrun: 0, trrq: 0, trsys: 0, trpf: 0, trtask: 0 };
+    trdns: 0, trdlans: 0, trrun: 0, trrq: 0, trsys: 0, trpf: 0, trtask: 0 };
 // ── the common lock of the network stack ──────────────────────────────────────
 //
 // smoltcp's interfaces, the table of sockets and the card's rings are mut statics and RefCells.
@@ -235,6 +235,8 @@ fn note_released() {
     if t0 == 0 { return; }
     let d = tsc::rdtsc().wrapping_sub(t0);
     NET_HELD_TSC.fetch_add(d, Relaxed);
+    let r = NET_SITE_CUR.swap(NET_SITE_N as u32, Relaxed) as usize;
+    if r < NET_SITE_N { NET_SITE[r].2.fetch_add(d, Relaxed); }
     // THE HISTOGRAM OF THE HOLDING. One "worst" does not judge: the maximum is ONE
     // event, and it may turn out to be both the host's departure of the vCPU and a real long
     // section. They are told apart by the frequency: how many holdings are longer than 100 us and WHO
@@ -296,6 +298,66 @@ static NET_SINCE: AtomicU64 = AtomicU64::new(0);
 pub static NET_HELD_HIST: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 /// The long holdings (>=100 us) by place: (the key, how many, in total us);
 /// the key is the syscall's number, 0x10000 a tick, 0x20000 the card's line, u32::MAX — empty.
+/// WHO TAKES THE STACK'S LOCK (ARM64-PLAN §12.9). At the top of PostgreSQL's select1 ladder on
+/// four cores the one lock is held 8.3 us a request and waited for 7.7 us a request: 55 % busy at
+/// 66.5 k req/s, and the frames wait in the ring for it. The sum does not say which takes are
+/// the work and which are the overhead; this table does — by the context (a tick, the card's
+/// line) or the syscall the task is in, and whether the take was a pass of the stack
+/// (`NET_SITE_PASS`): (key, takes, held cycles, waited cycles). Printed cumulative; the parser
+/// takes the difference between blocks.
+pub const NET_SITE_N: usize = 16;
+pub static NET_SITE: [(AtomicU32, AtomicU64, AtomicU64, AtomicU64); NET_SITE_N] =
+    [const { (AtomicU32::new(u32::MAX), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; NET_SITE_N];
+/// The key bit of a take that is a pass of the stack (`poll_gated`).
+pub const NET_SITE_PASS: u32 = 0x4_0000;
+/// The current owner's row in `NET_SITE` (only the owner writes it; `NET_SITE_N` — none).
+static NET_SITE_CUR: AtomicU32 = AtomicU32::new(NET_SITE_N as u32);
+fn site_key() -> u32 {
+    use core::sync::atomic::Ordering::Relaxed;
+    let cpu = crate::percpu::cpu_id();
+    if crate::console::in_tick() { return 0x1_0000; }
+    if cpu < crate::smp::MAXCPU && IN_NIC_IRQ[cpu].load(Relaxed) != 0 { return 0x2_0000; }
+    let t = crate::sched::current_id();
+    if t < crate::sched::NTASKS { (crate::syscall::LAST_SYS[t].load(Relaxed) >> 48) as u32 } else { 0xffff }
+}
+fn site_row(key: u32) -> u32 {
+    use core::sync::atomic::Ordering::Relaxed;
+    for (i, e) in NET_SITE.iter().enumerate() {
+        let k = e.0.load(Relaxed);
+        if k == key || (k == u32::MAX && e.0.compare_exchange(u32::MAX, key, Relaxed, Relaxed).is_ok()) { return i as u32; }
+    }
+    NET_SITE_N as u32
+}
+/// The take just made is a pass of the stack: move it to the key's pass row.
+fn site_mark_pass() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let r = NET_SITE_CUR.load(Relaxed) as usize;
+    if r >= NET_SITE_N { return; }
+    let e = &NET_SITE[r];
+    let k = e.0.load(Relaxed);
+    if k & NET_SITE_PASS != 0 { return; }
+    let r2 = site_row(k | NET_SITE_PASS) as usize;
+    if r2 >= NET_SITE_N { return; }
+    // the take and its wait move with it; the holding is added at the release to the current row
+    e.1.fetch_sub(1, Relaxed); NET_SITE[r2].1.fetch_add(1, Relaxed);
+    let w = SITE_LAST_WAIT.load(Relaxed);
+    e.3.fetch_sub(w, Relaxed); NET_SITE[r2].3.fetch_add(w, Relaxed);
+    NET_SITE_CUR.store(r2 as u32, Relaxed);
+}
+static SITE_LAST_WAIT: AtomicU64 = AtomicU64::new(0);
+/// THE WRITE'S PASS (ARM64-PLAN §12.9). At the top of select1's ladder a `write` holds the lock
+/// 3.2 us a request, the longest single hold. Its phases, cumulative cycles: [0] the writes,
+/// [1] the copy into the socket (the lock taken -> the pass), [2] the pass's preamble (orphans,
+/// listeners), [3] `iface.poll` (the ingress it meets and the egress), [4] `dev.flush` (the
+/// doorbell), [5] the tail (the delivery of what the pass received), [6] the frames that pass
+/// received. Written only by the lock's owner (`WR_IN`).
+pub static WR_PH: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+/// Inside the write's `iface.poll`, the device's transmit (`l1::SmolTx::consume`), cumulative
+/// cycles: [0] the frames, [1] the slot (reaping, the allocation), [2] smoltcp formatting the
+/// frame, [3] `tx_send` (the LLQ record); inside [3] (`ena::transmit_no_notify`): [4] reaping
+/// the completions, [5] the record's copy into the device, [6] the fence after it.
+pub static WR_TX: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+pub static WR_IN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 pub static NET_HELD_LONG: [(AtomicU32, AtomicU64, AtomicU64); 8] =
     [const { (AtomicU32::new(u32::MAX), AtomicU64::new(0), AtomicU64::new(0)) }; 8];
 /// Is the card's line handler running on this core (a prohibition of recursion into the lock).
@@ -510,6 +572,12 @@ fn net_enter(wait: bool) -> Option<NetGuard> {
             let now = tsc::rdtsc();
             NET_TAKES.fetch_add(1, Relaxed);
             if spun { NET_CONT.fetch_add(1, Relaxed); NET_WAIT_TSC.fetch_add(now.wrapping_sub(t0), Relaxed); }
+            {   let r = site_row(site_key());
+                let w = if spun { now.wrapping_sub(t0) } else { 0 };
+                if (r as usize) < NET_SITE_N { NET_SITE[r as usize].1.fetch_add(1, Relaxed); NET_SITE[r as usize].3.fetch_add(w, Relaxed); }
+                SITE_LAST_WAIT.store(w, Relaxed);
+                NET_SITE_CUR.store(r, Relaxed);
+            }
             NET_SINCE.store(now, Relaxed);
             return Some(NetGuard(cpu as i32));
         }
@@ -1460,6 +1528,7 @@ fn poll_gated(force: bool) {
         }
     }
     let _g = match net_try() { Some(g) => g, None => return }; // the stack is already being driven — a second pass is not needed
+    if NET_DEPTH.load(core::sync::atomic::Ordering::Relaxed) == 1 { site_mark_pass(); }
     nw_ph(PH_PASS);
     // The debt of a missed interrupt is extinguished by ANY pass that took place: it
     // will parse the same ring (see NIC_PENDING).
@@ -1487,6 +1556,8 @@ fn poll_gated(force: bool) {
             RING_ADDR_LAST.store(RING_ADDR_NOW.load(Relaxed), Relaxed);
         }
     }
+    let wr = WR_IN.load(core::sync::atomic::Ordering::Relaxed);
+    let mut wt = [t_pass, 0, 0, 0];
     reap_orphans(); // before the pass: the untied ones go away, the overdue ones get an RST in this same pass
     rearm_listeners(); // the freed slots go back into the listeners' backlog
     let n = unsafe { NIF };
@@ -1497,7 +1568,9 @@ fn poll_gated(force: bool) {
         // The profile's marking (§7.1) is kept by THE FIRST interface: the datapath's numbers
         // are compared between sessions, and mixing the management card into them is not allowed.
         let t0 = if idx == 0 && crate::netprof::on() { tsc::rdtsc() } else { 0 };
+        if wr && idx == 0 { wt[1] = tsc::rdtsc(); }
         f.iface.poll(ts, &mut f.dev, &mut f.sockets);
+        if wr && idx == 0 { wt[2] = tsc::rdtsc(); }
         // §7.4: the kernel echo — the answer is formed right here, before the exit from the pass of the stack
         if let Some(h) = f.ke {
             let mut buf = [0u8; 2048];
@@ -1524,6 +1597,7 @@ fn poll_gated(force: bool) {
             while f.sockets.get_mut::<udp::Socket>(h).recv().is_ok() {}
         }
         f.dev.flush(); // §7.2: one call to the device for the whole pass of the stack
+        if wr && idx == 0 { wt[3] = tsc::rdtsc(); }
         if t0 != 0 { crate::netprof::mark_poll(tsc::rdtsc().wrapping_sub(t0)); } // §7.1
         if f.dh.is_some() { dhcp_process(idx); }
         if f.nt.is_some() { ntp_process(idx, ts); }
@@ -1535,6 +1609,14 @@ fn poll_gated(force: bool) {
         // "The network is alive" for the idle pass of an empty core (see `idle_poll`).
         LAST_RX_TSC.store(tsc::rdtsc(), core::sync::atomic::Ordering::Relaxed);
         deliver_ready();
+    }
+    if wr && wt[3] != 0 {
+        use core::sync::atomic::Ordering::Relaxed;
+        WR_PH[2].fetch_add(wt[1].wrapping_sub(wt[0]), Relaxed);
+        WR_PH[3].fetch_add(wt[2].wrapping_sub(wt[1]), Relaxed);
+        WR_PH[4].fetch_add(wt[3].wrapping_sub(wt[2]), Relaxed);
+        WR_PH[5].fetch_add(tsc::rdtsc().wrapping_sub(wt[3]), Relaxed);
+        WR_PH[6].fetch_add(crate::l1::rx_seen().wrapping_sub(rx0), Relaxed);
     }
 }
 
@@ -1585,7 +1667,7 @@ fn deliver_ready() {
         // landed in the socket. It is closed in `read` (`dl_close`).
         tt()[i].dl = tsc::rdtsc();
         NET_LAST_DL.store(tt()[i].dl, core::sync::atomic::Ordering::Relaxed);
-        tt()[i].trdla = LAST_DLA_US.load(core::sync::atomic::Ordering::Relaxed);
+        tt()[i].trdlans = LAST_DLA_NS.load(core::sync::atomic::Ordering::Relaxed);
         tt()[i].dlc = dl_class(t, me);
         tt()[i].dlx = if t != 255 && (t as usize) < crate::sched::NTASKS { crate::sched::core_ctx_of(t as usize) } else { 0 };
         tt()[i].dlo = dl_occupant(t, tt()[i].dlx);
@@ -1920,8 +2002,9 @@ fn dl_close(i: usize) {
     tt()[i].dl = 0;
     let c = (tt()[i].dlc as usize).min(DLC_N - 1);
     let now = tsc::rdtsc();
-    let us = now.wrapping_sub(t0).saturating_mul(1_000_000) / unsafe { HZ }.max(1);
-    tt()[i].trd = t0; tt()[i].trrd = now; tt()[i].trdus = us.min(u32::MAX as u64) as u32;
+    let ns = now.wrapping_sub(t0).saturating_mul(1_000_000_000) / unsafe { HZ }.max(1);
+    let us = ns / 1000;
+    tt()[i].trd = t0; tt()[i].trrd = now; tt()[i].trdns = ns.min(u32::MAX as u64) as u32;
     let me = crate::sched::current_id();
     // the reader + 1 (0 — none): a zero initialiser keeps the socket table in .bss
     tt()[i].trtask = if me < crate::sched::NTASKS { me as u16 + 1 } else { 0 };
@@ -1962,10 +2045,11 @@ fn dl_close(i: usize) {
 fn dla_note(t_pass: u64, since: u64) {
     use core::sync::atomic::Ordering::Relaxed;
     if since == 0 { return; }
-    let us = t_pass.wrapping_sub(since).saturating_mul(1_000_000) / unsafe { HZ }.max(1);
+    let ns = t_pass.wrapping_sub(since).saturating_mul(1_000_000_000) / unsafe { HZ }.max(1);
+    let us = ns / 1000;
     DLA_HIST[dl_bucket(us)].fetch_add(1, Relaxed);
     if us > DLA_MAX_US.load(Relaxed) { DLA_MAX_US.store(us, Relaxed); }
-    LAST_DLA_US.store(us.min(u32::MAX as u64) as u32, Relaxed);
+    LAST_DLA_NS.store(ns.min(u32::MAX as u64) as u32, Relaxed);
 }
 /// THE GAP BETWEEN THE PASSES WITH FRAMES (session 32). The generator sends its requests by
 /// a grid (7566 req/s = 132 us), and on the server the passes with frames must go
@@ -1987,8 +2071,8 @@ fn rxgap_note(t_pass: u64, stale: bool, nrx: u64) {
     let b = match us { 0..=49 => 0, 50..=99 => 1, 100..=149 => 2, 150..=199 => 3, 200..=249 => 4, 250..=299 => 5, 300..=499 => 6, _ => 7 };
     RXGAP_HIST[stale as usize][b].fetch_add(1, Relaxed);
 }
-/// The estimate "the ring->the pass" of the last pass with frames (for `Tcp.trdla`).
-static LAST_DLA_US: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// The estimate "the ring->the pass" of the last pass with frames, ns (for `Tcp.trdlans`).
+static LAST_DLA_NS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// The cycle of the last delivery of data over a socket — "the network is silent" for `talaria.statidle`.
 pub static NET_LAST_DL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -2010,6 +2094,11 @@ pub const TR_ST: usize = 5;
 pub const TR_ST_NAMES: [&str; TR_ST] = ["the ring->the pass", "the delivery->the read", "the read->the write", "the lock in the write", "the sending"];
 /// The sums of the intervals, us — over all the turnarounds and over the slow ones (>= 100 us).
 pub static TR_SUM: [AtomicU64; TR_ST] = [const { AtomicU64::new(0) }; TR_ST];
+/// The same sums in ns, and the turnarounds' own — the stat block prints their delta since the
+/// previous block, so that one block = one rung of a ladder (ARM64-PLAN §12.9: the whole-us sums
+/// since the boot could not tell the top rung from the bottom one).
+pub static TR_SUM_NS: [AtomicU64; TR_ST] = [const { AtomicU64::new(0) }; TR_ST];
+pub static TR_TOT_NS: AtomicU64 = AtomicU64::new(0);
 pub static TR_SLOW_SUM: [AtomicU64; TR_ST] = [const { AtomicU64::new(0) }; TR_ST];
 pub static TR_SLOW_N: AtomicU64 = AtomicU64::new(0);
 /// The same for the AVERAGE turnarounds (60..99 us) — the p99 of a mysql pk request sits there.
@@ -2042,12 +2131,17 @@ fn tr_close(i: usize, t_w0: u64, t_wl: u64) {
     tt()[i].trd = 0;
     let hz = unsafe { HZ }.max(1);
     let us = |c: u64| c.saturating_mul(1_000_000) / hz;
+    let ns = |c: u64| c.saturating_mul(1_000_000_000) / hz;
     let now = tsc::rdtsc();
-    let total = us(now.wrapping_sub(t0));
+    let total_ns = ns(now.wrapping_sub(t0));
+    let total = total_ns / 1000;
     // the estimate "the ring->the pass" is an upper one and is sometimes astronomical (the first
     // pass after a pause); no more than 10 ms is taken into the sum
-    let st = [(tt()[i].trdla as u64).min(10_000), tt()[i].trdus as u64, us(t_w0.wrapping_sub(tt()[i].trrd)),
-              us(t_wl.wrapping_sub(t_w0)), us(now.wrapping_sub(t_wl))];
+    let st_ns = [(tt()[i].trdlans as u64).min(10_000_000), tt()[i].trdns as u64, ns(t_w0.wrapping_sub(tt()[i].trrd)),
+                 ns(t_wl.wrapping_sub(t_w0)), ns(now.wrapping_sub(t_wl))];
+    let st: [u64; TR_ST] = core::array::from_fn(|k| st_ns[k] / 1000);
+    for k in 0..TR_ST { TR_SUM_NS[k].fetch_add(st_ns[k], Relaxed); }
+    TR_TOT_NS.fetch_add(total_ns, Relaxed);
     TR_HIST[tr_bucket(total)].fetch_add(1, Relaxed);
     let me = crate::sched::current_id();
     if tt()[i].trtask as usize == me + 1 {
@@ -3584,7 +3678,13 @@ pub fn write(fd: i64, buf: *const u8, len: usize, flags: u64) -> i64 {
     // is no longer microseconds: the echo's measurement showed the stage `app->tx` at 873 us with
     // a parking ceiling of 1 ms — the answer lay ready and waited for somebody
     // to drive the stack.
-    poll_forced();
+    {   use core::sync::atomic::Ordering::Relaxed;
+        WR_PH[0].fetch_add(1, Relaxed);
+        WR_PH[1].fetch_add(tsc::rdtsc().wrapping_sub(t_wl), Relaxed);
+        WR_IN.store(true, Relaxed);
+        poll_forced();
+        WR_IN.store(false, Relaxed);
+    }
     tr_close(i, t_w0, t_wl);
     off as i64
 }
@@ -3982,6 +4082,18 @@ static NETSCAN_NS: AtomicU64 = AtomicU64::new(20_000);
 /// How many scans of the set were rejected without the lock (and how many were made).
 pub static SCAN_SKIPPED: AtomicU64 = AtomicU64::new(0);
 pub static SCAN_DONE: AtomicU64 = AtomicU64::new(0);
+/// Of the rejected ones — on a MIXED set (sockets and a pipe/eventfd/signalfd).
+pub static SCAN_SKIPPED_MIX: AtomicU64 = AtomicU64::new(0);
+// THE MIXED SET (ARM64-PLAN §12.9). A PostgreSQL backend waits in an epoll on its socket AND its
+// latch, so the rejection above never applied to it: at the top of select1's ladder on four
+// cores the waiters took the machine lock 6.9 times a request (2.7 us held, 6.7 us waited a
+// request), and the lock was 55 % busy. Under `talaria.netmix=` a non-socket's readiness already
+// has a signal: `mix_kick` moves the wakeup word of every network waiter (the mixed-set parking
+// sleeps on exactly that, up to its ceiling). So a mixed set may be rejected too when, besides
+// `rx_seen`, the waiter's own word has not moved since the snapshot taken BEFORE the last scan
+// (a kick after that snapshot moves it: the kicker changes the state, fences, then moves the
+// word). The backstop by time stays. `talaria.netscanmix=0` — mixed sets are always scanned.
+static NETSCAN_MIX: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
 pub fn netscan_from_cmdline(cmdline: &str) {
     if let Some(ns) = crate::cmdline::num(cmdline, "talaria.netscan") {
@@ -3989,16 +4101,41 @@ pub fn netscan_from_cmdline(cmdline: &str) {
         crate::println!("netsys: a scan of the set under the lock not less often than once every {} ns{}", ns,
             if ns == 0 { " (the rejection is off — as it was)" } else { "" });
     }
+    if let Some(v) = crate::cmdline::num(cmdline, "talaria.netwcblk") {
+        let v = v.min(2) as u8;
+        crate::ena::WC_MODE.store(v, core::sync::atomic::Ordering::SeqCst);
+        crate::println!("netsys: an LLQ record goes into the device {}", match v {
+            0 => "as single 8-byte stores with a fence (as it was)",
+            1 => "as whole 64-byte blocks, ordered by the doorbell's barrier",
+            _ => "as whole 64-byte blocks with a fence" });
+    }
+    if let Some(v) = crate::cmdline::num(cmdline, "talaria.netscanmix") {
+        NETSCAN_MIX.store(v != 0, core::sync::atomic::Ordering::SeqCst);
+        crate::println!("netsys: the rejection of a MIXED set's scan without the lock is {}", if v != 0 { "on" } else { "off" });
+    }
 }
 
 /// The state of the rejection for ONE waiting loop.
-struct ScanGate { rx: u64, tsc: u64, sock_only: bool, first: bool }
+struct ScanGate { rx: u64, tsc: u64, sock_only: bool, first: bool, word: Option<u32>, word_pre: Option<u32> }
 impl ScanGate {
-    fn new() -> Self { ScanGate { rx: 0, tsc: 0, sock_only: false, first: true } }
+    fn new() -> Self { ScanGate { rx: 0, tsc: 0, sock_only: false, first: true, word: None, word_pre: None } }
+    /// This waiter's wakeup word, or None when a mixed set may not be rejected.
+    fn mix_word() -> Option<u32> {
+        use core::sync::atomic::Ordering::{Relaxed, SeqCst};
+        if !NETSCAN_MIX.load(Relaxed) || NETMIX_NS.load(Relaxed) == 0 { return None; }
+        let t = crate::sched::current_id();
+        if t >= crate::sched::NTASKS || !NW_IN[t].load(Relaxed) { return None; }
+        Some(NW_WORD[t].load(SeqCst))
+    }
     /// Is a scan of the set under the lock needed right now.
     fn need(&mut self) -> bool {
         use core::sync::atomic::Ordering::Relaxed;
-        if self.first || !self.sock_only { return true; }
+        // the snapshot is taken before every scan this call may allow (the set's kind is known
+        // only after the first one)
+        let w = if self.first || !self.sock_only { Self::mix_word() } else { None };
+        self.word_pre = w;
+        if self.first { return true; }
+        if !self.sock_only && (w.is_none() || w != self.word) { return true; }
         let ns = NETSCAN_NS.load(Relaxed);
         if ns == 0 { return true; }
         if crate::l1::rx_seen() != self.rx { return true; }
@@ -4007,6 +4144,7 @@ impl ScanGate {
         let need = (hz / 1_000_000).max(1) * (ns / 1000).max(1);
         if tsc::rdtsc().wrapping_sub(self.tsc) >= need { return true; }
         SCAN_SKIPPED.fetch_add(1, Relaxed);
+        if !self.sock_only { SCAN_SKIPPED_MIX.fetch_add(1, Relaxed); }
         false
     }
     /// The scan took place: remember the marks and whether the whole set is sockets.
@@ -4017,6 +4155,7 @@ impl ScanGate {
         self.tsc = tsc::rdtsc();
         self.sock_only = only_sock;
         self.first = false;
+        self.word = self.word_pre; // the word as it was BEFORE this scan
     }
 }
 
