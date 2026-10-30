@@ -496,7 +496,7 @@ pub fn boot_shared(start_info: u64, mut cmdline: &'static str, tsc_hz: u64, earl
 /// decision "does it reopen the NIC or not" does not pass the regression rather than waiting for a stand.
 pub(crate) const NET_LIVE_OPTS: &[&str] = &[
     "talaria.netirq=",    // the NIC's line is set on the live stack (`netsys::line_late`)
-    "talaria.netscan=", "talaria.netscanmix=", "talaria.netslice=", "talaria.netyield=",
+    "talaria.netdr=", "talaria.netscan=", "talaria.netscanmix=", "talaria.netslice=", "talaria.netyield=",
     "talaria.netpark=", "talaria.netsolo=", "talaria.netprof=", "talaria.netpause=",
     "talaria.nettrace=", "talaria.netidle=", "talaria.netmix=", "talaria.netmixspin=", "talaria.netmixsteal=",
     "talaria.netwcblk=",  // read by the LLQ record's copy at every frame (`ena::WC_MODE`)

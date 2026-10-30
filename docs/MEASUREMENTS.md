@@ -1607,6 +1607,37 @@ rung is ~15-17 us. read->write (PostgreSQL's own work between the read and the a
 core) is a flat 7.2 us from the 7 k rung to the 66 k one, so the growth with the rate is in
 the delivery->read interval (4.3 -> 5.8 us) and in what the turnaround does not cover.
 
+### 10.25. The delivery->read interval is the stack lock's wait (2026-10-29)
+
+Four cores both sides, `kernprobe-a64-postgresql-20261028-223332` on us-west-2, phases
+P1 `talaria.netdr=1`, P2 without it, P3 with it again. The new instrument (`talaria.netdr=1`,
+off by default, live) has the reader stamp its own path: an epoll's parked wake, the last
+iteration's top, the scan's lock asked and taken, the epoll's return, the read's entry and
+its lock. `dl_close` then cuts each delivery->read by those stamps, clamping every boundary
+to be no earlier than the one before. The stat block prints the average segments per block,
+one block per rung. The stamps cost nothing measurable: select1's top-rung p50 is
+50.8 / 50.9 / 51.0 us in P1 / P2 / P3, and pk's p50 moved the same way.
+
+select1, ns a delivery (P1 / P3):
+
+| rung | sum | wake | to the top | pass | scan's lock | scan | ring 3 | read's lock | read |
+|---|---|---|---|---|---|---|---|---|---|
+| 7.3 k | 3640 / 3720 | 1740 / 2020 | 67 / 51 | 376 / 323 | 400 / 342 | 520 / 495 | 3 | 276 / 248 | 252 / 235 |
+| 36.5 k | 2790 / 2570 | 810 / 760 | 82 / 70 | 309 / 266 | 655 / 650 | 432 / 400 | 3 | 295 / 239 | 208 / 180 |
+| 54.7 k | 3575 / 3010 | 775 / 740 | 148 / 120 | 322 / 285 | 1180 / 950 | 490 / 434 | 3 | 440 / 302 | 219 / 183 |
+| 65.6 k | 4740 / 4010 | 767 / 695 | 174 / 114 | 340 / 283 | 1810 / 1630 | 542 / 497 | 3 | 870 / 591 | 232 / 199 |
+
+Two thirds to three quarters of the deliveries reach a parked reader (the netmix park), and
+about a fifth are delivered by the reader's own core. Above 36.5 k the wake, the pass, the scan,
+ring 3 and the copy stay flat. What grows with the rate is the wait for the stack lock, at the
+epoll's scan (+1.0-1.15 us) and at the read's entry (+0.35-0.6 us), and together that is
+almost all of the interval's growth. The wake costs 1.5-2 us only on the low rungs, where the
+cores sleep deep. The segments add up to 0.6-0.8 us less than the turnaround's own
+delivery->read average. The offset is constant across rungs and still unexplained.
+§10.24 found the lock's takes cut by `netscanmix` and judged that the lock "is not the gap".
+At the top rung the reader still waits 2.2-2.7 us for it between the delivery and the data, so
+the next instrument names the lock's HOLDER at the moment a reader waits.
+
 ## 11. Reproducing any of this
 
 ```sh

@@ -468,6 +468,21 @@ pub fn dump() {
                             crate::println!();
                         }
                     }
+                    {   // the delivery->read split since the previous block (netsys::dr_close, talaria.netdr=1)
+                        use crate::netsys::{DR_SUM, DR_CNT, DR_PARKED, DR_SAMECORE, DR_NOEP, DR_NOEP_NS, DR_N_SEG, DR_SEG_NAMES};
+                        const M: usize = DR_N_SEG + 5;
+                        static PREV: [AtomicU64; M] = [const { AtomicU64::new(0) }; M];
+                        let cur: [u64; M] = core::array::from_fn(|k| match k {
+                            0 => DR_CNT.load(R), 1 => DR_PARKED.load(R), 2 => DR_SAMECORE.load(R), 3 => DR_NOEP.load(R),
+                            4 => DR_NOEP_NS.load(R), _ => DR_SUM[k - 5].load(R) });
+                        let d: [u64; M] = core::array::from_fn(|k| cur[k].wrapping_sub(PREV[k].swap(cur[k], R)));
+                        if d[0] != 0 {
+                            crate::print!("stat:     the delivery->the read split since the previous block {} (a parked wake {}, delivered by the reader's core {}; \
+                                without an epoll {} of {} ns), ns on average:", d[0], d[1], d[2], d[3], d[4] / d[3].max(1));
+                            for k in 0..DR_N_SEG { crate::print!(" {} {}", DR_SEG_NAMES[k], d[k + 5] / d[0]); }
+                            crate::println!();
+                        }
+                    }
                     let mn = TR_MID_N.load(R);
                     if mn != 0 {
                         crate::print!("stat:     average ones (60..99 us) {}: the average intervals", mn);
@@ -619,6 +634,32 @@ pub fn dump() {
                 crate::print!("={}/{}/{}", e.1.load(R), us(e.2.load(R)), us(e.3.load(R)));
             }
             crate::println!();
+            // who held the lock while a site waited (netsys::NET_WAITBY, talaria.netdr=1), us since the previous block
+            {
+                use crate::netsys::{NET_SITE, NET_SITE_N, NET_SITE_PASS, NET_WAITBY};
+                static PREV: [[AtomicU64; NET_SITE_N + 1]; NET_SITE_N] = [const { [const { AtomicU64::new(0) }; NET_SITE_N + 1] }; NET_SITE_N];
+                let name = |r: usize| -> (u32, &'static str) {
+                    if r >= NET_SITE_N { return (0, "unpublished"); }
+                    let k = NET_SITE[r].0.load(R);
+                    let pass = if k & NET_SITE_PASS != 0 { "+pass" } else { "" };
+                    (k & !NET_SITE_PASS, pass)
+                };
+                let pr = |r: usize| {
+                    let (k, p) = name(r);
+                    if r >= NET_SITE_N { crate::print!("{}", p); return; }
+                    match k { 0x1_0000 => crate::print!("tick{}", p), 0x2_0000 => crate::print!("line{}", p),
+                        0xffff => crate::print!("notask{}", p), n => crate::print!("sys{}{}", n, p) }
+                };
+                let mut hdr = false;
+                for w in 0..NET_SITE_N {
+                    let d: [u64; NET_SITE_N + 1] = core::array::from_fn(|h| { let c = NET_WAITBY[w][h].load(R); c.wrapping_sub(PREV[w][h].swap(c, R)) });
+                    if d.iter().all(|&x| x == 0) { continue; }
+                    if !hdr { crate::println!("stat: the lock's wait by the holder's site since the previous block (the waiter: the holder=us)"); hdr = true; }
+                    crate::print!("stat:   "); pr(w); crate::print!(":");
+                    for h in 0..=NET_SITE_N { if d[h] != 0 { crate::print!(" "); pr(h); crate::print!("={}", us(d[h])); } }
+                    crate::println!();
+                }
+            }
             // the write's pass by phase (netsys::WR_PH), cumulative ns
             let w = &crate::netsys::WR_PH;
             let ns = |c: u64| c.saturating_mul(1_000) / (hz / 1_000_000).max(1);

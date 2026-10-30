@@ -345,6 +345,13 @@ fn site_mark_pass() {
     NET_SITE_CUR.store(r2 as u32, Relaxed);
 }
 static SITE_LAST_WAIT: AtomicU64 = AtomicU64::new(0);
+/// WHO HOLDS THE LOCK WHILE ONE WAITS (`talaria.netdr=1`, ARM64-PLAN §12.10). At select1's top
+/// rung a reader waits 1.6-1.8 us for the lock at its epoll's scan and 0.6-0.9 us at its read's
+/// entry (MEASUREMENTS §10.25). The by-site table says how long each site holds and waits, not
+/// whose holding a wait was spent on. Here a waiter that spins follows the holder's row
+/// (`NET_SITE_CUR`) and adds the time to [its own row][the holder's row]; the last column is
+/// "the row not yet published" (the CAS won, the row about to be stored, or a release).
+pub static NET_WAITBY: [[AtomicU64; NET_SITE_N + 1]; NET_SITE_N] = [const { [const { AtomicU64::new(0) }; NET_SITE_N + 1] }; NET_SITE_N];
 /// THE WRITE'S PASS (ARM64-PLAN §12.9). At the top of select1's ladder a `write` holds the lock
 /// 3.2 us a request, the longest single hold. Its phases, cumulative cycles: [0] the writes,
 /// [1] the copy into the socket (the lock taken -> the pass), [2] the pass's preamble (orphans,
@@ -557,6 +564,9 @@ fn net_enter(wait: bool) -> Option<NetGuard> {
     let tick = crate::console::in_tick() || IN_NIC_IRQ[cpu.min(crate::smp::MAXCPU - 1)].load(Relaxed) != 0;
     let t0 = tsc::rdtsc();
     let mut spun = false;
+    // the wait by the holder's site (NET_WAITBY): our row, the holder's row seen last and since when
+    let by = NETDR.load(Relaxed);
+    let (mut w_row, mut h_row, mut h_t) = (u32::MAX, NET_SITE_N as u32, t0);
     let hz_diag = crate::tsc::hz(); // 0 before the calibration — then without a diagnosis
     let mut next_report = hz_diag;
     let mut reports = 0u32;
@@ -572,6 +582,9 @@ fn net_enter(wait: bool) -> Option<NetGuard> {
             let now = tsc::rdtsc();
             NET_TAKES.fetch_add(1, Relaxed);
             if spun { NET_CONT.fetch_add(1, Relaxed); NET_WAIT_TSC.fetch_add(now.wrapping_sub(t0), Relaxed); }
+            if spun && (w_row as usize) < NET_SITE_N {
+                NET_WAITBY[w_row as usize][(h_row as usize).min(NET_SITE_N)].fetch_add(now.wrapping_sub(h_t), Relaxed);
+            }
             {   let r = site_row(site_key());
                 let w = if spun { now.wrapping_sub(t0) } else { 0 };
                 if (r as usize) < NET_SITE_N { NET_SITE[r as usize].1.fetch_add(1, Relaxed); NET_SITE[r as usize].3.fetch_add(w, Relaxed); }
@@ -587,6 +600,17 @@ fn net_enter(wait: bool) -> Option<NetGuard> {
         }
         NET_SPINS.fetch_add(1, Relaxed);
         spun = true;
+        if by {
+            let now = tsc::rdtsc();
+            if w_row == u32::MAX { w_row = site_row(site_key()); h_row = NET_SITE_CUR.load(Relaxed); h_t = t0; }
+            let r = NET_SITE_CUR.load(Relaxed);
+            if r != h_row {
+                if (w_row as usize) < NET_SITE_N {
+                    NET_WAITBY[w_row as usize][(h_row as usize).min(NET_SITE_N)].fetch_add(now.wrapping_sub(h_t), Relaxed);
+                }
+                h_row = r; h_t = now;
+            }
+        }
         crate::paging::tlb_service(); // a neighbour in munmap waits for our acknowledgement
         core::hint::spin_loop();
         // We wait as long as necessary, but NOT SILENTLY: the stack's lock is held for microseconds
@@ -2006,6 +2030,7 @@ fn dl_close(i: usize) {
     let us = ns / 1000;
     tt()[i].trd = t0; tt()[i].trrd = now; tt()[i].trdns = ns.min(u32::MAX as u64) as u32;
     let me = crate::sched::current_id();
+    dr_close(i, me, t0, now);
     // the reader + 1 (0 — none): a zero initialiser keeps the socket table in .bss
     tt()[i].trtask = if me < crate::sched::NTASKS { me as u16 + 1 } else { 0 };
     tt()[i].trrun = crate::sched::run_cycles(me); tt()[i].trrq = crate::sched::rq_cycles(me);
@@ -2185,6 +2210,70 @@ pub static DELIV_NOOWNER: core::sync::atomic::AtomicU64 = core::sync::atomic::At
 pub static DELIV_SELF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static DELIV_SAMECPU: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub static DELIV_OTHERCPU: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+// ── THE DELIVERY->READ SPLIT (`talaria.netdr=1`, ARM64-PLAN §12.10) ───────────────────────────
+//
+// At select1's top rung on four cores the turnaround's "the delivery->the read" grows with the
+// rate (4.3 -> 5.8 us) while PostgreSQL's own read->write stays a flat 7.2 us. The interval runs
+// from the socket's transition into "there are data" (`deliver_ready`, any core's pass) to the
+// data taken in `read`, and a backend crosses on the way its epoll's wait, the epoll's last
+// iteration, ring 3 and the `recvfrom`'s entry. The reader stamps those points in its own row
+// (an epoll's parked wake, the last iteration's top, the scan's lock asked and taken, the
+// epoll's return, the read's entry and its lock), and `dl_close` cuts the interval by them:
+// each boundary is clamped to be no earlier than the one before, so a stamp older than the
+// delivery gives its segment zero. A delivery with no epoll's return after it (a read that
+// found the data at once, a set without epoll) is counted apart. Off by default: the stamps
+// are seven clock reads on the reader's path.
+pub static NETDR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+pub const DR_W: usize = 0;  // an epoll's parked wait returned (a wake, not a timeout)
+pub const DR_P: usize = 1;  // the top of an epoll's iteration
+pub const DR_S: usize = 2;  // the scan's lock asked
+pub const DR_L: usize = 3;  // the scan's lock taken
+pub const DR_E: usize = 4;  // the epoll returned events
+pub const DR_R0: usize = 5; // the read's entry
+pub const DR_RL: usize = 6; // the read's lock taken
+pub static DR_AT: [[AtomicU64; 8]; crate::sched::NTASKS] = [const { [const { AtomicU64::new(0) }; 8] }; crate::sched::NTASKS];
+pub const DR_N_SEG: usize = 8;
+pub const DR_SEG_NAMES: [&str; DR_N_SEG] = ["the wake", "to the iteration's top", "the pass", "the scan's lock", "the scan",
+    "ring 3", "the read's lock", "the read"];
+/// The sums by segment, ns; the count; those with a parked wake inside; those delivered by the
+/// reader's own core; the ones without an epoll (their count and their whole, ns).
+pub static DR_SUM: [AtomicU64; DR_N_SEG] = [const { AtomicU64::new(0) }; DR_N_SEG];
+pub static DR_CNT: AtomicU64 = AtomicU64::new(0);
+pub static DR_PARKED: AtomicU64 = AtomicU64::new(0);
+pub static DR_SAMECORE: AtomicU64 = AtomicU64::new(0);
+pub static DR_NOEP: AtomicU64 = AtomicU64::new(0);
+pub static DR_NOEP_NS: AtomicU64 = AtomicU64::new(0);
+#[inline]
+fn dr_stamp(k: usize) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !NETDR.load(Relaxed) { return; }
+    let t = crate::sched::current_id();
+    if t < crate::sched::NTASKS { DR_AT[t][k].store(tsc::rdtsc(), Relaxed); }
+}
+/// Cut the delivery `dl`..`now` of the socket `i` by the reader `me`'s stamps.
+fn dr_close(i: usize, me: usize, dl: u64, now: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !NETDR.load(Relaxed) || me >= crate::sched::NTASKS { return; }
+    let hz = unsafe { HZ }.max(1);
+    let ns = |c: u64| c.saturating_mul(1_000_000_000) / hz;
+    let after = |a: u64, b: u64| (a.wrapping_sub(b) as i64) > 0; // a later than b
+    let at: [u64; 7] = core::array::from_fn(|k| DR_AT[me][k].load(Relaxed));
+    let total = now.wrapping_sub(dl);
+    if !after(at[DR_E], dl) || after(at[DR_E], now) {
+        DR_NOEP.fetch_add(1, Relaxed);
+        DR_NOEP_NS.fetch_add(ns(total), Relaxed);
+        return;
+    }
+    let mut b = [0u64; DR_N_SEG + 1];
+    b[0] = dl;
+    for k in 0..7 { b[k + 1] = if after(at[k], b[k]) && !after(at[k], now) { at[k] } else { b[k] }; }
+    b[DR_N_SEG] = now;
+    for k in 0..DR_N_SEG { DR_SUM[k].fetch_add(ns(b[k + 1].wrapping_sub(b[k])), Relaxed); }
+    DR_CNT.fetch_add(1, Relaxed);
+    if b[1] != dl { DR_PARKED.fetch_add(1, Relaxed); }
+    if tt()[i].dlby == tt()[i].dlcpu { DR_SAMECORE.fetch_add(1, Relaxed); }
+}
 /// A DHCP client's event (a lease/a renewal/a loss) ON THE INTERFACE idx: apply
 /// the address/gateway/DNS (musl's resolver reads /etc/resolv.conf — regenerate it).
 /// The SNTP client from the tick (core 0): a workload that does not use the network does not drive
@@ -2980,6 +3069,7 @@ fn wait_frame_w(seq: u32, cap_ns: u64, w: &mut NetWaiter, only_sock: bool) -> bo
             NET_PARK_EXTRA.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let r = crate::sync::wait_on_coarse(NW_WORD[t].as_ptr(), seq, crate::tsc::mono_ns() + cap);
             if r == -110 { NET_PARKX_TMO.fetch_add(1, core::sync::atomic::Ordering::Relaxed); return true; }
+            dr_stamp(DR_W);
             NET_PARKX_WAKE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return false;
         }
@@ -3000,6 +3090,7 @@ fn wait_frame_w(seq: u32, cap_ns: u64, w: &mut NetWaiter, only_sock: bool) -> bo
             NET_MIX_PARKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let r = crate::sync::wait_on_coarse(NW_WORD[t].as_ptr(), seq, crate::tsc::mono_ns() + cap);
             if r == -110 { NET_MIX_TMO.fetch_add(1, core::sync::atomic::Ordering::Relaxed); return true; }
+            dr_stamp(DR_W);
             NET_MIX_WAKE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return false;
         }
@@ -3586,9 +3677,11 @@ fn refresh_conn(i: usize) {
 }
 /// recv(fd, buf, len, flags): MSG_DONTWAIT=0x40, MSG_PEEK=2.
 pub fn read(fd: i64, buf: *mut u8, len: usize, flags: u64) -> i64 {
+    dr_stamp(DR_R0);
     // We hold the lock ONLY while we work with the stack: a blocking wait
     // with the lock clamped would stop the whole machine's network for the sake of one thread.
     let mut _g = match net_lock() { Some(g) => Some(g), None => return EAGAIN };
+    dr_stamp(DR_RL);
     let i = match tcp_slot(fd) { Some(x) => x, None => return EBADF };
     if tt()[i].k != K::Conn { return ENOTCONN; }
     let nb = tt()[i].nonblock || flags & 0x40 != 0;
@@ -3993,6 +4086,7 @@ pub fn epoll_wait(epfd: i64, events: *mut u8, maxev: i64, timeout: i64) -> i64 {
     let limit = if timeout > 0 { ms_to_cycles(timeout) } else { 0 };
     let mut only_sock = true;        // it survives the rejected iterations (see ScanGate)
     loop {
+        dr_stamp(DR_P);
         let seq = wake_seq(); // the snapshot BEFORE the scan of the set: see `wake_seq`
         if ready() { poll(); }
         let mut n: i64 = 0;
@@ -4009,7 +4103,9 @@ pub fn epoll_wait(epfd: i64, events: *mut u8, maxev: i64, timeout: i64) -> i64 {
         // (an epoll_wait spins between the requests) that is a noticeable share of a
         // turnaround. The lock has recursion, so the nested entries are now
         // cheap.
+        dr_stamp(DR_S);
         let _scan = net_lock();
+        dr_stamp(DR_L);
         let me = crate::sched::current_id() as u8;
         for i in 0..EPN {
             if n >= maxev { break; }
@@ -4035,7 +4131,7 @@ pub fn epoll_wait(epfd: i64, events: *mut u8, maxev: i64, timeout: i64) -> i64 {
         drop(_scan);              // waiting with the lock clamped is not allowed
         gate.done(only_sock);
         }
-        if n > 0 { nw_ph(PH_RET); note_events(); return n; }
+        if n > 0 { nw_ph(PH_RET); note_events(); dr_stamp(DR_E); return n; }
         if timeout == 0 { return 0; }
         if timeout > 0 && tsc::rdtsc() - t0 > limit { return 0; }
         if crate::proc::sig_pending() { return -4; } // EINTR
@@ -4108,6 +4204,10 @@ pub fn netscan_from_cmdline(cmdline: &str) {
             0 => "as single 8-byte stores with a fence (as it was)",
             1 => "as whole 64-byte blocks, ordered by the doorbell's barrier",
             _ => "as whole 64-byte blocks with a fence" });
+    }
+    if let Some(v) = crate::cmdline::num(cmdline, "talaria.netdr") {
+        NETDR.store(v != 0, core::sync::atomic::Ordering::SeqCst);
+        if v != 0 { crate::println!("netsys: the delivery->read split is on (an epoll's and a read's stamps)"); }
     }
     if let Some(v) = crate::cmdline::num(cmdline, "talaria.netscanmix") {
         NETSCAN_MIX.store(v != 0, core::sync::atomic::Ordering::SeqCst);
