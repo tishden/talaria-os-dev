@@ -1638,6 +1638,18 @@ delivery->read average. The offset is constant across rungs and still unexplaine
 At the top rung the reader still waits 2.2-2.7 us for it between the delivery and the data, so
 the next instrument names the lock's HOLDER at the moment a reader waits.
 
+### 10.26. The cross-platform board (2026-10-30)
+
+Kernel `3c7e9ae`, six workloads and fifteen cases on c6i.xlarge and c7g.xlarge, 599 judged
+points: the full matrix, the cost per request and the conclusions are in
+[BOARD-2026-10.md](BOARD-2026-10.md). In short: on x86 Talaria's ceiling is 1.42x Linux's
+(geometric mean, above it in all fifteen cases) and a request ~30 % cheaper; on arm64 the
+ceilings are even on average (1.02x); under load Talaria's p99 is about half of Linux's on both
+machines and no Talaria percentile up to p99.9 crosses 1 ms (max 927 us), while Linux's MySQL
+and x86 PostgreSQL stall for 2.5-16 ms at the top rungs. The losses left: arm64 nginx (ceiling
+0.81-0.85x, file's top-rung p99 261 us), arm64 MongoDB insert's top-rung p99, PostgreSQL's
+top-rung p99 on x86, MySQL's low-rate p50 on x86.
+
 ## 11. Reproducing any of this
 
 ```sh
