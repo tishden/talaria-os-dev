@@ -3004,6 +3004,16 @@ the 4-6 us that the top rung still gives Linux. PostgreSQL's own read->write is 
 on every rung. The next target is the delivery->read interval, which grows with the rate
 (4.3 -> 5.8 us), and the part of the end-to-end the turnaround does not cover.
 
+### 12.10. Progress (2026-10-29)
+
+The delivery->read interval was cut by the reader's own stamps (`talaria.netdr=1`, off by
+default, live; MEASUREMENTS §10.25). From 36.5 k to 65.6 k on select1 it grows by 1.5-2 us,
+and almost all of that growth is the stack lock's wait: at the epoll's scan
+(0.65 -> 1.6-1.8 us) and at the read's entry (0.25-0.3 -> 0.6-0.9 us). The parked reader's
+wake (0.7-0.8 us), the pass, the scan, ring 3 and the copy do not move with the rate. The next
+instrument names who holds the lock while a reader waits, by site and by task, and only then
+comes a fix.
+
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and
