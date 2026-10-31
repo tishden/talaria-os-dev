@@ -660,6 +660,20 @@ pub fn dump() {
                     crate::println!();
                 }
             }
+            // the same wait by the holder's task (netsys::NET_WAITBY_TASK, talaria.netdr=1), us since the previous block
+            {
+                use crate::netsys::NET_WAITBY_TASK;
+                static PREV_T: [AtomicU64; crate::sched::NTASKS] = [const { AtomicU64::new(0) }; crate::sched::NTASKS];
+                let mut hdr = false;
+                for t in 0..crate::sched::NTASKS {
+                    let c = NET_WAITBY_TASK[t].load(R);
+                    let d = c.wrapping_sub(PREV_T[t].swap(c, R));
+                    if d == 0 { continue; }
+                    if !hdr { crate::println!("stat: the lock's wait by the holder's task since the previous block (task=us)"); hdr = true; }
+                    crate::print!("stat:   t{}={}", t, us(d));
+                }
+                if hdr { crate::println!(); }
+            }
             // the write's pass by phase (netsys::WR_PH), cumulative ns
             let w = &crate::netsys::WR_PH;
             let ns = |c: u64| c.saturating_mul(1_000) / (hz / 1_000_000).max(1);

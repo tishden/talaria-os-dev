@@ -312,6 +312,9 @@ pub static NET_SITE: [(AtomicU32, AtomicU64, AtomicU64, AtomicU64); NET_SITE_N] 
 pub const NET_SITE_PASS: u32 = 0x4_0000;
 /// The current owner's row in `NET_SITE` (only the owner writes it; `NET_SITE_N` — none).
 static NET_SITE_CUR: AtomicU32 = AtomicU32::new(NET_SITE_N as u32);
+/// The current owner's task (only the owner writes it; `u32::MAX` — none). `talaria.netdr=1`
+/// attributes a waiter's spin to the holder's TASK, completing §12.10's "by site and by task".
+static NET_TASK_CUR: AtomicU32 = AtomicU32::new(u32::MAX);
 fn site_key() -> u32 {
     use core::sync::atomic::Ordering::Relaxed;
     let cpu = crate::percpu::cpu_id();
@@ -352,6 +355,9 @@ static SITE_LAST_WAIT: AtomicU64 = AtomicU64::new(0);
 /// (`NET_SITE_CUR`) and adds the time to [its own row][the holder's row]; the last column is
 /// "the row not yet published" (the CAS won, the row about to be stored, or a release).
 pub static NET_WAITBY: [[AtomicU64; NET_SITE_N + 1]; NET_SITE_N] = [const { [const { AtomicU64::new(0) }; NET_SITE_N + 1] }; NET_SITE_N];
+/// The same wait by the holder's TASK (flat, no waiter dimension): `[task]` = the time a waiter
+/// spent while this task held the lock. `talaria.netdr=1`; printed next to `NET_WAITBY`.
+pub static NET_WAITBY_TASK: [AtomicU64; crate::sched::NTASKS] = [const { AtomicU64::new(0) }; crate::sched::NTASKS];
 /// THE WRITE'S PASS (ARM64-PLAN §12.9). At the top of select1's ladder a `write` holds the lock
 /// 3.2 us a request, the longest single hold. Its phases, cumulative cycles: [0] the writes,
 /// [1] the copy into the socket (the lock taken -> the pass), [2] the pass's preamble (orphans,
@@ -567,6 +573,7 @@ fn net_enter(wait: bool) -> Option<NetGuard> {
     // the wait by the holder's site (NET_WAITBY): our row, the holder's row seen last and since when
     let by = NETDR.load(Relaxed);
     let (mut w_row, mut h_row, mut h_t) = (u32::MAX, NET_SITE_N as u32, t0);
+    let (mut h_task, mut h_tt) = (u32::MAX, t0);
     let hz_diag = crate::tsc::hz(); // 0 before the calibration — then without a diagnosis
     let mut next_report = hz_diag;
     let mut reports = 0u32;
@@ -585,11 +592,15 @@ fn net_enter(wait: bool) -> Option<NetGuard> {
             if spun && (w_row as usize) < NET_SITE_N {
                 NET_WAITBY[w_row as usize][(h_row as usize).min(NET_SITE_N)].fetch_add(now.wrapping_sub(h_t), Relaxed);
             }
+            if spun && (h_task as usize) < crate::sched::NTASKS {
+                NET_WAITBY_TASK[h_task as usize].fetch_add(now.wrapping_sub(h_tt), Relaxed);
+            }
             {   let r = site_row(site_key());
                 let w = if spun { now.wrapping_sub(t0) } else { 0 };
                 if (r as usize) < NET_SITE_N { NET_SITE[r as usize].1.fetch_add(1, Relaxed); NET_SITE[r as usize].3.fetch_add(w, Relaxed); }
                 SITE_LAST_WAIT.store(w, Relaxed);
                 NET_SITE_CUR.store(r, Relaxed);
+                if by { NET_TASK_CUR.store(crate::sched::current_id() as u32, Relaxed); }
             }
             NET_SINCE.store(now, Relaxed);
             return Some(NetGuard(cpu as i32));
@@ -602,13 +613,26 @@ fn net_enter(wait: bool) -> Option<NetGuard> {
         spun = true;
         if by {
             let now = tsc::rdtsc();
-            if w_row == u32::MAX { w_row = site_row(site_key()); h_row = NET_SITE_CUR.load(Relaxed); h_t = t0; }
+            if w_row == u32::MAX {
+                w_row = site_row(site_key());
+                h_row = NET_SITE_CUR.load(Relaxed);
+                h_t = t0;
+                h_task = NET_TASK_CUR.load(Relaxed);
+                h_tt = t0;
+            }
             let r = NET_SITE_CUR.load(Relaxed);
             if r != h_row {
                 if (w_row as usize) < NET_SITE_N {
                     NET_WAITBY[w_row as usize][(h_row as usize).min(NET_SITE_N)].fetch_add(now.wrapping_sub(h_t), Relaxed);
                 }
                 h_row = r; h_t = now;
+            }
+            let rt = NET_TASK_CUR.load(Relaxed);
+            if rt != h_task {
+                if (h_task as usize) < crate::sched::NTASKS {
+                    NET_WAITBY_TASK[h_task as usize].fetch_add(now.wrapping_sub(h_tt), Relaxed);
+                }
+                h_task = rt; h_tt = now;
             }
         }
         crate::paging::tlb_service(); // a neighbour in munmap waits for our acknowledgement
