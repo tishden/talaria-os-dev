@@ -365,7 +365,7 @@ A green gate that cannot fail is not a gate. This has cost real defects.
   `terraform destroy` chained after it went ahead — the raw files went with the
   instance. The verdict lines had been read over ssh and are in the docs, but the
   record is a transcript, not the files. The stand script tees every step into
-  `infra/aws/logs/` as it goes; a hand-run series must do the same (`| tee` on the
+  the run's logs directory as it goes; a hand-run series must do the same (`| tee` on the
   runner's side), and a destroy never follows a copy whose result was not checked.
 
 * **Under KVM "UNKNOWN at reset" is a poison, and TCG hides it.** The architecture

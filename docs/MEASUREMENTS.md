@@ -524,7 +524,7 @@ cores and **4.00** on four, three boots each (x86 under KVM on the EC2 stands: 1
 two soaks running at once on one instance over the same disk image and reported
 consoles that never booted; those are not counted and the lesson is in §5.1 of the
 notes). The whole gate in a loop, 120 checks a run: **0 of 10 runs failed**. The logs:
-`infra/aws/logs/aarch64-20260930-213404/` (the gate, the twelve number consoles, the
+the aarch64 run of 2026-09-30 (the gate, the twelve number consoles, the
 probe, the soak's first consoles and the verdicts).
 
 ### 10.2. The stand on the 229-check gate, and the first EC2 facts (2026-10-03/04)
@@ -550,7 +550,7 @@ fixed the same session). Everything the stand alone judges was clean:
 The EC2 facts off a live Nitro guest (`c7g.large`, `edk2`) and the bare metal: the console
 is a 16550 (`c7g.large`: MMIO `0x8000_0000`, `mmio32`; `c7g.metal`: `0xE2F0_0000`), the map
 starts at `0x4000_0000` (the `0x4008_0000` load address is RAM), PSCI is SMC, the counter
-runs at 1.05 GHz. Logs: `infra/aws/logs/aarch64-20261003-231145/` and
+runs at 1.05 GHz. Logs: the aarch64 run of 2026-10-03 and
 `infra/aws/logs/aarch64-{graviton,nitro}-acpi-c7g.*.log`.
 
 ### 10.3. Graviton like for like: the UDP RTT against a Linux `c7g`, and no PHC (2026-10-04)
@@ -575,7 +575,7 @@ The ENA's PHC (`supported` bit 29) is **not declared** on any Graviton type trie
 `c7g.large`, `c7gn.large`, `c8g.large`, `m7g.large` (`supported` = 0x14205df6 / 0x54205df6 /
 0xd4205df6 / 0x94205df6). The wall clock's reference on Graviton has to be something else
 (the Amazon Time Sync service over the network is the candidate); the x86 types that declare
-it (`m7i`) stay the PHC's ground. Log (local): `infra/aws/logs/aarch64-ec2-c7g.large-rtt-linux-vs-talaria.log`.
+it (`m7i`) stay the PHC's ground. Log (local): the c7g.large RTT run, Linux vs Talaria.
 
 ### 10.4. The stand on the ordering audit (2026-10-04)
 
@@ -596,7 +596,7 @@ instance destroyed). The gate under KVM **268/0**.
 The wake path is the one regression: the futex RTT +11 %, the condvar RTT +32 % against the
 previous stand, the audit's new barriers on it (the plan's §10.10). The stand ran before
 the generic timer's interrupt-storm fix (the plan's §10.10), which touches every timed wait.
-Log (local): `infra/aws/logs/aarch64-20261004-150746/`.
+Log (local): the aarch64 run of 2026-10-04.
 
 ### 10.5. The wake path's step, bisected (2026-10-04)
 
@@ -634,7 +634,7 @@ condvar's, reproduced in three passes. The barriers it was blamed on are not it,
 spread. The combined reverts (memory + `syscall.rs`, + `trap.rs` + `sched.rs`, the whole
 commit as a control) were cut off by the stand's own teardown — the next pass is
 `ABONLY=1` with those and a hunk-level split. Logs (local):
-`infra/aws/logs/aarch64-20261004-163328/` (`ab.log`, `ab2-perfile-rcpc.log`, `ab3-align.log`,
+The aarch64 run of 2026-10-04 (`ab.log`, `ab2-perfile-rcpc.log`, `ab3-align.log`,
 the patches).
 
 ### 10.6. Phase 8 on hardware, and the step is not the audit's code (2026-10-04)
@@ -778,7 +778,7 @@ transaction) replayed, `RECOVERED OK`. Phase 7's second exit gate, on the target
 ### 10.10. The whole stand on `e95abf4`, and the guide's workload on a Graviton (2026-10-05)
 
 **The KVM stand** (`kvm-stand-aarch64.sh`, `LOOPN=2`, `c7g.metal`, 59 minutes, destroyed by
-itself; logs `infra/aws/logs/aarch64-20261005-104403/`) on the commit with §10.8's fix:
+itself; the aarch64 run of 2026-10-05) on the commit with §10.8's fix:
 
 | step | result |
 | --- | --- |
@@ -909,8 +909,7 @@ behind a spinning hog on one core, 1000 wakes): p99 414 → 87-99 us, max 499 �
 ### 10.12. The KVM stand on the session's branch (2026-10-05)
 
 `kvm-stand-aarch64.sh` on `c7g.metal` from `4a69b13` (`arm64-s64`: the cache-counter fix and
-`wakeprobe` on top of `bb198d8`), 63 minutes, destroyed by itself; logs
-`infra/aws/logs/aarch64-20261005-175710/`:
+`wakeprobe` on top of `bb198d8`), 63 minutes, destroyed by itself (the aarch64 run of 2026-10-05):
 
 | step | result |
 | --- | --- |
@@ -1074,7 +1073,7 @@ smoltcp counting every debug-level event by site and keeping the last eight with
 `talaria.netport=6379` counting the segments in and out on the workload's port, the device's
 own frame counters (`GET_STATS`) beside the driver's, a classifier of frames at the driver, and
 a report printed three seconds after the port falls silent — all on the `arm64-inst` branch
-(`bench/suite/lossprobe-ec2.sh`, probes 2-8 in us-east-1). What is now known:
+(the loss-probe script, probes 2-8 in us-east-1). What is now known:
 
 - it is not one frame per run: a lossy run (every rung from 62 k req/s up, none at 36 k) loses
   170-260 request frames in 70 s, ~3 per second, each one a 200-ms RTO on its connection and a
@@ -1253,7 +1252,7 @@ per hypothesis on the same rise; the ceilings below are Talaria's pk unless said
 broadcast `TLBI VAAE1IS`; munmap/mprotect/madvise/relazy/unmap_ident then shot the same
 range down a second time with IPIs. `paging::flush_range_all` does one or the other: the
 per-request munmap 3.3 → 2.0 us, the stat block's acknowledgements 899 → 0 ns. KVM
-c7g.metal gate (`infra/aws/logs/aarch64-20261025-230038`): 394/0, the databases 15/0 twice,
+c7g.metal gate (the aarch64 run of 2026-10-25): 394/0, the databases 15/0 twice,
 soak 13×50 and the races 6×96 without a failure. The ceiling did not move with it.
 
 **Rejected by measurement** (each against phase A of its own rise):
@@ -1328,7 +1327,7 @@ select1 50.0 k against 42.7-44.3):
 
 select1 runs 34.6 k instructions per request in ring 3 at IPC 1.0 and kept its ceiling
 (56.9 k against Linux's 50.0 k). Gates: arm64 TCG 413/0, x86 573/0, host 22/0; KVM c7g.metal
-(`infra/aws/logs/aarch64-20261026-115259`): 394/0, the databases 15/0 twice, soak 13×50 and
+(the aarch64 run of 2026-10-26): 394/0, the databases 15/0 twice, soak 13×50 and
 the races 6×96 without a failure, the loop 0/1.
 
 ### 10.21. The PostgreSQL board after the TLB fix: both ceilings ours (2026-10-26)
@@ -1439,7 +1438,7 @@ The stat block names the writes that unfold a group: of 422 in a run, 414 were a
 space's or a split's writes into a FRESH table frame, whose old bytes the guard read as
 Contiguous entries — they are written with `pte_w_raw` now; 8 were real (ld-musl's MAP_FIXED
 over its folded reservation of a library). The KVM `c7g.metal` gate on `c5aade8`, the hint on
-(`infra/aws/logs/aarch64-20261027-001522`): 397/0, the databases 15/0 twice, the soak 13 modes
+(the aarch64 run of 2026-10-27): 397/0, the databases 15/0 twice, the soak 13 modes
 x 50 boots and the race detector 6 x 96 with no failure, the loop 0 of 1. Gates: `conttext` (256 KB of counted increments run, forked, COW-rewritten and restored
 under two runner cores) and `dyn` with and without the knob; arm64 TCG 418/0, x86 573/0. Under
 QEMU 8.2's multi-threaded TCG `conttext` kept the old code of the rewritten page on every vCPU

@@ -1186,7 +1186,7 @@ cost, not the kernel's; `futexlat` p50 9.6 µs; `smp2` 1.90, `smp4` 3.52 (real c
 MTTCG). The gate: 119 checks in about five minutes under TCG.
 
 **Gates and meters.** `kernel/test-aarch64.sh` builds its ext2 images from
-`kernel/user/aarch64` on the spot, reads the core dump back on the host with `debugfs`
+the arm64 ring-3 set on the spot, reads the core dump back on the host with `debugfs`
 and an aarch64-aware gdb, and judges the speedups only under `TAL_KVM=1`;
 `kernel/soak-aarch64.sh` is the ordering soak (N boots of every mode whose verdict
 depends on what two cores see of each other's writes, the failing consoles kept);
@@ -1199,7 +1199,7 @@ dev box's mirrors refused it three times — the hand build of musl 1.2.5 with
 **Where to start reading:** this section (§10.1–10.6) is the execution log; `kernel/census-aarch64.sh`
 is the progress meter (0 now — it turns useful again only if a new x86-gated module appears);
 `kernel/test-aarch64.sh` is the gate (229 checks; the ring-3 part needs
-`kernel/user/aarch64`, the ext2 part `mkfs.ext2` on the host, the network part the stand image
+the arm64 ring-3 set, the ext2 part `mkfs.ext2` on the host, the network part the stand image
 with `/dev/net/tun`, the UEFI part a fresh `kernel/uefi-stub/build.sh aarch64`). The pitfalls that cost time are in
 `docs/ENGINEERING-NOTES.md` and the session memory: do NOT rebuild x86 while `test.sh` runs
 (two runs collide over the shared disk images — a whole invalid regression), the arm64 link
@@ -1604,7 +1604,7 @@ a device on a bare machine).
   fork arm64 does not have; its child runs `/mhello` — there is no arm64 busybox yet) and
   libtsync (the fibers' switch saves x19-x30 and d8-d15; the counter and the spin hint are the
   machine's; there is no user-mode monitor wait on arm64, so the tier 1 stays off). Gates:
-  `procdemo`, `fiber`, `syncbench`. `kernel/user/aarch64/tsync/` is embedded by `build.rs`
+  `procdemo`, `fiber`, `syncbench`. The arm64 `tsync` is embedded by `build.rs`
   as `tsync/<name>`, as on x86.
 
 **Found by the port of libtsync, fixed: the generic timer's interrupt storm.** With every
@@ -1804,7 +1804,7 @@ dlopen of libz) passed on its first boot.
 0x200000..0x1CA9_7310 (458 MB). Every process of this kernel shares the kernel's identity map,
 and there it was the devices on `virt` (the GIC at 0x0800_0000, the UART, virtio-mmio, the
 32-bit PCIe window) — and, the plan believed, RAM on a Graviton (it is not: §10.14). x86 had the same collision
-with RAM and moved the kernel above the binary (`services/clickhouse/build-kernel.sh`).
+with RAM and moved the kernel above the binary (the high-base build).
 1. DONE: the kernel reaches GB0's devices through an alias — the same 1 GiB Device block
    once more in L0 slot 384 (`mmu::DEV_SLOT`, VA 0xC000_0000_0000 + PA), in the early map
    and in the kernel's root before the first address space copies it. `arch::mmio_va` is
@@ -2134,7 +2134,7 @@ databases 10/0. The default build after it: x86 520/0 + host 22/0, arm64 356/0 (
 included), kernel-unit 302/0. Left: strict as the default (after the machines: `variants.sh`, the databases on
 EC2), a `MAP_FIXED` below 4 GiB (still refused: the image and the low devices are there).
 
-Then the plan's last gate item: `sigtest` linked at `0x4000_0000` (`kernel/user/sigtest-hi`,
+Then the plan's last gate item: `sigtest` linked at `0x4000_0000` (the high-base `sigtest`,
 x86's GB1 of RAM) runs ALL OK under strict — the image, its COW forks and its shared memory
 where the kernel's identity was (`talaria.test=sigtesthi`; it passes without strict too, because
 the loader still reserves an image's identity range below 4 GiB). x86 522/0 + host 22/0, arm64
@@ -2284,7 +2284,7 @@ range minus its offset) keeps them all. The work is where code runs at the physi
    BIOS area), the image's leaves leave process spaces, `fixed_low_ok` and `mprotect` stop refusing
    its range, `user_gb()` is renamed for what it is, W^X on the image (`.text` RX, `.rodata` R,
    `.data`/`.bss` RW+NX). Gate: an x86 ET_EXEC at 0x200000 in a process space.
-6. **7.5, ClickHouse's high-base kernel retires** (`services/clickhouse/build-kernel.sh`, `target-hi`,
+6. **7.5, ClickHouse's high-base kernel retires** (the high-base build, `target-hi`,
    `validate.sh` B12 on the default kernel); the identity modes keep the limit (the image is still
    there physically) and say so.
 
@@ -2332,7 +2332,7 @@ handed `kernel_cr3()` explicitly. Gate `talaria.test=sigtestlo`: `sigtest` linke
 kernel image's own load address — passes (its image, forks, shared memory); the pre-stage-7 kernel
 (9220575) hangs silently on the same binary, its process overlaying the kernel's code. 7.5: the official
 ClickHouse ET_EXEC (2 MB..528 MB) runs on the normal kernel — `validate.sh` B12 passed on it — and
-`services/clickhouse/build-kernel.sh` (KBASE 528 MB, `target-hi`) is gone. x86 538/0 + 22/0,
+The high-base build (KBASE 528 MB, `target-hi`) is gone. x86 538/0 + 22/0,
 `validate.sh` 14/0, arm64 370/0, arm64 databases 14/0. Then W^X on the image: the linker scripts start `.rodata` and `.data` on
 2 MiB (`__text_end`, `__rodata_end`), so the alias's 2M leaves carry one section's rights each — the
 code read-only and executable, the constants read-only, the data and `.bss` writable and never
@@ -2727,8 +2727,8 @@ order of work:
    loaded 2 MiB higher with `-device loader` sits at `_start+0x1c`, the loop); TTBR1 reconsidered only if ASIDs per process or a KPTI-like split are wanted.
 5. **Housekeeping.** ~~A `c6i.large` billed $2.57 a day~~ — answered 2026-10-09: Cost Explorer has it
    at 24 h a day from 2026-06-12 (before the port, before CloudTrail's 90 days) to 2026-10-04 16:59
-   UTC — the account's `hermes-canary-sampler` (`Project=hermes`, another project; the cleanup filters
-   by `Project=talaria*` and leaves it alone by design). It stopped with no EC2 API call in CloudTrail
+   UTC — a canary sampler of another project (the cleanup filters by `Project=talaria*` and leaves
+   it alone by design). It stopped with no EC2 API call in CloudTrail
    (from inside the instance), nothing of ours ended it; the worktree `my_os-s64` carries symlinked
    `services/*/build` and its own terraform state — retire it or make it the scoreboard's only home.
    **`talaria.test=` mode's secondary cores** (met 2026-10-21 by `wakedef`): without a layout
@@ -2899,7 +2899,7 @@ their mixed `epoll` sets (socket + signalfd/self-pipe + the death pipe) on the b
 cores; the manifest key `netmix=<ns>` (`8610cda`) parks them: pk 9.9 → 18.9 k req/s, select1
 26.7 → 31.5-35.4 k, the medians at Linux's (MEASUREMENTS §10.17). ASIDs on arm64 (`5efa961`)
 were the first suspect and measured nothing; they stay because they are correct, gated on a
-`c7g.metal` under KVM (`infra/aws/logs/aarch64-20261025-131835`): the gate 389/1 then 0 of 1
+`c7g.metal` under KVM (the aarch64 gate run of 2026-10-25): the gate 389/1 then 0 of 1
 in the loop, the databases 15/0 twice, the soak 13 modes × 50 boots and the race detector
 6 × 96 with no failure; the one FAIL was `shmrace A/B`'s negative control breaking the other
 way (a half-published row faults instead of a second row), and its assertion now takes both. The stat block counts who spins a mixed set beside another
