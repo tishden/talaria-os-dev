@@ -300,6 +300,19 @@ reasoning does not have to be repeated.
    stand (`infra/aws/kvm-stand-aarch64.sh`). The merge into `main` is the
    owner's call (§11 item 6).
 
+   Pre-merge state (2026-10-31): the whole local gate is green on `arm64-port`
+   — x86 `test.sh` 595/0 + host 22/0, arm64 `test-aarch64.sh` (+net+pwr) 419/0
+   and `-db` 14/0, `kernel-unit` 303/303, clippy `-D warnings` clean in both
+   configurations, `validate.sh` 14/0, the power-cut probe PASSED, and
+   `tools/export-public.sh` clean (0 problems, no leaks). What is left is
+   hardware-bound and blocked on the AWS account: the five scoreboard tails
+   (arm64 nginx, arm64 MongoDB insert, x86 PostgreSQL p99, x86 MySQL p50, and
+   the arm64 PostgreSQL lock wait — `NET_WAITBY` is now complete "by site and
+   by task", `6137d73`) and c7gn. Next session, once AWS is unblocked: the
+   first stand is `kernprobe-ec2.sh postgresql "talaria.stat=10000
+   talaria.netdr=1"` (arm64, us-west-2, `CASES=select1`) to name the lock's
+   holder and fix it, then the other four tails.
+
 ---
 
 ## 5. Known limitations of the current SMP model
