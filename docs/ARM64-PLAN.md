@@ -3016,7 +3016,7 @@ comes a fix.
 
 The `by task` half is now in the tree (`NET_WAITBY_TASK`, a waiter's spin follows the holder's
 task as well as its site): the next stand's `talaria.netdr=1 talaria.stat=10000` prints both
-in one pass. Reading the code while the stands are blocked points the wait at the write's pass
+in one pass. Reading the code points the wait at the write's pass
 — the longest single hold (3.2 us a request, `WR_PH`), whose `iface.poll` meets the ingress
 under the same lock, so a reader's scan/read waits behind a neighbour's response write. But
 §12.9 already showed a shorter write transmit did not move the medians, and deferring the

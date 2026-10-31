@@ -2,12 +2,14 @@
 
 **A latency-first single-application OS (unikernel-style) that runs unmodified Linux binaries.**
 
-Talaria is its own x86-64 kernel, written in Rust (`no_std`). It runs
-unmodified Linux applications (static musl, dynamic ELF through ld-musl, glibc)
-so that the application owns the CPU cores and the OS stays a control plane.
-It is built for latency-critical workloads: trading, embedded, dedicated
-appliance servers behind an external security perimeter. It boots under
-QEMU/KVM, as an AMI on EC2 and on bare metal (`c6i.metal`).
+Talaria is its own kernel, written in Rust (`no_std`), for x86-64 and
+AArch64. It runs unmodified Linux applications (static musl, dynamic ELF
+through ld-musl, glibc) so that the application owns the CPU cores and the OS
+stays a control plane. It is built for latency-critical workloads: trading,
+embedded, dedicated appliance servers behind an external security perimeter.
+It boots under QEMU/KVM, as an AMI on EC2 and on bare metal (`c6i.metal`
+x86-64, `c7g.*` AArch64). The arm64 port is planned and gated in
+`docs/ARM64-PLAN.md`.
 
 **Against Linux on real workloads** (`docs/MEASUREMENTS.md` §2): six servers
 (PostgreSQL, MySQL/MariaDB, MongoDB, Redis, nginx, mongoose) on four EC2
@@ -70,9 +72,11 @@ make -C kernel/user all && (cd kernel && python3 mkfs.py)
 (cd kernel && cargo -Z json-target-spec build --release)
 # 3) the regression: boots the kernel in QEMU a few hundred times
 kernel/test.sh
-# 4) your own application in five minutes (build -> talaria-pack -> QEMU)
+# 4) the arm64 kernel and its regression (QEMU `virt` under TCG, docs/ARM64-PLAN.md)
+kernel/build-aarch64.sh && kernel/test-aarch64.sh
+# 5) your own application in five minutes (build -> talaria-pack -> QEMU)
 cd examples/hello-talaria && make run
-# 5) a hands-on tour: multithreaded C++ from build to core dump (docs/HANDS-ON-GUIDE.md)
+# 6) a hands-on tour: multithreaded C++ from build to core dump (docs/HANDS-ON-GUIDE.md)
 cd examples/mdpipe && make && make run
 ```
 
@@ -98,6 +102,7 @@ qemu ... -append "console=ttyS0 talaria.mode=cell" -drive file=disk.img,...
 | `docs/MEASUREMENTS.md` | every load-bearing number, the conditions it was taken under, and what it proves |
 | `docs/ENGINEERING-NOTES.md` | the pitfalls and the rules: how to judge a measurement, how to write a gate that cannot lie, what is already closed |
 | `docs/ROADMAP.md` | what is NOT done, why, and what it would take |
+| `docs/ARM64-PLAN.md` | the arm64 port: the inventory, the nine phases with named gates, the regression, the scoreboard |
 | `docs/GLOSSARY.md` | the words this repository uses in one fixed sense (cell, gate, stand, knob, scoreboard, rise, band) |
 | `docs/talaria-os.html` | design document TAL-RFC-001 (motivation, prior art, architecture) |
 | `CHANGELOG.md` | release history |
@@ -109,11 +114,13 @@ open. Read `ENGINEERING-NOTES` before changing anything.
 
 ## Repository layout
 
-- `kernel/` — the kernel: `src/`, the QEMU regression `test.sh` (486 assertions
-  in QEMU plus 22 host checks; on a fresh clone 483 — three gates want
+- `kernel/` — the kernel: `src/`, the QEMU regression `test.sh` (573 assertions
+  in QEMU plus 22 host checks; on a fresh clone 570 — three gates want
   third-party loaders, see `CONTRIBUTING.md`), the heavy validation
-  `validate.sh`, and the tools `talaria-pack`/`talaria-check`.
-- `kernel-unit/` — host unit tests of the kernel's pure modules: 264 tests,
+  `validate.sh`, the arm64 build `build-aarch64.sh` and regression
+  `test-aarch64.sh` (+ `-net`/`-db`/`-pwr`), and the tools
+  `talaria-pack`/`talaria-check`.
+- `kernel-unit/` — host unit tests of the kernel's pure modules: 303 tests,
   `cargo test` (`docs/DEVELOPMENT-GUIDE.md` §11.0).
 - `services/` — open-source workloads on Talaria (databases, Redis, JVM,
   ClickHouse, ...) and the docker toolchains.

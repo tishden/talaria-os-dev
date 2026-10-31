@@ -35,13 +35,12 @@ jobs:
         run: cargo clippy -Zjson-target-spec --release --no-default-features -- -D warnings
 
   kernel-aarch64:
-    name: kernel (aarch64 target, phase 1 of docs/ARM64-PLAN.md)
+    name: kernel (aarch64 target, docs/ARM64-PLAN.md)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The same crate for the other architecture. Today it is the arch/ layer and
-      # the phase-1 bring-up alone (everything else is gated on x86_64 in main.rs);
-      # the job exists so that the arm64 build cannot rot between sessions.
+      # The same crate for the other architecture. The job exists so that the arm64
+      # build and its gate cannot rot between sessions.
       - name: Target
         run: rustup target add aarch64-unknown-none --toolchain "$(sed -n 's/^channel = "\(.*\)"/\1/p' kernel/rust-toolchain.toml)"
       - name: Build
@@ -50,7 +49,7 @@ jobs:
       - name: Clippy
         working-directory: kernel
         run: cargo clippy -Zjson-target-spec --release --no-default-features --target aarch64-talaria.json -- -D warnings
-      # The bring-up's gate under TCG (docs/ARM64-PLAN.md §6): deterministic, so a hosted
+      # The arm64 gate under TCG (docs/ARM64-PLAN.md §6): deterministic, so a hosted
       # runner can judge it. The raw Image needs an AArch64 objcopy; QEMU comes from the
       # stand image (the same Fedora 40 pin as the x86 stand).
       - name: AArch64 objcopy and the arm64 stand image
@@ -59,7 +58,7 @@ jobs:
           docker build -t talaria-qemu-aarch64 -f services/docker/Dockerfile.qemu-aarch64 services/docker
       - name: The raw Image
         run: kernel/build-aarch64.sh
-      - name: The bring-up gate (QEMU virt, TCG, 4 cores)
+      - name: The arm64 gate (QEMU virt, TCG, 4 cores)
         run: kernel/test-aarch64.sh
 
   kernel-full:

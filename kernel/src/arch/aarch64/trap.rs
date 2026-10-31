@@ -576,11 +576,10 @@ pub static PROBE_X9: AtomicU64 = AtomicU64::new(0);
 /// its deliberate end is not a halt. 0 — a `brk` from EL0 is fatal, as any other fault.
 pub static EL0_RETURN: AtomicU64 = AtomicU64::new(0);
 
-/// A synchronous exception from EL0 (AArch64): an `svc` or a fault of the workload. Phase 3
-/// puts the Linux syscall dispatcher here (docs/ARM64-PLAN.md §4.5); today an SVC answers
-/// with `x0 = x8 + 1` (so that a probe can see the round trip) and anything else — a data
-/// or instruction abort, `brk`, an illegal instruction — is fatal with the full diagnosis,
-/// which is what the probe's last step provokes on purpose.
+/// A synchronous exception from EL0 (AArch64): an `svc` or a fault of the workload. An
+/// `svc` goes to the Linux syscall dispatcher (`syscall::rust_syscall`, the same as x86);
+/// a fault is a COW, a lazy touch, a debugger event, a delivered signal, or the full
+/// diagnosis with the crash dump (docs/ARM64-PLAN.md §4.5).
 #[unsafe(no_mangle)]
 extern "C" fn sync_el0(kind: u64, f: &mut Frame) {
     let ec = (f.esr >> 26) & 0x3F;
