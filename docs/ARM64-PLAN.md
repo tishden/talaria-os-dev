@@ -3014,6 +3014,24 @@ wake (0.7-0.8 us), the pass, the scan, ring 3 and the copy do not move with the 
 instrument names who holds the lock while a reader waits, by site and by task, and only then
 comes a fix.
 
+### 12.11. Progress (2026-10-30/31): the finalization board
+
+Item 7 (the board of every workload after `cont`, on both machines) is taken on `3c7e9ae`:
+six workloads, fifteen cases, 599 judged points on c6i.xlarge and c7g.xlarge, four stands in
+four regions in parallel ([BOARD-2026-10.md](BOARD-2026-10.md), MEASUREMENTS §10.26). On x86
+the ceiling is 1.42x Linux's (above it in all fifteen cases) and a request ~30 % cheaper; on
+arm64 the ceilings are even (1.02x); under load Talaria's p99 is about half of Linux's on both
+machines and no Talaria percentile up to p99.9 crosses 1 ms. The same kernel passed the KVM
+stand on c7g.metal (397/0, large services 15/0, soak and race detector with zero failed boots).
+Item 7 is closed with the generator of each side's own OS; the Linux-generator phase
+(`GENLINUX=1`) was not repeated, §12.8 put our generator's share at about 1 us.
+
+What stays open, by the board: arm64 nginx (ceiling 0.81-0.85x, file's top-rung p99 261 us
+against 102), arm64 MongoDB insert's top-rung p99 (397 against 256 us), PostgreSQL's top-rung
+p99 on x86 (77 against 47 us select1), MySQL's low-rate p50 on x86 (+4-9 %), and the arm64
+PostgreSQL top rung's lock wait (§12.10: `NET_WAITBY` is in the tree, not yet taken on a
+stand). Item 1 (c7gn) was not taken. The merge of `arm64-port` into `main` is a separate step.
+
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and
