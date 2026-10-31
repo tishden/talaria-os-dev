@@ -582,7 +582,7 @@ impl Ena {
         let t0 = if wr { crate::tsc::rdtsc() } else { 0 };
         unsafe {
             let src = e.as_ptr() as *const u64;
-            if mode != 0 && self.llq_entry % 64 == 0 && dst % 64 == 0 {
+            if mode != 0 && self.llq_entry.is_multiple_of(64) && dst.is_multiple_of(64) {
                 crate::arch::barrier::wc_copy64(crate::mem::devptr::<u64>(dst), src, self.llq_entry / 8);
             } else {
                 for i in 0..(self.llq_entry / 8) {

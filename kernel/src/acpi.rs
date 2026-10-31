@@ -568,7 +568,6 @@ pub fn button_arm(wait_s: u64) {
         let seen = BTN_SEEN.load(Ordering::Relaxed);
         crate::println!("acpi: no power button found on arm64 (the tables name: GED {}, ARMH0061 {} (base {:#x}, pin {}), PNP0C0C {}) — a stop from the outside will be a power cut",
             seen & 1, (seen >> 1) & 1, gb, if pin < 8 { pin as i64 } else { -1 }, (seen >> 2) & 1);
-        return;
     }
     #[cfg(target_arch = "x86_64")]
     {

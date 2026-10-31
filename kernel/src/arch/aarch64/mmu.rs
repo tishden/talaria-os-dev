@@ -386,10 +386,8 @@ pub unsafe fn flush_all_is() { core::arch::asm!("dsb ishst", "tlbi vmalle1is", "
 #[inline(always)]
 pub unsafe fn flush_range_is(start: u64, pages: u64) {
     core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
-    let mut a = start >> 12;
-    for _ in 0..pages {
+    for a in (start >> 12..).take(pages as usize) {
         core::arch::asm!("tlbi vaae1is, {}", in(reg) a, options(nostack, preserves_flags));
-        a += 1;
     }
     core::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
 }
