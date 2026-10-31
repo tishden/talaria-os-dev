@@ -10,7 +10,7 @@ number or a reference to a gate does not get in here**.
 
 ## 1. In one paragraph
 
-Talaria is its own x86-64 kernel (Rust, `no_std`) that runs **unmodified Linux
+Talaria is its own kernel (Rust, `no_std`) for **x86-64 and AArch64** that runs **unmodified Linux
 binaries** — static musl, dynamic ELF through ld-musl, glibc tested — and gives
 one application the whole machine: CPU cores, network card, disk. Not a
 container, not a distribution, not a hypervisor: a unikernel approach with the
@@ -19,7 +19,7 @@ ClickHouse run as the same binary as on Linux, with no rebuild and no kernel
 changes.
 
 The main internal mechanism is **synchronisation without busy-spinning**: a
-futex sleeps in the kernel with `mwait` right on the user's word, and the
+futex sleeps in the kernel with `mwait` (x86-64; `WFE` on arm64) right on the user's word, and the
 waker's store itself wakes the sleeper, with no IPI (stock musl's
 `FUTEX_WAKE` that follows finds it awake; libtsync skips that syscall too).
 Ordinary pthread code gets sub-microsecond wakeups at 0 % CPU while waiting.

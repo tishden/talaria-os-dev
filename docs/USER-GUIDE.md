@@ -27,8 +27,9 @@ throughput; Talaria is optimised for a **predictably low latency of the tails** 
 - **Track A** (host-VFIO): the workload's "cell" executes on its own hardware through VFIO,
   while the control plane is on Linux (`control-plane`, the binary `talaria`, the manifests
   `control-plane/manifests/`). The model is "Linux as the control plane".
-- **Track B** (this guide): an x86-64 kernel of our own, `kernel` (Rust, `no_std`,
-  a PVH boot under QEMU/KVM) — **our own OS without Linux**. The application executes in ring 3
+- **Track B** (this guide): our own kernel for **x86-64 and AArch64**, `kernel` (Rust, `no_std`,
+  a PVH boot under QEMU/KVM on x86-64, a Linux `Image` boot under QEMU `virt` on AArch64) —
+  **our own OS without Linux**. The application executes in ring 3 (EL0 on arm64)
   through a subset of the Linux syscall ABI; the kernel gives it memory, the devices (virtio-blk/net),
   the observability and the operator's side.
 
@@ -37,7 +38,7 @@ throughput; Talaria is optimised for a **predictably low latency of the tails** 
 | The concept | What it means for the user |
 |-----------|------------------------|
 | **A cell** | Your workload in ring 3 — a static binary (musl/C/C++) executed by the kernel. |
-| **The Linux syscall ABI** | The kernel understands ~185 Linux syscalls (SYSCALL/SYSRET). Static musl binaries and dynamic ELFs (ld-musl/ld-linux) are run **without changes to the source**. |
+| **The Linux syscall ABI** | The kernel understands ~185 Linux syscalls (SYSCALL/SYSRET on x86-64, SVC on arm64). Static musl binaries and dynamic ELFs (ld-musl/ld-linux) are run **without changes to the source**. |
 | **The control plane** | The kernel (and/or separate tasks) observe and control the workload: the console, the telemetry, `/ctl` over TCP, the supervision. |
 | **A mode (mode/test)** | What the kernel does on this boot, chosen by the cmdline parameter `talaria.mode=…` / `talaria.test=…`. |
 | **The zero-syscall fast path** | For an ultra-low latency the datapath works through rings in shared memory without syscalls on the hot path (`talaria.mode=fast`). |

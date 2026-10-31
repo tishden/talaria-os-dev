@@ -6,6 +6,9 @@ fixed sense; a couple are this project's own. They are listed here because the
 sense is not guessable, and guessing costs a reader an hour. The last section
 decodes the plan names the code's comments still cite.
 
+**Architecture:** a term defined in x86-64 words (`mwait`, CAT, x2APIC) has its
+arm64 equivalent where it matters — see `docs/ARCH-X86-ARM64.md`.
+
 ## The system
 
 **Cell** (`talaria.mode=cell`) — a workload run as ONE multithreaded process

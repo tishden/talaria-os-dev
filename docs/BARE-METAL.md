@@ -8,6 +8,9 @@ brought up on a `c6i.metal`. Every item here is not a line of reasoning but a
 measurement paid for by a run on hardware; in brackets it says what closes that
 class in the regression, so as not to pay again.
 
+**Architecture:** the catalogue is the **x86-64** build; the AArch64 list is §7
+(`docs/ARM64-PLAN.md` §7 is its counterpart).
+
 ## 1. The rule everything else follows from
 
 **A hypervisor is not "slow hardware", it is ANOTHER machine.** It gives zeroed

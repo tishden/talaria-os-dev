@@ -94,6 +94,7 @@ qemu ... -append "console=ttyS0 talaria.mode=cell" -drive file=disk.img,...
 |---|---|
 | `docs/PRODUCT.md` | product boundaries, the mechanisms that make it fast, trade-offs, performance tables, limits, roadmap |
 | `docs/POSITIONING.md` | who it is for and where the proven boundary lies |
+| `docs/ARCHITECTURE.md` | the architecture and the main concepts: the bet, the runtime model, the mechanisms |
 | `docs/HANDS-ON-GUIDE.md` | hands-on tour on a multithreaded C++ app (`examples/mdpipe`): monitoring, placement, profiling, live debugging, core dumps, EC2 |
 | `docs/USER-GUIDE.md` | building, running your own and open-source applications, operations |
 | `docs/DEVELOPMENT-GUIDE.md` | architecture, module map, recipes, invariants |
@@ -103,6 +104,7 @@ qemu ... -append "console=ttyS0 talaria.mode=cell" -drive file=disk.img,...
 | `docs/ENGINEERING-NOTES.md` | the pitfalls and the rules: how to judge a measurement, how to write a gate that cannot lie, what is already closed |
 | `docs/ROADMAP.md` | what is NOT done, why, and what it would take |
 | `docs/ARM64-PLAN.md` | the arm64 port: the inventory, the nine phases with named gates, the regression, the scoreboard |
+| `docs/ARCH-X86-ARM64.md` | the x86-64 vs AArch64 implementation differences, component by component |
 | `docs/GLOSSARY.md` | the words this repository uses in one fixed sense (cell, gate, stand, knob, scoreboard, rise, band) |
 | `docs/talaria-os.html` | design document TAL-RFC-001 (motivation, prior art, architecture) |
 | `CHANGELOG.md` | release history |

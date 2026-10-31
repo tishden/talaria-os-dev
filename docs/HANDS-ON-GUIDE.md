@@ -8,6 +8,10 @@ runs. The numbers on your machine will be different, the arrangement of the outp
 Where it was taken: a host Intel i7-3820 (4 cores, 8 threads), QEMU/KVM in the docker image
 `talaria-qemu2`; EC2 — a `c6i.large`, `ap-northeast-1`. The 21st of September 2026.
 
+**Architecture:** this tour is the **x86-64** build (the examples and the EC2
+launch); the arm64 equivalents are in `docs/USER-GUIDE.md` §1 and
+`docs/ARCH-X86-ARM64.md`.
+
 The references the text points to: `docs/USER-GUIDE.md` (all the knobs and
 the commands), `docs/PERFORMANCE-OPTIMIZATION-GUIDE.md` (the measurement's methodology).
 

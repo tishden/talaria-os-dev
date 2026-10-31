@@ -6,10 +6,17 @@ are checked against the code and the measurements (`docs/MEASUREMENTS.md`); the
 version and the regression count live in `README.md`. Guides:
 `docs/USER-GUIDE.md` (running), `docs/DEVELOPMENT-GUIDE.md` (development).
 
+**Architecture scope.** This page names the machine-specific mechanisms of the
+**x86-64** build — `mwait`/`umwait`, Intel CAT, x2APIC, XSAVE, the TSC and the
+LAPIC. The **AArch64** port reaches the same mechanisms through WFE, ASIDs, the
+GICv3, the generic timer and a 528-byte FP/SIMD state; where the implementations
+differ, see `docs/ARCH-X86-ARM64.md`.
+
 ## 1. What it is
 
 **Talaria OS** is a latency-first single-application OS (unikernel-style),
-Linux-ABI compatible. It is its own x86-64 kernel (Rust, `no_std`) that runs
+Linux-ABI compatible. It is its own kernel (Rust, `no_std`) for **x86-64 and
+AArch64** that runs
 **unmodified Linux applications** (static musl, dynamic ELF through ld-musl,
 glibc's ld-linux tested) and gives the application the CPU cores and the
 devices, keeping for itself the role of the control plane.
@@ -26,7 +33,7 @@ connections per node"; scaling out is done with VM instances. More in "Where
 the connection ceiling comes from" in `docs/POSITIONING.md`.
 
 The key mechanism: **synchronisation without busy-spinning**. A futex sleeps IN
-THE KERNEL with `mwait` on the user's own word; the waker's store itself wakes
+THE KERNEL with `mwait` (x86-64; `WFE` on arm64) on the user's own word; the waker's store itself wakes
 the sleeper, with no IPI (the `FUTEX_WAKE` stock musl still issues finds it
 awake; libtsync's `upark` skips that syscall too). Plain pthread mutexes and
 condition variables in an ordinary Linux binary get sub-microsecond wakeups at

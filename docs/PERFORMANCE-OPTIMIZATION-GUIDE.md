@@ -12,6 +12,10 @@ Adjacent documents: `docs/USER-GUIDE.md` (how to run things), `docs/DEVELOPMENT-
 `docs/ENGINEERING-NOTES.md` (the rules of judging a measurement, and the traps),
 `docs/BARE-METAL.md` (what QEMU hides).
 
+**Architecture:** the examples and the `mwait`/CAT/x2APIC levers are the **x86-64**
+build; the arm64 equivalents (WFE, ASIDs, the GICv3, the generic timer) are
+`docs/ARCH-X86-ARM64.md`.
+
 ---
 
 ## 0. The main thought

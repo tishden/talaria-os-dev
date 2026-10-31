@@ -9,6 +9,9 @@ lives in `bench/suite/README.md` and `docs/PERFORMANCE-OPTIMIZATION-GUIDE.md`.
 Nothing here is an estimate. Where a claim is bounded ("this stand does not
 resolve less than X"), the bound was measured too.
 
+**Architecture:** §§1-9 measure the **x86-64** build; §10 is the **AArch64**
+scoreboard. Each table names its stand and its machine.
+
 ---
 
 ## 1. How these numbers are judged
