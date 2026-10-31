@@ -80,12 +80,13 @@ What is put into the code on purpose:
 | The device | Where | For the chapter |
 |---|---|---|
 | the threads are named by a `prctl(PR_SET_NAME)`: `md_gen`, `md_work0`, `md_sink`, `md_main` | `worker()`, `sinker()`, `generator()`, `main()` | 5, 6 — the names in `ps` and in the `pin=` rules |
-| `hot_mix()` — the most expensive function; its price is set by the `--rounds` | `mdpipe.cpp:75` | 7 |
+| `hot_mix()` — the most expensive function; its price is set by the `--rounds` | `mdpipe.cpp:77` | 7 |
 | `book[5] == nullptr`; a `--crash-at N` slips instrument 5 in at the tick N | `book_init()`, `worker()` | 9 |
 | the negative intervals are counted separately and do not go into the percentiles | `worker()` | 4 |
+| `--mark-us N` names a stage slower than N us to the kernel (`prctl(PR_TALARIA_SLOW, …)`), and the `stat:` block then says who held the cores during the slow ticks | `worker()` | 5 |
 
 The arguments: `--secs`, `--rate` (ticks/s), `--workers`, `--rounds`, `--out`,
-`--crash-at`.
+`--crash-at`, `--mark-us`.
 
 ---
 
@@ -172,7 +173,7 @@ vdso: the clock in user space is up (2 pages, the data at 0x7ffd00001000)
 smp: the topology: 4 logical cores (the BSP's apic 0) out of 4 by the MADT, apic_of[0..4]=[0, 1, 2, 3]
 talaria: the SMP scheduler: the online cores mask=0xf
 netsys: ip=10.0.0.2/24 gw=10.0.0.1 dns=10.0.0.1 tcp=64 udp=8
-ext2: it is mounted — the block is 4096 B, 32768 blocks (128 MB), 1 groups, an inode is 256 B, free 26312 blocks / 32755 inodes, the cache is 52 MB write-back
+ext2: it is mounted — the block is 4096 B, 32768 blocks (128 MB), 1 groups, an inode is 256 B, free 26312 blocks / 32755 inodes, the cache is 60 MB write-back
 ext2: a JBD2 journal — the inode 8, 4096 blocks, seq 1, start 0, the mode ordered (the data go in place)
 talaria: a workload by the manifest /cell.manifest (restart=0, argc=9, envc=0)
 sched-plan: rules 0, spreading=on balancing=on numa=on, the interrupts per core 0, the scheduler's cores 0xf
@@ -197,7 +198,7 @@ mdpipe: start — 2 threads, rate 20000 ticks/s, 40 s, file /mdpipe.log
 The end of the run:
 
 ```
-cell: uptime=40s conns=0 rx=0 tx=0 syscalls=499560 faults=161 free=686MB restarts=0 threads=5
+cell: uptime=40s conns=0 rx=0 tx=0 syscalls=499560 faults=161 free=686MB low=686MB khigh=0 restarts=0 threads=5
 mdpipe: total — ticks 799999, samples 799999, clock went backwards 0 times (max 0 ns)
 mdpipe: stage latency, ns: p50=7517 p90=21933 p99=42300 p99.9=100343 max=1240492
 mdpipe: OK
@@ -206,7 +207,14 @@ supervise: the workload finished normally (code 0)
 supervise: code 0 — no restart is needed, halting
 ```
 
-- `cell: uptime=…` — the supervisor's status line, once every 10 seconds.
+Between the workload's `exit_group` and the `supervise:` lines the kernel prints a large
+`stat:` block — the phases of every `fsync`, the gaps of the tick per core, "who ate the
+core", the profile by code. It is shutdown diagnostics, not a sign of trouble; the excerpt
+above skips it.
+
+- `cell: uptime=…` — the supervisor's status line, once every 10 seconds: `free` is the total
+  free memory, `low` the free frames in the low (< 4 GB) region, `khigh` the count of frames
+  handed out from above 4 GB.
 - `restart=0`: a code of 0 means a halt. A non-zero code or a crash means a restart, until
   the `restart=` limit runs out.
 
@@ -244,7 +252,7 @@ CPU   [0]9.6% [1]90.6% [2]0.6% [3]0.6%
 MEMORY 1023M in total, free 688M (bump 638M + returned 50M), the kernel 51M; handed out 423K/s
 FLOW   syscalls 12k/s, switches 3.9k/s, faults in total 84 (COW 0), steals 0
 PMU    over the interval, over 4 cores: IPC 0.43, LLC misses 129711 (0.02/1000i), branch misses 2476594 (0.56/1000i)
-FS     ext2 RW 128M in total, free 102M, the block cache 52 MB (bypassed 1.2%), the journal is on
+FS     ext2 RW 128M in total, free 102M, the block cache 60 MB (bypassed 1.2%), the journal is on
 NET    interfaces 1, connections 0, listeners 0 (+0 UDP), rx 0 tx 0
 
   PID  TID NAME            CPU CPU% WAIT%    RSS  SHR LAZY ALLOC/s SWITCH/s SYSC/s STATE SYSCALL
@@ -282,7 +290,7 @@ stat:   #1: 69 times, 0 ms, 5345 ns
 …
 talaria:/> kstat fs
 kstat fs: ext2 RW, the block is 4096 B, 128M in total (32768 blocks), free 102M, the journal is on
-kstat fs: the block cache 52 MB: hits 7912, misses 98 (bypassed 1.2%)
+kstat fs: the block cache 60 MB: hits 7912, misses 98 (bypassed 1.2%)
 kstat fs: 97 blocks read, 54 written (54 ranges), device barriers 110, read-aheads 5 (+77 blocks)
 kstat fs: the lock: takes 339, with a wait 0 (0.0%), waited 0ns, held 194ms
 kstat fs: the journal: transactions 54, checkpoints 0 (copies from the journal 0); the barriers: data 0, the transaction 108, the checkpoint 0, …
@@ -428,6 +436,8 @@ sched-plan:   md_work0 -> the core 2
 sched-plan:   md_work1 -> the core 3
 sched-plan:   md_sink -> the common pool
 sched-plan:   md_main -> the common pool
+sched-plan: the NUMA nodes 1 (the mask 0x1), the source is the SRAT
+sched-plan: the workload -> the NUMA node 0 (the memory and the threads on one node)
 ```
 
 The result, two runs per line (20 000 ticks/s, 15 s), microseconds:
@@ -501,13 +511,14 @@ perf:   0x0000000010029d40       2 (0.3%)
 …
 perf:   symbols: addr2line -f -e <workload binary> <address>
 perf: KERNEL (ring 0) — 1549 samples, average depth 1.0, with a stack 0 of 1549:
-perf:   0x000000000025c340    1506 (97.2%)
-perf:   0x00000000002200c0      37 (2.3%)
+perf:   0xffffffff80273070    1506 (97.2%)
+perf:   0xffffffff80236990      37 (2.3%)
 …
 ```
 
 The kernel does not resolve symbols — the symbol table lives on the host next to
-the binary. Addresses are turned into names on the host.
+the binary. Addresses are turned into names on the host. The kernel is linked
+high-half (`0xffffffff80…`), so its addresses live in the top of the address space.
 
 ### 7.2. `perf record` and `talaria-prof` — on the host
 
@@ -515,7 +526,7 @@ the binary. Addresses are turned into names on the host.
 talaria:/> perf record 1500
 #talaria-prof v2 samples=1500 total=14791 tsc_hz=3600207406 slice_ns=500000 hz=400 depth=8
 #format: SAMPLE <ring> <tid> <cpu> <thread-name> <address> [<return-address> ...]
-SAMPLE 3 2 2 md_work0 0x10003c13 0x1000a61f
+SAMPLE 3 2 2 md_work0 0x10003c13 0x1000a77f
 SAMPLE 0 3 3 md_work1 0x25c34d
 …
 #talaria-prof end
@@ -533,8 +544,8 @@ $ kernel/tools/talaria-prof report --kernel kernel/target/x86_64-talaria/release
 
 == WORKLOAD (ring 3): 361 samples of 1500 (24%) ==
  samples  share  function
-     327  90.6%  hot_mix   /w/mdpipe.cpp:76 (discriminator 1)
-      31   8.6%  worker(int)   /w/mdpipe.cpp:76 (discriminator 3)
+     327  90.6%  hot_mix   /w/mdpipe.cpp:81 (discriminator 1)
+      31   8.6%  worker(int)   /w/mdpipe.cpp:78 (discriminator 3)
        2   0.6%  unsigned int& std::vector<unsigned int, std::allocator<unsigned int> >::emplace_back<unsigned int>(unsigned int&&)   /usr/include/c++/13.2.1/bits/vector.tcc:119
        1   0.3%  __libc_free   /home/buildozer/aports/main/musl/src/musl-1.2.5/src/malloc/mallocng/free.c:151
   by thread: 2/md_work0=359, 3/md_work1=2
@@ -606,20 +617,20 @@ On the host:
 $ gdb -q examples/mdpipe/mdpipe
 (gdb) set architecture i386:x86-64
 (gdb) target remote 127.0.0.1:1234
-0x00000000002c257d in ?? ()
+0xffffffff80390123 in ?? ()
 (gdb) info registers rip cs
-rip            0x2c257d            0x2c257d
+rip            0xffffffff80390123  0xffffffff80390123
 cs             0x8                 8
 (gdb) hbreak hot_mix
-Hardware assisted breakpoint 1 at 0x10003c02: file mdpipe.cpp, line 76.
+Hardware assisted breakpoint 1 at 0x10003c02: file mdpipe.cpp, line 78.
 (gdb) continue
 
-Thread 1 hit Breakpoint 1, hot_mix (rounds=24, x=2555637911364730948) at mdpipe.cpp:76
-76	    for (int i = 0; i < rounds; i++) {
+Thread 1 hit Breakpoint 1, hot_mix (rounds=24, x=2555637911364730948) at mdpipe.cpp:78
+78	    for (int i = 0; i < rounds; i++) {
 (gdb) bt
-#0  hot_mix (rounds=24, x=2555637911364730948) at mdpipe.cpp:76
-#1  worker (id=<optimized out>) at mdpipe.cpp:162
-#2  0x000000001000a61f in execute_native_thread_routine ()
+#0  hot_mix (rounds=24, x=2555637911364730948) at mdpipe.cpp:78
+#1  worker (id=<optimized out>) at mdpipe.cpp:170
+#2  0x000000001000a77f in execute_native_thread_routine ()
 #3  0x0000000010028db5 in start (p=0x60000005eaf0) at src/thread/pthread_create.c:207
 #4  0x000000001002a129 in __clone () at src/thread/x86_64/clone.s:22
 (gdb) info registers rip rsp cs
@@ -645,12 +656,12 @@ A breakpoint can be hit many times — handy for watching the data in motion:
 ```
 (gdb) hbreak apply_trade
 (gdb) continue
-Thread 1 hit Breakpoint 1, apply_trade (mix=10208923068595446737, px=10442, sym=6) at mdpipe.cpp:88
-88	    Instrument *ins = book[sym];
+Thread 1 hit Breakpoint 1, apply_trade (mix=10208923068595446737, px=10442, sym=6) at mdpipe.cpp:90
+90	    Instrument *ins = book[sym];
 (gdb) p *book[sym]
 $2 = {name = "SYM6\000\000\000", vol = 1514, notional = 15711350}
 (gdb) continue
-Thread 1 hit Breakpoint 1, apply_trade (mix=210975000264573163, px=10010, sym=2) at mdpipe.cpp:88
+Thread 1 hit Breakpoint 1, apply_trade (mix=210975000264573163, px=10010, sym=2) at mdpipe.cpp:90
 ```
 
 Threads work as in an ordinary gdb: `info threads`, `thread N`. The thread
@@ -661,21 +672,21 @@ from the context where the scheduler took them off the core.
 ```
 (gdb) add-symbol-file kernel/target/x86_64-talaria/release/talaria -o 0
 (gdb) hbreak apply_trade
-Hardware assisted breakpoint 1 at 0x10003c51: file mdpipe.cpp, line 88.
+Hardware assisted breakpoint 1 at 0x10003cd1: file mdpipe.cpp, line 90.
 (gdb) hbreak hot_mix
-Hardware assisted breakpoint 2 at 0x10003c02: file mdpipe.cpp, line 76.
+Hardware assisted breakpoint 2 at 0x10003c82: file mdpipe.cpp, line 78.
 (gdb) continue
 [Switching to Thread 4]
 
-Thread 4 hit Breakpoint 2, hot_mix (rounds=24, x=10077446034900276812) at mdpipe.cpp:76
-76	    for (int i = 0; i < rounds; i++) {
+Thread 4 hit Breakpoint 2, hot_mix (rounds=24, x=10077446034900276812) at mdpipe.cpp:78
+78	    for (int i = 0; i < rounds; i++) {
 (gdb) info threads
   Id   Target Id         Frame
   1    Thread 1          sccp (nr=<optimized out>, u=140737219919184, v=0, w=0, x=0, y=0, z=0) at ./arch/x86_64/syscall_arch.h:61
-  2    Thread 2          0x000000000025b1d6 in talaria::sync::wait_on_ex ()
-  3    Thread 3          0x000000000025b1d6 in talaria::sync::wait_on_ex ()
-* 4    Thread 4          hot_mix (rounds=24, x=10077446034900276812) at mdpipe.cpp:76
-  5    Thread 5          0x000000000027ac2c in talaria::sched::yield_to ()
+  2    Thread 2          0xffffffff80270f20 in talaria::sync::wait_on_ex ()
+  3    Thread 3          0xffffffff80270f20 in talaria::sync::wait_on_ex ()
+* 4    Thread 4          hot_mix (rounds=24, x=10077446034900276812) at mdpipe.cpp:78
+  5    Thread 5          0xffffffff80294750 in talaria::sched::yield_to ()
 (gdb) thread 1
 [Switching to thread 1 (Thread 1)]
 (gdb) bt 4
@@ -730,17 +741,17 @@ IMG=disk-crash.img ./qrun.sh "talaria.mode=cell talaria.smp=4 talaria.core=/core
 ```
 mdpipe: at tick 150000 an instrument outside the book will be sent
 mdpipe: 7 s — processed 140500 (+20101/s), queue max 99, records 35
-[fault] the signal 11 to the thread t2: the rip 0x10003c7d, the address 0x8, the err 0x5 (a violation of the rights, a read) -> to the workload's handler
+[fault] the signal 11 to the thread t2: the rip 0x10003cfd, the address 0x8, the err 0x5 (a violation of the rights, a read) -> to the workload's handler
 [fault] the core 2, the task was running on c2
 
-[fault] ring 3: the exception #14 err=0x5 rip=0x10003c7d cr2=0x8 rsp=0x60000005ea10 fs=0x60000005eb38 [fs:0]=0x60000005eb38
-║ the stack workload (2 frame(s)): 0x10003c7d 0x1000a61f
+[fault] ring 3: the exception #14 err=0x5 rip=0x10003cfd cr2=0x8 rsp=0x60000005ea10 fs=0x60000005eb38 [fs:0]=0x60000005eb38
+║ the stack workload (2 frame(s)): 0x10003cfd 0x1000a77f
 ║   the symbols: addr2line -f -C -e <binary> <address>
 [core] 24576 B into /core.mdpipe: threads 5, memory segments 5 (20 KB)
 [core] to read it: gdb <binary> <file>; to take it off the node — kernel/tools/talaria-file <ip> pull /core.mdpipe ./core
 sched: all the 5 task(s) have finished (COW copies: 0)
 supervise: the workload's threads were killed by signal 11 (one thread crashing = the process crashing)
-supervise: THE WORKLOAD CRASHED (exception #14 rip=0x10003c7d) — the kernel is intact
+supervise: THE WORKLOAD CRASHED (exception #14 rip=0x10003cfd) — the kernel is intact
 supervise: the restart limit (0) is exhausted — halting
 ```
 
@@ -756,17 +767,17 @@ The lines in order:
   no debugger. The addresses are resolved on the host:
 
   ```
-  $ addr2line -f -C -i -e mdpipe 0x10003c7d 0x1000a61f
+  $ addr2line -f -C -i -e mdpipe 0x10003cfd 0x1000a77f
   worker(int)
-  /w/mdpipe.cpp:89
+  /w/mdpipe.cpp:91
   worker
-  /w/mdpipe.cpp:166
+  /w/mdpipe.cpp:174
   execute_native_thread_routine
   thread.cc:?
   ```
 
-  `apply_trade` is inlined into `worker` (`-O2`), so `-i` shows both lines: 89
-  is the dereference, 166 is the call.
+  `apply_trade` is inlined into `worker` (`-O2`), so `-i` shows both lines: 91
+  is the dereference, 174 is the call.
 - `[core] … threads 5` — a dump with all the process's threads. It is written
   when the other four threads have already stopped: one thread crashing kills the
   process (as on Linux), the threads finish what they had started in the kernel
@@ -807,19 +818,19 @@ warning: core file may not match specified executable file.
 [New LWP 4]
 [New LWP 5]
 Core was generated by `md_work0'.
-#0  0x0000000010003c7d in apply_trade (mix=<optimized out>, px=10000, sym=<optimized out>) at mdpipe.cpp:89
-89	    ins->vol      += 1;
+#0  0x0000000010003cfd in apply_trade (mix=<optimized out>, px=10000, sym=<optimized out>) at mdpipe.cpp:91
+91	    ins->vol      += 1;
 [Current thread is 1 (LWP 3)]
 (gdb) bt
-#0  0x0000000010003c7d in apply_trade (mix=<optimized out>, px=10000, sym=<optimized out>) at mdpipe.cpp:89
-#1  worker (id=<optimized out>) at mdpipe.cpp:166
-#2  0x000000001000a61f in execute_native_thread_routine ()
+#0  0x0000000010003cfd in apply_trade (mix=<optimized out>, px=10000, sym=<optimized out>) at mdpipe.cpp:91
+#1  worker (id=<optimized out>) at mdpipe.cpp:174
+#2  0x000000001000a77f in execute_native_thread_routine ()
 #3  0x0000000010028db5 in start (p=0x60000005eaf0) at src/thread/pthread_create.c:207
 #4  0x000000001002a129 in __clone () at src/thread/x86_64/clone.s:22
 Backtrace stopped: frame did not save the PC
 (gdb) frame 1
-#1  worker (id=<optimized out>) at mdpipe.cpp:166
-166	        apply_trade(sym, t.px, mix);
+#1  worker (id=<optimized out>) at mdpipe.cpp:174
+174	        apply_trade(sym, t.px, mix);
 (gdb) p t
 $1 = {seq = 150000, t_enq = 7955506016, sym = 0, px = 10000}
 ```
@@ -830,14 +841,14 @@ $1 = {seq = 150000, t_enq = 7955506016, sym = 0, px = 10000}
   crashed thread (`md_work0`), while the binary is `mdpipe`. It does not affect the analysis.
 - The analysis: the tick came with `sym = 0` (a regular instrument), while into
   `apply_trade` went the instrument 5 — the substitution is in `worker()`, the
-  line 165. The bug is not in the frame where it crashed but one frame above.
+  line 173. The bug is not in the frame where it crashed but one frame above.
 
 Where the other threads stood:
 
 ```
 (gdb) info threads
   Id   Target Id         Frame
-* 1    LWP 3             0x0000000010003c7d in apply_trade (mix=<optimized out>, px=10000, sym=<optimized out>) at mdpipe.cpp:89
+* 1    LWP 3             0x0000000010003cfd in apply_trade (mix=<optimized out>, px=10000, sym=<optimized out>) at mdpipe.cpp:91
   2    LWP 1             sccp (nr=<optimized out>, u=0, v=0, w=0, x=0, y=0, z=0) at ./arch/x86_64/syscall_arch.h:61
   3    LWP 2             sccp (nr=<optimized out>, u=0, v=0, w=0, x=0, y=0, z=0) at ./arch/x86_64/syscall_arch.h:61
   4    LWP 4             sccp (nr=<optimized out>, u=0, v=0, w=0, x=0, y=0, z=0) at ./arch/x86_64/syscall_arch.h:61
@@ -901,14 +912,14 @@ supervise: starting the workload (attempt 1/2, multithreaded)
 mdpipe: start — 2 threads, rate 20000 ticks/s, 20 s, file /mdpipe.log
 [core] 24576 B into /core.mdpipe: threads 5, memory segments 5 (20 KB)
 supervise: the workload's threads were killed by signal 11 (one thread crashing = the process crashing)
-supervise: THE WORKLOAD CRASHED (exception #14 rip=0x10003c7d) — the kernel is intact
+supervise: THE WORKLOAD CRASHED (exception #14 rip=0x10003cfd) — the kernel is intact
 supervise: memory: free=689MB (the baseline after the first restart)
 supervise: restarting...
 supervise: starting the workload (attempt 2/2, multithreaded)
 mdpipe: start — 2 threads, rate 20000 ticks/s, 20 s, file /mdpipe.log
 [core] 24576 B into /core.mdpipe: threads 5, memory segments 5 (20 KB)
 supervise: the workload's threads were killed by signal 11 (one thread crashing = the process crashing)
-supervise: THE WORKLOAD CRASHED (exception #14 rip=0x10003c7d) — the kernel is intact
+supervise: THE WORKLOAD CRASHED (exception #14 rip=0x10003cfd) — the kernel is intact
 supervise: memory: free=689MB drift=-64KB
 supervise: the restart limit (1) is exhausted — halting
 ```
