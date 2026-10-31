@@ -8,6 +8,20 @@ the kernel leans on, what replaces it, in which order it is built, and by which
 gate each step is judged. The numbers here are estimates and are marked as such;
 the measurements come later and go to `docs/MEASUREMENTS.md`.
 
+Status (2026-10-31, branch `arm64-port`): **the port is complete and merge-ready.** All nine
+phases and the direct map's seven stages are done (`docs/ROADMAP.md` §4.7; §10–§12 below): the
+kernel boots on QEMU `virt`, on `c7g.metal` under KVM and on EC2 Graviton AMIs, runs ring 3 with
+one source per test for both machines, the process model, virtio-net and the ENA with LLQ,
+NVMe, the GICv3 ITS, ext2/jbd2, SNTP, the PMU and the profiler, and the six workloads. The weak
+memory model was audited, the kernel lives in the higher half with W^X, and the kernel's memory
+comes from any RAM via the direct map. The first arm64 scoreboard put Talaria's tails under
+Linux's on a Graviton3 and named the gaps that were ours; §11 lists what was closed after it and
+§12 the scoreboard board. The local gate is green: x86 `test.sh` 595/0 + host 22/0, arm64
+`test-aarch64.sh` (+net+pwr) 419/0 and `-db` 14/0, `kernel-unit` 303/303, clippy `-D warnings`
+clean in both configurations, `validate.sh` 14/0, `export-public.sh` clean. What remains is
+hardware-bound (five scoreboard tails + c7gn) and the merge into `main` — the owner's call
+(§11 item 6). The statuses below are the days leading up to this, kept for what they list.
+
 Status (2026-10-04, branch `arm64-port`): **the first pass of phase 5 (the ordering audit)
 is done by reading, and phase 4's tails are closed under TCG** (§10.10). The audit found more
 ATOMICITY than ordering: a pipe, an eventfd, the pending-signal sets, the COW refcount, the

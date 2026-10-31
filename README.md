@@ -8,8 +8,8 @@ through ld-musl, glibc) so that the application owns the CPU cores and the OS
 stays a control plane. It is built for latency-critical workloads: trading,
 embedded, dedicated appliance servers behind an external security perimeter.
 It boots under QEMU/KVM, as an AMI on EC2 and on bare metal (`c6i.metal`
-x86-64, `c7g.*` AArch64). The arm64 port is planned and gated in
-`docs/ARM64-PLAN.md`.
+x86-64, `c7g.*` AArch64). The arm64 port is complete; its plan and gates are
+in `docs/ARM64-PLAN.md`.
 
 **Against Linux on real workloads** (`docs/MEASUREMENTS.md` §2): six servers
 (PostgreSQL, MySQL/MariaDB, MongoDB, Redis, nginx, mongoose) on four EC2
