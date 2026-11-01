@@ -300,8 +300,9 @@ reasoning does not have to be repeated.
    stand (`infra/aws/kvm-stand-aarch64.sh`). The merge into `main` is the
    owner's call (§11 item 6).
 
-   Pre-merge state (2026-10-31): the whole local gate is green on `arm64-port`
-   — x86 `test.sh` 595/0 + host 22/0, arm64 `test-aarch64.sh` (+net+pwr) 419/0
+   Pre-merge state (2026-11-01, after the pre-merge review's six fixes,
+   ARM64-PLAN §12.12): the whole local gate is green on `arm64-port`
+   — x86 `test.sh` 573/0 + host 22/0, arm64 `test-aarch64.sh` (+net+pwr) 419/0
    and `-db` 14/0, `kernel-unit` 303/303, clippy `-D warnings` clean in both
    configurations, `validate.sh` 14/0, the power-cut probe PASSED, and
    `tools/export-public.sh` clean (0 problems, no leaks). The remainder is

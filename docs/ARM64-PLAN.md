@@ -16,7 +16,8 @@ NVMe, the GICv3 ITS, ext2/jbd2, SNTP, the PMU and the profiler, and the six work
 memory model was audited, the kernel lives in the higher half with W^X, and the kernel's memory
 comes from any RAM via the direct map. The first arm64 scoreboard put Talaria's tails under
 Linux's on a Graviton3 and named the gaps that were ours; §11 lists what was closed after it and
-§12 the scoreboard board. The local gate is green: x86 `test.sh` 595/0 + host 22/0, arm64
+§12 the scoreboard board; §12.12 the pre-merge review and its six fixes. The local gate is
+green: x86 `test.sh` 573/0 + host 22/0, arm64
 `test-aarch64.sh` (+net+pwr) 419/0 and `-db` 14/0, `kernel-unit` 303/303, clippy `-D warnings`
 clean in both configurations, `validate.sh` 14/0, `export-public.sh` clean. What remains is
 hardware-bound (five scoreboard tails + c7gn) and the merge into `main` — the owner's call
@@ -3059,6 +3060,46 @@ What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a
 last, and only if a point needs exactly that), a new slice or threshold value without an
 instrument that asks for it, and any change to how the board judges (the 0.95/1.05 rule and
 "within a workload" stay — a board that moves its own goalposts proves nothing).
+
+### 12.12. The pre-merge review (2026-11-01)
+
+A read of the branch against `main` before the merge, the shared code first (what x86 runs
+too). The builds, clippy, `kernel-unit` and the export were clean; the review found six things
+to fix, all fixed here:
+
+1. **`mprotect` over a hole mapped physical page 0** (`paging::protect`). An entry that was
+   neither present nor a reservation nor PROT_NONE fell through to the rewrite and became
+   `0 | P | US [| RW]`: `munmap(p); mprotect(p, RW)` gave ring 3 frame 0 — before strict, the
+   identity frame at that address. Old on `main`. A hole is now skipped; gate: sigtest's
+   "mprotect over a hole maps nothing" (a `write()` from the hole must be EFAULT), which FAILS
+   on the old `protect` (the positive control: the write went through, errno 0).
+2. **Five test binaries were committed** (`kernel/user/{gatecost,pinmove,txloss,wakedef,
+   wakesleep}`, since `163e9bb`): untracked again and in `.git/info/exclude` like the rest.
+3. **`rt_sigsuspend`'s saved mask outlived its thread** (`proc::SUSP_ON/SUSP_SAVED`, `75bd3be`).
+   A thread that died in the call (a default-action signal, a sibling's `exit_group`) never
+   reached `sigsuspend_take`, and the next thread in the slot installed the dead one's mask
+   with its first signal. Every claim of a slot clears it now.
+4. **`read`/`recvfrom` decided by the descriptor twice** (`163e9bb`, §11 item 2a). The gate
+   checked the buffer as far as the descriptor's object could fill it, and the handler then
+   translated the descriptor again: a sibling's `close(5)` + `open(file)` in between let the
+   ext2 read write past the checked 128 KiB. The cap is computed once
+   (`uaccess::read_cap`), the gate checks that far and the handler's length is clamped to it —
+   a swapped descriptor gives a short read.
+5. **Under strict a fitting frame was refused** (`lazy_fault`, `map_fresh_pages[_cont]`). The
+   `virt_to_phys(f) == f` check guards the kernel's writes by a frame's identity, which strict
+   does not have; it starved a process whose own mapping covers the frames' addresses (a
+   zero-based compressed-oops heap high on a large machine). It is skipped under strict
+   (`frame_fits`), and the refused frames go back to the allocator instead of being dropped.
+6. **The stack lock's by-site table ran on every take** (`net_enter`/`note_released`, §12.9):
+   a scan of `NET_SITE` and stores into lines every core shares, by default. It is kept only
+   under `talaria.netdr=1` now, with the by-task half, and the stat block prints it only then.
+
+Found on the way: `services/docker/Dockerfile.musl-aarch64` built no `musl-gcc` (musl's
+configure installs no wrapper for a cross CC; `--enable-wrapper=gcc`). Read and found correct:
+the TLB shootdown and the COW refcount's ordering, `user_range_ok`'s rewrite, `rt_sigsuspend`
+for a thread killed from outside (`sig_pending` answers true for a dead task). The defaults x86
+sees changed by the branch are listed in `CHANGELOG.md`. Gate on the fixed tree: see the
+status at the top.
 
 Related: `docs/ROADMAP.md` (where this sits among the other open items),
 `docs/DEVELOPMENT-GUIDE.md` §3–§7 (the x86 mechanisms this plan translates),

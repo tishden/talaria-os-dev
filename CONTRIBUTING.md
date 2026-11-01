@@ -28,7 +28,7 @@ make -C kernel/user all && (cd kernel && python3 mkfs.py)   # regression binarie
 (cd kernel && cargo clippy -Zjson-target-spec --release -- -D warnings)
 kernel/build-aarch64.sh                                     # the arm64 kernel (docs/ARM64-PLAN.md): it must still build
 kernel/uefi-stub/build.sh aarch64                           # the arm64 UEFI stub carries the kernel inside: rebuild it too
-kernel/test-aarch64.sh                                      # the arm64 gate under TCG: 229 checks with kernel/user/aarch64 built (36 without), ~20 min
+kernel/test-aarch64.sh                                      # the arm64 gate under TCG: 419 checks with kernel/user/aarch64 built (`make -C kernel/user aarch64`), ~15 min
 (cd kernel && cargo clippy -Zjson-target-spec --release --target aarch64-talaria.json -- -D warnings)
 (cd kernel-unit && cargo test && cargo clippy --all-targets -- -D warnings)
 kernel/test.sh          # QEMU regression: "TOTAL: ... FAIL=0"

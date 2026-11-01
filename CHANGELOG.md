@@ -10,7 +10,7 @@ the libtsync API may change without migration.
 
 ---
 
-## Unreleased — the arm64 port (branch `arm64-port`, 2026-09-29 … 2026-10-22)
+## Unreleased — the arm64 port (branch `arm64-port`, 2026-09-29 … 2026-11-01)
 
 Talaria runs on AArch64: QEMU `virt`, a `c7g.metal` under KVM, and EC2 Graviton AMIs
 (`c7g.large`/`xlarge`, UEFI via edk2, ENA with LLQ, NVMe, the GICv3 ITS). The plan,
@@ -46,10 +46,36 @@ scoreboard against Linux on a Graviton3 is `docs/MEASUREMENTS.md` §10.13-10.15.
   from the boot core.
 - The TCP retransmission floor was the RFC's 1 s (smoltcp 0.14, now vendored at Linux's
   200 ms): one lost segment stalled the load generator exactly 1.000 s.
+- The pre-merge review (ARM64-PLAN §12.12): `mprotect` over an unmapped hole made the empty
+  entry present with frame 0 (before strict, the identity frame) — ring 3 read and wrote
+  physical memory (old on `main` too); `rt_sigsuspend`'s saved mask outlived a thread that
+  died in the call and was taken by the next thread in its slot; `read`/`recvfrom` decided the
+  checked extent and the handler's object by the descriptor twice, so a sibling's
+  `close`+`open` in between let a file read write past the checked buffer (the handler is now
+  held to the checked length — a short read); under strict a fresh frame whose address a
+  process's own mapping covered was refused (and `map_fresh_pages` dropped the refused frames);
+  the stack lock's by-site table cost every take of the lock a table scan and shared stores
+  (now only under `talaria.netdr=1`); the arm64 cross-musl image built no `musl-gcc`.
+
+### Changed (defaults that x86 sees too)
+
+- `talaria.dmap=strict` is the default (no RAM identity in a process space; `talaria.dmap=1`
+  or `=0` for the old layouts), with the kernel stacks' and the devices' windows on.
+- An anonymous `MAP_SHARED` gets an address of its own instead of its frames' identity
+  (`talaria.sharedid=1` for the old one); `MAP_SHARED|MAP_FIXED` stays shared across a fork;
+  `MAP_FIXED_NOREPLACE` alone counts as fixed; a low `MAP_FIXED` is granted under strict.
+- A wakeup preempts an occupant younger than the threshold through a resched IPI instead of
+  waiting for its slice; a timed sleeper pulls its core's tick to its deadline;
+  `sched_setaffinity` migrates from and to any core; `nanosleep` is one exact-deadline wait.
+- A signal whose action is to do nothing (SIG_IGN, or SIG_DFL for CHLD/URG/WINCH) is dropped
+  at send when the target does not block it; `rt_sigsuspend` installs its mask.
+- `read`/`recvfrom` check the buffer only as far as a pipe or a socket can fill it.
+- PostgreSQL's manifest sets `netmix=1ms` and `netmixsteal=1ms` on both machines.
 
 ### Gate
 
-See ARM64-PLAN §11 item 6 for the pre-merge run of both regressions and `validate.sh`.
+See ARM64-PLAN §11 item 6 and §12.12 for the pre-merge runs of both regressions and
+`validate.sh`.
 
 ---
 
