@@ -50,6 +50,7 @@ pub fn init_proc(p: usize) {
     t[0] = 0; t[1] = 1; t[2] = 2;
     unsafe {
         INITED[p] = true; NOTIFIED[p].store(false, Ordering::Relaxed);
+        SUSP_ON[p] = false; // a former occupant of the slot may have died inside rt_sigsuspend
         for s in 0..65 { SA_HANDLER[p][s] = 0; SA_FLAGS[p][s] = 0; SA_MASK[p][s] = 0; SA_RESTORER[p][s] = 0; }
         PPEND[p].store(0, Ordering::Relaxed);
         CWD[p][0] = b'/'; CWDL[p] = 1;
@@ -75,7 +76,7 @@ pub fn exec_reset(p: usize) {
 /// A reset of all the tables (a restart of the workload by the supervisor).
 pub fn reset_all() {
     unsafe {
-        for p in 0..NT { INITED[p] = false; PENDING[p].store(0, Ordering::Relaxed); PPEND[p].store(0, Ordering::Relaxed); SIGMASK[p] = 0; NOTIFIED[p].store(false, Ordering::Relaxed); }
+        for p in 0..NT { INITED[p] = false; PENDING[p].store(0, Ordering::Relaxed); PPEND[p].store(0, Ordering::Relaxed); SIGMASK[p] = 0; SUSP_ON[p] = false; NOTIFIED[p].store(false, Ordering::Relaxed); }
         for h in 0..HMAX { HREF[h] = 0; }
         for i in 0..NPIPE { PR[i] = false; PW[i] = false; }
     }
@@ -186,6 +187,7 @@ pub fn fork_into(parent: usize, child: usize) {
         for s in 0..65 { SA_HANDLER[child][s] = SA_HANDLER[parent][s]; SA_FLAGS[child][s] = SA_FLAGS[parent][s]; SA_MASK[child][s] = SA_MASK[parent][s];
             SA_RESTORER[child][s] = SA_RESTORER[parent][s]; }
         SIGMASK[child] = SIGMASK[parent]; PENDING[child].store(0, Ordering::Relaxed); PPEND[child].store(0, Ordering::Relaxed);
+        SUSP_ON[child] = false; // see `sigsuspend_begin`: the slot's previous thread may have died in one
         NOTIFIED[child].store(false, Ordering::Relaxed);
         CWD[child] = CWD[parent]; CWDL[child] = CWDL[parent];
         MMAP_NEXT[child] = MMAP_NEXT[parent];
@@ -423,6 +425,10 @@ pub fn sigmask_of(t: usize) -> u64 { unsafe { SIGMASK[t] } }
 // on EINTR for good. Now the given mask is installed for the wait, the old one is kept here and
 // goes into the signal frame's `uc_sigmask` (rt_sigreturn restores it, as on Linux), or is put
 // back at the syscall's return when no handler ran.
+// The pair belongs to the THREAD, not the slot: a thread that dies inside rt_sigsuspend (a
+// default-action signal, a sibling's exit_group) never reaches `sigsuspend_take`, so every claim
+// of a slot (`init_proc`, `fork_into`, `thread_inherit_sigmask`, `reset_all`) clears SUSP_ON —
+// otherwise the next thread in the slot took the dead one's saved mask with its first signal.
 static mut SUSP_SAVED: [u64; NT] = [0; NT];
 static mut SUSP_ON: [bool; NT] = [false; NT];
 /// Install `rt_sigsuspend`'s mask (read from ring 3 at `set`) for the current thread.
@@ -440,7 +446,11 @@ pub fn sigsuspend_take(t: usize) -> Option<u64> {
     unsafe { if SUSP_ON[t] { SUSP_ON[t] = false; Some(SUSP_SAVED[t]) } else { None } }
 }
 /// clone(CLONE_VM): the thread inherits the creator's mask, it has no pending signals.
-pub fn thread_inherit_sigmask(parent: usize, child: usize) { unsafe { SIGMASK[child] = SIGMASK[parent]; } PENDING[child].store(0, Ordering::Relaxed); }
+pub fn thread_inherit_sigmask(parent: usize, child: usize) {
+    // SAFETY: the child's rows; the child is not running yet.
+    unsafe { SIGMASK[child] = SIGMASK[parent]; SUSP_ON[child] = false; }
+    PENDING[child].store(0, Ordering::Relaxed);
+}
 pub fn set_sigmask(t: usize, m: u64) { unsafe { SIGMASK[t] = m; } }
 /// Is the signal IGNORED by the process `p` for a recipient with the mask `mask` — Linux's
 /// `sig_ignored`: the disposition is SIG_IGN, or SIG_DFL for a signal whose default is to
