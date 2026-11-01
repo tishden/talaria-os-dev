@@ -1646,7 +1646,7 @@ narrower (39.9–42.1 against 39.8–49.4 us). The ENA's PHC is declared on none
 `c7gn`, `c8g`, `m7g`: the wall clock's reference on Graviton is not the PHC (the Amazon Time
 Sync service over the network is the candidate — a design item, not done).
 
-**The KVM stand on the audit** (`c7g.metal`, `infra/aws/kvm-stand-aarch64.sh` at `bd0e701`, the
+**The KVM stand on the audit** (`c7g.metal`, `infra/aws/kvm-stand-aarch64.sh` at `d6cf72c`, the
 instance destroyed; `docs/MEASUREMENTS.md` §10.4): the gate under KVM **268/0**; `netnum`'s
 `tcp [netirq=1]` 39 509 req/s, 25.3 us a request — the `diskserver` fault of §10.7 is gone on
 hardware, §10.8's fix confirmed; the soak **0 of 50** on all ten modes with `piperace` among
@@ -1856,7 +1856,7 @@ cores ran `syscall::init`, whose global half allocated and re-zeroed the workloa
 a test's static image died on its first instruction in 10-17 % of the parallel detector's
 boots; `init_core` closes it (0 of 288 after, 31 of 288 before; ENGINEERING-NOTES item 41).
 The wake path's "step" of §10.11-§10.12 was the layout's lottery: with and without the
-embedded `tsync`, today's tree is at `ea24e3f`'s level.
+embedded `tsync`, today's tree is at `4ab6bd7`'s level.
 
 Gates after the session: `kernel/test-aarch64-db.sh` **14/0** under TCG (the five servers,
 ClickHouse's B12 set in 20 s), arm64 `test-aarch64.sh` **316/0** (`dyn`, `idregs`, `mixwait`,
@@ -1921,7 +1921,7 @@ now gated (`docs/ENGINEERING-NOTES.md` items 44-45):
   produce. On the way, the per-core snapshot slot became a seqlock
   with the writer's interrupts masked.
 
-**The KVM stand on `e95abf4`** (the TODO's "the whole stand on HEAD"): the gate 313/0 under KVM,
+**The KVM stand on `ad8879d`** (the TODO's "the whole stand on HEAD"): the gate 313/0 under KVM,
 the five servers 15/0 in both wait modes, the soak 0 of 650, the parallel detector 0 of 576, two
 more gate runs clean (`docs/MEASUREMENTS.md` §10.10). `netmix` stays off by default — under KVM
 it changes nothing measurable.
@@ -1984,7 +1984,7 @@ refused request took the rest of the bump (both machines; `talaria.test=allocfai
 
 §10.9 ended with "the real fix of the identity window is a kernel direct map in the higher
 half", and the GB0 alias of §10.13 was its first, narrow piece. This is the plan; no code yet.
-The line numbers are `bb198d8`'s.
+The line numbers are `535d0b3`'s.
 
 **What leans on virt == phys today.** The contract is written down three times — P1
 (`paging.rs:12`), `IDENT_HI` (`paging.rs:284`) and L3 (`user.rs:23`) — and the kernel has no
@@ -2249,7 +2249,7 @@ it), on both machines: `0x30_0000_0000..0x32_4000_0000` (9 GB) is seen, `alloc_a
 first, the workload's frames stay below; PostgreSQL boots and answers on that guest.
 
 **Strict is the default (2026-10-07).** The last evidence it waited for came from real arm64
-hardware: the KVM stand (`c7g.metal`, `CUSTOM=` with a strict-by-default build of `4801645`) ran the
+hardware: the KVM stand (`c7g.metal`, `CUSTOM=` with a strict-by-default build of `20a899b`) ran the
 gate 348/0 (its open-source and dynamic-ELF blocks have no images there) and the databases 15/0 —
 PostgreSQL, MariaDB, MongoDB, the JVM, ClickHouse — with real cache maintenance, which TCG skips.
 x86's evidence is local KVM on the dev box's own hardware (`validate.sh` over strict since stage
@@ -2346,7 +2346,7 @@ the BIOS area) instead of everything below the image's end; `mprotect` may chang
 range in a strict process space (`paging::proc_low_ok`, never in the kernel's own); x86's trampoline is
 handed `kernel_cr3()` explicitly. Gate `talaria.test=sigtestlo`: `sigtest` linked at 0x200000 — the
 kernel image's own load address — passes (its image, forks, shared memory); the pre-stage-7 kernel
-(9220575) hangs silently on the same binary, its process overlaying the kernel's code. 7.5: the official
+(cdec83a) hangs silently on the same binary, its process overlaying the kernel's code. 7.5: the official
 ClickHouse ET_EXEC (2 MB..528 MB) runs on the normal kernel — `validate.sh` B12 passed on it — and
 The high-base build (KBASE 528 MB, `target-hi`) is gone. x86 538/0 + 22/0,
 `validate.sh` 14/0, arm64 370/0, arm64 databases 14/0. Then W^X on the image: the linker scripts start `.rodata` and `.data` on
@@ -2410,7 +2410,7 @@ order of work:
    and at once the postmaster faults ON CORE 1 in ring 3 at `rip=0x0`/`0x1` (an instruction fetch; a
    plausible `rsp`, the right `fs`) — its saved user context or its stack returned zero. Every probe
    whose log has that "left the tables" right after the startup's exit failed; the ones where it
-   came later did not. NOT this migration's: the kernel before stage 6 (`9220575`) fails the same way
+   came later did not. NOT this migration's: the kernel before stage 6 (`cdec83a`) fails the same way
    (1 of 3 strict, 3 of 3 in its non-strict default); today's kernel 5 of 8 strict, 3 of 3 with
    `dmap=1`. Not reproduced locally in 11 runs (q35, 8 GiB, 2 and 4 cores, NVMe, virtio-net): the
    deferred path is never taken there. Then: a `kernel stack overflow` in `metrics::dump` on window
@@ -2427,7 +2427,7 @@ order of work:
    q35 or microvm with virtio-mmio), about 1 boot in 5-6 — the same sequence (the startup child exits,
    the deferred free, the postmaster on core 1 at `rip=0`), or the machine dying silently there (a
    triple fault: QEMU exits under `-no-reboot`). **It is older than the migration and than the
-   arm64 port**: `main` (`3a29de1`, before the port) fails the same way, 2 of 10 in the microvm
+   arm64 port**: `main` (`71e5146`, before the port) fails the same way, 2 of 10 in the microvm
    shape. Instruments built for it (opt-in): the ring-3 fault report prints the faulting stack page's
    frame, whether the ledger counts it handed out, its refcount; `talaria.freetrace=1` keeps the last
    8192 frees with caller and task and the report lists every free of that frame (it also puts
@@ -2444,7 +2444,7 @@ order of work:
    frees in `relazy_pages`/`unmap_proc`/`free_pt`/`free_pd` (all through `rc_release`), the deferred
    space free's guard, the HAL (`share` is a table walk, `unshare` copies nothing), the CR3 switch
    (a real `mov cr3`, no PCID, no global user leaves). A real bug found on the way: `rt_sigsuspend`
-   ignored its mask (75bd3be, gate `chldrace`). Next: the COW copy's source and destination around a
+   ignored its mask (5f843bf, gate `chldrace`). Next: the COW copy's source and destination around a
    just-freed bounce frame (a stale translation of the destination through the map? a copy from
    the wrong source?), and the triple-fault variant (a QEMU `-d int` trace of the last exceptions).
 
@@ -2474,7 +2474,7 @@ order of work:
    30 ready with the deferred path taken 7 times. Gates `cowstale`/`cowstalet` on both machines.
    The instruments stay, opt-in or one entry per call: the `unmap_proc` ring and the walk of the
    faulting stack's tables in the ring-3 fault report, the roots `free_address_space` freed. On EC2
-   (`ec2ab-postgresql-20261008-223129`, `6962a3b`): the server's console shows THE sequence that
+   (`ec2ab-postgresql-20261008-223129`, `2c2c586`): the server's console shows THE sequence that
    failed every probe before — "core 1 ... has left the tables of the finished process", "the
    freeing of the AS ... is deferred" — followed by "ready to accept connections", no fault, and
    phase A ran the whole ladder (item 1 has the numbers). Phase B was cut by the session's
@@ -2785,7 +2785,7 @@ order of work:
    and ClickHouse green (14 PASS, 0 FAIL); the same kernel booted on EC2
    as the default variant of `variants-wakesleep-c7g` (two `c7g.large`) and
    `variants-wakesleep-c6i` (two `c6i.large`), both to the workload's verdict and a clean
-   `supervise: code 0`. `main` has not moved since the branch point (`3a29de1`), so the merge is a
+   `supervise: code 0`. `main` has not moved since the branch point (`71e5146`), so the merge is a
    fast-forward of 130 commits.
 
 ## 12. The next session: beating Linux at every point of the board (plan, 2026-10-22)
@@ -2897,10 +2897,10 @@ because the board is sixteen days and six kernel changes old.
 
 Item 0 is done (MEASUREMENTS §10.16, both generators, `summary-genlinux.md` next to
 `summary.md`); the PostgreSQL phase under the Linux generator needed the manifest's
-`PROBE_ARGS` (`ebe4dae`) and was retaken. Item 1: the lost frame is measured to the frame and
+`PROBE_ARGS` (`4c43852`) and was retaken. Item 1: the lost frame is measured to the frame and
 bounded to "Talaria at both ends, between the two ENAs", not named — the next instrument is a
 VPC traffic mirror of both ENIs; a sendto's price is the stack's pass, nothing hidden. Item 3:
-the AENQ/admin wrap (`35b2bcd`) and the arm64 range flush (`5e97998`) are fixed and gated; the
+the AENQ/admin wrap (`acc5a5c`) and the arm64 range flush (`5e84523`) are fixed and gated; the
 ×2 of the server's ceiling is bimodal within a boot, its per-core accounting is written down,
 its mechanism is open — the waiter knobs do not move it. Item 5: the nginx server's profile is
 taken (`writev` 3.1 us is the gap). Items 2, 4, 6, 7 are not started. The instruments live on
@@ -2913,14 +2913,14 @@ counters, the batched flush). ENGINEERING-NOTES 62-66 hold the lessons, 66 in pa
 
 Item 3: PostgreSQL's ×2 is named and halved — its postmaster and background processes spun
 their mixed `epoll` sets (socket + signalfd/self-pipe + the death pipe) on the backends' two
-cores; the manifest key `netmix=<ns>` (`8610cda`) parks them: pk 9.9 → 18.9 k req/s, select1
-26.7 → 31.5-35.4 k, the medians at Linux's (MEASUREMENTS §10.17). ASIDs on arm64 (`5efa961`)
+cores; the manifest key `netmix=<ns>` (`0e4baf7`) parks them: pk 9.9 → 18.9 k req/s, select1
+26.7 → 31.5-35.4 k, the medians at Linux's (MEASUREMENTS §10.17). ASIDs on arm64 (`af68347`)
 were the first suspect and measured nothing; they stay because they are correct, gated on a
 `c7g.metal` under KVM (the aarch64 gate run of 2026-10-25): the gate 389/1 then 0 of 1
 in the loop, the databases 15/0 twice, the soak 13 modes × 50 boots and the race detector
 6 × 96 with no failure; the one FAIL was `shmrace A/B`'s negative control breaking the other
 way (a half-published row faults instead of a second row), and its assertion now takes both. The stat block counts who spins a mixed set beside another
-waiter (`444cd35`): only PostgreSQL and MongoDB do, and MongoDB under the knob loses its top
+waiter (`81723b9`): only PostgreSQL and MongoDB do, and MongoDB under the knob loses its top
 rungs — the knob is not a default. Left of item 3: the ceiling (pk 18.9 against 25.5 k, select1
 33 against 44 k). Item 1: Nitro's connection tracking and the MTU are excluded, the VPC mirror
 is not an instrument at this rate; the next stand is a `c7gn`/`.metal` pair.
@@ -2972,7 +2972,7 @@ Item 3's low rungs: the instrument on Linux's side exists now (statd's `perf sta
 and EL1 in the middle of a point, `DURING=1`) and named the difference at once — the same
 instructions per request took 4-10x the L2-TLB refills here, because Linux maps PostgreSQL's
 text from 64 KB page-cache folios with the Contiguous bit (MEASUREMENTS §10.22). The hint is
-ours by default on arm64 (`c5aade8`, `talaria.cont=0` — off): select1's lowest rung p50/p99
+ours by default on arm64 (`9b7f5c7`, `talaria.cont=0` — off): select1's lowest rung p50/p99
 58.8/74.4 us against Linux's 62.7/72.3 (was 63.2/78.1), pk's 107.7/134.0 against 115.3/131.5,
 every median of the low and middle rungs ours; a second rise moved the same way, with its
 Linux faster at select1's bottom (p99 70.3 against our 76-77 while our ring 3 is the cheaper,
@@ -3042,7 +3042,7 @@ chases — so the fix still waits for the stand to name the holder, as planned.
 
 ### 12.11. Progress (2026-10-30/31): the finalization board
 
-Item 7 (the board of every workload after `cont`, on both machines) is taken on `3c7e9ae`:
+Item 7 (the board of every workload after `cont`, on both machines) is taken on `b2f70e5`:
 six workloads, fifteen cases, 599 judged points on c6i.xlarge and c7g.xlarge, four stands in
 four regions in parallel ([BOARD-2026-10.md](BOARD-2026-10.md), MEASUREMENTS §10.26). On x86
 the ceiling is 1.42x Linux's (above it in all fifteen cases) and a request ~30 % cheaper; on
@@ -3077,12 +3077,12 @@ to fix, all fixed here:
    "mprotect over a hole maps nothing" (a `write()` from the hole must be EFAULT), which FAILS
    on the old `protect` (the positive control: the write went through, errno 0).
 2. **Five test binaries were committed** (`kernel/user/{gatecost,pinmove,txloss,wakedef,
-   wakesleep}`, since `163e9bb`): untracked again and in `.git/info/exclude` like the rest.
-3. **`rt_sigsuspend`'s saved mask outlived its thread** (`proc::SUSP_ON/SUSP_SAVED`, `75bd3be`).
+   wakesleep}`, since `769f808`): untracked again and in `.git/info/exclude` like the rest.
+3. **`rt_sigsuspend`'s saved mask outlived its thread** (`proc::SUSP_ON/SUSP_SAVED`, `5f843bf`).
    A thread that died in the call (a default-action signal, a sibling's `exit_group`) never
    reached `sigsuspend_take`, and the next thread in the slot installed the dead one's mask
    with its first signal. Every claim of a slot clears it now.
-4. **`read`/`recvfrom` decided by the descriptor twice** (`163e9bb`, §11 item 2a). The gate
+4. **`read`/`recvfrom` decided by the descriptor twice** (`769f808`, §11 item 2a). The gate
    checked the buffer as far as the descriptor's object could fill it, and the handler then
    translated the descriptor again: a sibling's `close(5)` + `open(file)` in between let the
    ext2 read write past the checked 128 KiB. The cap is computed once

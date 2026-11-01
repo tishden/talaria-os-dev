@@ -1049,7 +1049,7 @@ Two that were the STAND's, not the kernel's, and cost an hour each:
     head within a minute of boot — and a 2-core PostgreSQL server ran at 24.6 k req/s against
     44.9 k on a kernel with the fix. The lesson is older than the bug: an instrument that
     exercises a path more often than the product does (a command every 10 s instead of twenty
-    per boot) finds the wrap the product never reached (MEASUREMENTS §10.16, `35b2bcd`).
+    per boot) finds the wrap the product never reached (MEASUREMENTS §10.16, `acc5a5c`).
 
 63. **On arm64 a barrier per page is the flush's price, not the invalidation.** `tlbi vaae1is`
     is cheap; the `dsb ish` that waits for the broadcast to complete is ~400 ns on a Graviton,
@@ -1058,7 +1058,7 @@ Two that were the STAND's, not the kernel's, and cost an hour each:
     Linux's `__flush_tlb_range` is one `dsb ishst`, the `tlbi`s back to back, one `dsb ish`.
     The stat block's `unmap:` line (the walk / the flush / the acknowledgements split, written
     for x86's IPIs) named it without a new instrument: 12.5 → 2.8 us per `munmap` on the stand
-    (`5e97998`). A x86 mechanism ported literally can be correct and still pay for a protocol
+    (`5e84523`). A x86 mechanism ported literally can be correct and still pay for a protocol
     the machine does not need.
 
 64. **Localise a loss by substitution before by instrument.** Seven probes with counters at

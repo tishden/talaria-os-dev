@@ -310,7 +310,7 @@ reasoning does not have to be repeated.
    before the review's fixes, and were not repeated after them. The remainder is
    hardware-bound: the five scoreboard tails (arm64 nginx, arm64 MongoDB
    insert, x86 PostgreSQL p99, x86 MySQL p50, and the arm64 PostgreSQL lock
-   wait — `NET_WAITBY` is now complete "by site and by task", `6137d73`) and
+   wait — `NET_WAITBY` is now complete "by site and by task", `9ccbdb1`) and
    c7gn. Next session: the first stand is
    `kernprobe-ec2.sh postgresql "talaria.stat=10000 talaria.netdr=1"`
    (arm64, us-west-2, `CASES=select1`) to name the lock's holder and fix it,

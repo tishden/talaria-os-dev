@@ -19,7 +19,7 @@
 #                                                       # forkap/shmrace/memrace/piperace, PAR at once (96 vCPUs
 #                                                       # on 64 cores — §10.5's recipe, default 96/24)
 #   UPONLY=1 ...                                        # stop after the build, keep the instance: hand work
-#   BISECT="f3f06bc a843638" VARIANTS=dir ABROUNDS=5    # the A/B of a regression: futexlat + svccost on
+#   BISECT="ec51a71 443bbb9" VARIANTS=dir ABROUNDS=5    # the A/B of a regression: futexlat + svccost on
 #                                                       # each commit and each dir/*.patch over HEAD
 #   ABONLY=1 ...                                        # the A/B alone: no gate, numbers, soak or loop
 #   CUSTOM="cmd" ...                                    # a targeted run: the command after the build, then down

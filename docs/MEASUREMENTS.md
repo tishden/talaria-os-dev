@@ -436,7 +436,7 @@ Numbers that only appear on real storage, and the defects they exposed:
 Stand: `c7g.metal` (Graviton3, Neoverse V1, 64 cores, no SMT), ap-northeast-1d,
 AL2023 arm64, QEMU 8.2.2 built natively in the stand image, `-M virt,gic-version=3,its=on
 -enable-kvm -cpu host -smp 4 -m 1024`. The kernel is the `arm64-port` branch at
-`0bda853` plus the `talaria.poweroff=1` end (`kernel/build-aarch64.sh` on the stand,
+`93c26a1` plus the `talaria.poweroff=1` end (`kernel/build-aarch64.sh` on the stand,
 `AARCH64_OBJCOPY=objcopy VDSO_CC_AARCH64=gcc`). One bring-up, `infra/aws/kvm-stand-aarch64.sh`;
 the pitfalls are in `docs/ENGINEERING-NOTES.md` §5.1.
 
@@ -478,7 +478,7 @@ not enough to do it before the workloads run.
 ### 10.1. The set under KVM: the syscall, the wakeup, the speedups, the soak (2026-09-30, night)
 
 The same stand, brought up again the same night (`c7g.metal`, ap-northeast-1d, QEMU 8.2.2,
-`-enable-kvm -cpu host -smp 4 -m 1024`), the kernel at `c1ea6e6` on `arm64-port` — the
+`-enable-kvm -cpu host -smp 4 -m 1024`), the kernel at `d663c02` on `arm64-port` — the
 whole ring-3 set of `docs/ARM64-PLAN.md` §10.4 with the four KVM-only fixes that the first
 boot of the night forced (a poisoned `TPIDR_EL1`, the SMCCC clobbers, the instruction cache
 after loaded code, the TLB on both sides of a root switch — ENGINEERING-NOTES §5.1).
@@ -533,7 +533,7 @@ probe, the soak's first consoles and the verdicts).
 ### 10.2. The stand on the 229-check gate, and the first EC2 facts (2026-10-03/04)
 
 The same `c7g.metal` brought up once more (`infra/aws/kvm-stand-aarch64.sh`, ~52 min, the
-instance self-destructed), the kernel at `f3f06bc` on `arm64-port`. The gate under KVM:
+instance self-destructed), the kernel at `ec51a71` on `arm64-port`. The gate under KVM:
 **229/1** — the one FAIL was the gate's own host check (`htree (host)`: e2fsck refused a
 tree whose `dx_root` carried the effective hash version instead of the raw one, a defect
 that only an arm64 host's unsigned-hash `mkfs` exposes; ENGINEERING-NOTES §6.1 item 26,
@@ -582,7 +582,7 @@ it (`m7i`) stay the PHC's ground. Log (local): the c7g.large RTT run, Linux vs T
 
 ### 10.4. The stand on the ordering audit (2026-10-04)
 
-`c7g.metal` once more (`infra/aws/kvm-stand-aarch64.sh LOOPN=1`, the kernel at `bd0e701`, the
+`c7g.metal` once more (`infra/aws/kvm-stand-aarch64.sh LOOPN=1`, the kernel at `d6cf72c`, the
 instance destroyed). The gate under KVM **268/0**.
 
 | what | number |
@@ -603,7 +603,7 @@ Log (local): the aarch64 run of 2026-10-04.
 
 ### 10.5. The wake path's step, bisected (2026-10-04)
 
-`c7g.metal` (`kvm-stand-aarch64.sh` at `e64d4bb`, `BISECT=… VARIANTS=…`, the instance
+`c7g.metal` (`kvm-stand-aarch64.sh` at `0651348`, `BISECT=… VARIANTS=…`, the instance
 destroyed). The gate under KVM **270/0** (`tsync` among the checks — the timer-storm fix
 holds on hardware); the soak 0 of 50 on ten modes, the parallel detector 0 of 96, one gate
 loop clean; the network as in §10.4 (udp p50 11.6 us, tcp 72 327 req/s, `netirq=1` tcp
@@ -615,20 +615,20 @@ median of the rounds (5 or 6), ns:
 
 | variant | futex | condvar | note |
 | --- | --- | --- | --- |
-| `f3f06bc` (the §10.2 stand) | 536 | 2176 | |
-| `bc96dd6` (IRQs masked before the restore) | 535 | 1949 | |
-| `04be5c4` (the RAM above 4 GiB) | 526 | 1937 | |
-| `ea24e3f` (the commit before the audit) | 518 / 511 / 541 | 2008 / 1956 / 2121 | three passes |
-| `a843638` (the audit) | 563 | 2596 | **the step** |
-| `88951b0` (the timer fix) | 577 | 2515 | |
-| HEAD `e64d4bb` | 572 / 569 / 572 | 2437 / 2465 / 2467 | three passes |
+| `ec51a71` (the §10.2 stand) | 536 | 2176 | |
+| `19237a4` (IRQs masked before the restore) | 535 | 1949 | |
+| `3ec1df4` (the RAM above 4 GiB) | 526 | 1937 | |
+| `4ab6bd7` (the commit before the audit) | 518 / 511 / 541 | 2008 / 1956 / 2121 | three passes |
+| `443bbb9` (the audit) | 563 | 2596 | **the step** |
+| `ad7b2a8` (the timer fix) | 577 | 2515 | |
+| HEAD `0651348` | 572 / 569 / 572 | 2437 / 2465 / 2467 | three passes |
 | HEAD − the SGI's `dsb` / − the membarrier ack / − the dead-space Acquire | 573 / 604 / 571 | 2396 / 2595 / 2452 | |
 | HEAD − all three | 577 | 2486 | not them |
 | HEAD + `rcpc` (Acquire as `ldapr`) | 566 | 2458 | no effect |
 | HEAD − the audit's `proc.rs` / `sched.rs` / `sync.rs` / `trap.rs` | 570 / 569 / 583 / 576 | 2484 / 2458 / 2534 / 2356 | |
 | HEAD − the audit's `syscall.rs` | 572 | 2180 | the condvar's spread 1983–2482 |
 | HEAD − the audit's memory files (`mem`, `paging`, `mmu`, …) | 541 | 2501 | |
-| `ea24e3f` / HEAD, all functions and loops 64-byte aligned | 530 / 580 | 2102 / 2438 | not alignment |
+| `4ab6bd7` / HEAD, all functions and loops 64-byte aligned | 530 / 580 | 2102 / 2438 | not alignment |
 | `svccost` (the bare entry), every variant | 130–134 | — | flat |
 
 The step is real and is the audit commit's: +50–60 ns on the futex RTT, +400–500 ns on the
@@ -642,8 +642,8 @@ the patches).
 
 ### 10.6. Phase 8 on hardware, and the step is not the audit's code (2026-10-04)
 
-`c7g.metal` (`kvm-stand-aarch64.sh` at `be5de19`, `LOOPN=0 SOAKN=20 PARN=48`, the A/B with
-`BISECT="ea24e3f be5de19"` and three revert patches, the instance destroyed after 28 minutes).
+`c7g.metal` (`kvm-stand-aarch64.sh` at `3322ffd`, `LOOPN=0 SOAKN=20 PARN=48`, the A/B with
+`BISECT="4ab6bd7 3322ffd"` and three revert patches, the instance destroyed after 28 minutes).
 The gate under KVM **305/0** — the new PMUv3, profile and gdb-stub checks among them: the
 counters with retired instructions and the 32-bit widening across a wrap on a Neoverse V1
 through KVM, the stub's steps, `hbreak` on a secondary and the watchpoint's silent
@@ -656,8 +656,8 @@ The A/B of §10.5's step, six interleaved rounds, the median p50 in ns:
 
 | variant | futex cross | condvar cross |
 | --- | --- | --- |
-| `ea24e3f` (before the audit) | 546 | 2243 |
-| HEAD `be5de19` | 574 | 2400 |
+| `4ab6bd7` (before the audit) | 546 | 2243 |
+| HEAD `3322ffd` | 574 | 2400 |
 | HEAD − the audit commit's WHOLE `kernel/src` (`rfull`) | 588 | 2432 |
 | HEAD − its wake-path files (`sched`, `sync`, `proc`, `syscall`, `trap`, `smp`, `gic`) | 560 | 2349 |
 | HEAD − its other files (the network, PCI, ext2, the ITS, the barriers, the wall clock) | 588 | 2429 |
@@ -670,8 +670,8 @@ grew, everything after the embedded data moved — so the next A/B is the embedd
 
 ### 10.7. Phase 7 on the metal: the five servers under KVM; the step is the layout's (2026-10-05)
 
-`c7g.metal` (`kvm-stand-aarch64.sh` at `192ff25`, the services' volumes uploaded as sparse
-tarballs, `BISECT=ea24e3f VARIANTS=infra/aws/ab-layout ABROUNDS=6`; provisioned in 98 s, the
+`c7g.metal` (`kvm-stand-aarch64.sh` at `ff00409`, the services' volumes uploaded as sparse
+tarballs, `BISECT=4ab6bd7 VARIANTS=infra/aws/ab-layout ABROUNDS=6`; provisioned in 98 s, the
 kernel built in 439 s). `kernel/test-aarch64-db.sh` under KVM, Neoverse V1, four vCPUs:
 
 | server | the product's wait (spinning) | `talaria.netmix=1000000` |
@@ -693,15 +693,15 @@ and no branch-retired counter is exposed. The gate's loop: 60 000 660 cycles, 12
 instructions, IPC 1.99.
 
 The A/B of §10.6's open question, six interleaved rounds, the median p50 in ns (the variants
-are patches over `192ff25`):
+are patches over `ff00409`):
 
 | variant | futex cross | futex same | condvar cross |
 | --- | --- | --- | --- |
-| `ea24e3f` | 539 | 540 | 1984 |
+| `4ab6bd7` | 539 | 540 | 1984 |
 | `notsync` (no `tsync/` embedded: the image 143 KB smaller) | 534 | 533 | 2064 |
 | `tsyncpad` (a blob of tsync's 143 424 bytes in its place) | 532 | 533 | 2033 |
 
-Both of today's variants are at `ea24e3f`'s level, with and without the embedded set: the
+Both of today's variants are at `4ab6bd7`'s level, with and without the embedded set: the
 +30-50 ns "step" of §10.5-§10.6 does not belong to any code or to the embedding — today's
 tree moved everything again (the kernel's `.bss` grew by 4 MB this session) and the step is
 gone. It was the layout's lottery; nothing to chase. (HEAD's own `futexlat` runs, not
@@ -726,10 +726,10 @@ minutes of a `c7g.metal` each), boots that fail out of 96:
 
 | kernel | instruments | futexlat | syncbench | tsync |
 | --- | --- | --- | --- | --- |
-| `192ff25` (§10.7's detector) | — | 10 | 13 | — |
-| `d9f7d04` (the image's range reserved) | `talaria.ptlog=1` | 0 | 0 | 0 |
-| `d9f7d04` | — | **17** | **13** | **1** |
-| `579113e` (the secondaries arm their entry only) | — | **0** | **0** | **0** |
+| `ff00409` (§10.7's detector) | — | 10 | 13 | — |
+| `c71517f` (the image's range reserved) | `talaria.ptlog=1` | 0 | 0 | 0 |
+| `c71517f` | — | **17** | **13** | **1** |
+| `18be6b3` (the secondaries arm their entry only) | — | **0** | **0** | **0** |
 
 The second row is the trap: the page-table journal's writes moved the timing and the race
 hid; the same kernel without it failed 31 of 288. The failures' signatures named the cause
@@ -778,7 +778,7 @@ committed, un-checkpointed transaction, then the same volume with phase 2's user
 mode — 6 blocks replayed, `journal2: RECOVERED OK`; `journal=data` — 14 blocks (the data in the
 transaction) replayed, `RECOVERED OK`. Phase 7's second exit gate, on the target hardware.
 
-### 10.10. The whole stand on `e95abf4`, and the guide's workload on a Graviton (2026-10-05)
+### 10.10. The whole stand on `ad8879d`, and the guide's workload on a Graviton (2026-10-05)
 
 **The KVM stand** (`kvm-stand-aarch64.sh`, `LOOPN=2`, `c7g.metal`, 59 minutes, destroyed by
 itself; the aarch64 run of 2026-10-05) on the commit with §10.8's fix:
@@ -911,12 +911,12 @@ behind a spinning hog on one core, 1000 wakes): p99 414 → 87-99 us, max 499 �
 
 ### 10.12. The KVM stand on the session's branch (2026-10-05)
 
-`kvm-stand-aarch64.sh` on `c7g.metal` from `4a69b13` (`arm64-s64`: the cache-counter fix and
-`wakeprobe` on top of `bb198d8`), 63 minutes, destroyed by itself (the aarch64 run of 2026-10-05):
+`kvm-stand-aarch64.sh` on `c7g.metal` from `c3aa802` (`arm64-s64`: the cache-counter fix and
+`wakeprobe` on top of `535d0b3`), 63 minutes, destroyed by itself (the aarch64 run of 2026-10-05):
 
 | step | result |
 | --- | --- |
-| the gate under KVM, once and three times in a loop | 323 PASS, 1 FAIL each time — the new "`-` (no counter)" assertion, true only under TCG: KVM's PMU counts the cache events (`LLC-miss=1:0x37 LLC-ref=3:0x36 branches=4:0x21 predictor-miss=2:0x22`); split by machine in `3bd2ef4` |
+| the gate under KVM, once and three times in a loop | 323 PASS, 1 FAIL each time — the new "`-` (no counter)" assertion, true only under TCG: KVM's PMU counts the cache events (`LLC-miss=1:0x37 LLC-ref=3:0x36 branches=4:0x21 predictor-miss=2:0x22`); split by machine in `e810ae7` |
 | the five servers, default wait / `netmix` | 15/0 / 15/0 (the JVM's speedup4 3.997 / 3.996, park p50 0.444 us) |
 | the soak, 13 modes × 50 boots | **0 of 650** |
 | the parallel detector, 6 modes × 96 boots, 24 at once | **0 of 576** |
@@ -933,8 +933,8 @@ arm64 (kernel 6.18, the playbook's tuning) — the same workload tree and the sa
 both sides, the ladder at 10/25/50/75/90 % of the lower of the two ceilings, three repeats of 60 s,
 the SERVICE latency judged (README §3.1: a point counts at a ratio below 0.95 or above 1.05; a
 scoreboard judges WITHIN a workload, each workload is its own bring-up). Two runs: redis, mongoose
-and mysql on `bb198d8` (`results/ec2all-a64-20261005-153336`); nginx, PostgreSQL and mongodb on
-`e8981e5` (`results/ec2all-a64-20261005-235147`) — their first bring-ups found three defects
+and mysql on `535d0b3` (`results/ec2all-a64-20261005-153336`); nginx, PostgreSQL and mongodb on
+`bb6a7f0` (`results/ec2all-a64-20261005-235147`) — their first bring-ups found three defects
 (below) and were re-taken with the fixes.
 
 | workload | p50 | p99 | p99.9 | p99.99 | points | ceilings, Talaria / Linux, k req/s |
@@ -1051,7 +1051,7 @@ on EC2 with the drop counters; a drop now costs what it costs Linux.
 
 ### 10.16. The re-take with both generators, and what the instruments named (2026-10-22/23)
 
-**The board** (ARM64-PLAN §12 item 0): HEAD 14b6720's kernel (`e1682979`), `c7g.xlarge` pairs,
+**The board** (ARM64-PLAN §12 item 0): HEAD a3e9b7d's kernel (`e1682979`), `c7g.xlarge` pairs,
 three repeats, each workload's ladder taken twice on one bring-up — with its own generator and
 with the Linux generator against the same Talaria server (`GENLINUX=1`,
 `bench/suite/lib/genboard.sh`). Two stands in two regions (`ec2all-a64-20261022-200847`
@@ -1114,11 +1114,11 @@ There is no unexplained microsecond; the price is the pass.
    doorbell (ena_com keeps them monotonic, the index is the low bits). The AENQ is 16 deep and
    the device posts an event about every second, so every board kernel told the device a
    wrapped head within a minute of boot. Found by reading `GET_STATS` every 10 s: the 33rd
-   admin command put the device into FATAL_ERROR. Fixed (`35b2bcd`).
+   admin command put the device into FATAL_ERROR. Fixed (`acc5a5c`).
 2. `munmap` of 14 pages per `pk` query cost 12.5 us: the arm64 range flush paid a `dsb ish`
    per page, and the "shootdown" after it was the same broadcast flush once more. One pair of
    barriers around back-to-back `tlbi` (Linux's `__flush_tlb_range`): 2.8 us on the stand
-   (`5e97998`).
+   (`5e84523`).
 3. The ceiling is bimodal within one boot — select1 45 052 / 25 689 / 45 179 req/s in three
    consecutive ten-second probes, pk 10 353 / 10 597 / 21 715 — and the slow state is the
    usual one (three stands of four; the 44.9 k / 15.9 k run of us-east-1 was the exception).
@@ -1153,7 +1153,7 @@ pass to the card that also drains the receive ring).
 The loss stays bounded to "between the two Talaria ENAs"; the next stand is a `c7gn`/`.metal`
 pair, not another counter.
 
-**ASIDs on arm64** (`5efa961`). Every process space got its own 16-bit ASID (TTBR0[63:48]); a
+**ASIDs on arm64** (`af68347`). Every process space got its own 16-bit ASID (TTBR0[63:48]); a
 switch between two spaces is the register write alone, where every root change used to be a
 full `tlbi vmalle1`. The hypothesis was PostgreSQL's ×2 (four to five processes switching on
 two cores, IPC 0.53-0.62). Measured on one stand (`kernprobe-a64-postgresql-20261025-000912`,
@@ -1162,7 +1162,7 @@ The ASIDs stay: correct under TCG (which flushes on an ASID change itself and ca
 stale-ASID class) and on a `c7g.metal` under KVM — the gate, the databases, 650 soak boots and
 576 parallel race boots with no failure (ARM64-PLAN §12.2).
 
-**PostgreSQL's ×2 named** (`8610cda`). In session 73's accounting the heavy long-lived tasks
+**PostgreSQL's ×2 named** (`0e4baf7`). In session 73's accounting the heavy long-lived tasks
 were the postmaster and PostgreSQL's background processes (65-79 s of "running" in a window),
 not the backends. Every one of them waits in `epoll_wait` on a MIXED set — its socket(s) next
 to the latch's signalfd or self-pipe and the postmaster's death pipe — and a mixed set was
@@ -1182,7 +1182,7 @@ p50 −5..−13 %, p99 −10..−16 %, pk@8882 p99 273 → 147 us. `netirq=1 net
 better (p50 +2..4 %, pk 17.2/21.3 k). The knob is declared by PostgreSQL's manifest
 (`netmix=1000000`), not by default: it touches every server with a mixed set.
 
-**Who else spins a mixed set** (`444cd35`): the stat block now counts the mixed-set waits that
+**Who else spins a mixed set** (`81723b9`): the stat block now counts the mixed-set waits that
 spun, split by whether another task was inside a network wait at the same time — only those
 are what `netmix` parks (one waiter of the set keeps the polling slot and spins under the knob
 too). A local census, every network workload under x86 KVM with `netmix=0`:
@@ -1251,7 +1251,7 @@ After §10.18 pk's ceiling was 21.2 k against Linux's 24.6 k. Six stands in us-w
 (`kernprobe-a64-postgresql-2026102{5,6}-*`), each phase A on both sides and then one phase
 per hypothesis on the same rise; the ceilings below are Talaria's pk unless said.
 
-**The double TLB invalidation (fixed, 4da5e4c).** On arm64 `flush_range` is already the
+**The double TLB invalidation (fixed, 8f4d5d0).** On arm64 `flush_range` is already the
 broadcast `TLBI VAAE1IS`; munmap/mprotect/madvise/relazy/unmap_ident then shot the same
 range down a second time with IPIs. `paging::flush_range_all` does one or the other: the
 per-request munmap 3.3 → 2.0 us, the stat block's acknowledgements 899 → 0 ns. KVM
@@ -1335,7 +1335,7 @@ the races 6×96 without a failure, the loop 0/1.
 
 ### 10.21. The PostgreSQL board after the TLB fix: both ceilings ours (2026-10-26)
 
-The whole PostgreSQL board on `731883c` (kernel `17a6a5f2`, the image of the KVM gate in
+The whole PostgreSQL board on `71489d6` (kernel `17a6a5f2`, the image of the KVM gate in
 §10.20), us-west-2, three repeats a point, the Talaria generator and then the Linux
 generator over the same ladder on the same rise (`ec2all-a64-20261026-145401`). The ceilings,
 req/s, the median of three probes:
@@ -1403,7 +1403,7 @@ text, ld-musl and libicu in large page-cache folios (75 heads, 1 105 tails over 
 Linux 6.18 maps with the Contiguous bit — 64 KB a TLB entry. Anonymous THP is off on both
 sides, the shared buffers are 4 KB pages on both.
 
-The kernel now does the same (`a13d069`, `ac80bba`, on by default since `c5aade8`,
+The kernel now does the same (`f0680b3`, `6ce897b`, on by default since `9b7f5c7`,
 `talaria.cont=0` — off): the ELF loader takes a read-only segment's pieces 64 KB-aligned and
 folds every whole group of sixteen; a read-only file `mmap` (a `.so`'s text) gets aligned
 frames and is folded after its content; fork copies the groups whole. A write that changes a
@@ -1440,7 +1440,7 @@ ring 3 (IPC 1.1 against 1.9).
 The stat block names the writes that unfold a group: of 422 in a run, 414 were a new address
 space's or a split's writes into a FRESH table frame, whose old bytes the guard read as
 Contiguous entries — they are written with `pte_w_raw` now; 8 were real (ld-musl's MAP_FIXED
-over its folded reservation of a library). The KVM `c7g.metal` gate on `c5aade8`, the hint on
+over its folded reservation of a library). The KVM `c7g.metal` gate on `9b7f5c7`, the hint on
 (the aarch64 run of 2026-10-27): 397/0, the databases 15/0 twice, the soak 13 modes
 x 50 boots and the race detector 6 x 96 with no failure, the loop 0 of 1. Gates: `conttext` (256 KB of counted increments run, forked, COW-rewritten and restored
 under two runner cores) and `dyn` with and without the knob; arm64 TCG 418/0, x86 573/0. Under
@@ -1642,7 +1642,7 @@ the next instrument names the lock's HOLDER at the moment a reader waits.
 
 ### 10.26. The cross-platform board (2026-10-30)
 
-Kernel `3c7e9ae`, six workloads and fifteen cases on c6i.xlarge and c7g.xlarge, 599 judged
+Kernel `b2f70e5`, six workloads and fifteen cases on c6i.xlarge and c7g.xlarge, 599 judged
 points: the full matrix, the cost per request and the conclusions are in
 [BOARD-2026-10.md](BOARD-2026-10.md). In short: on x86 Talaria's ceiling is 1.42x Linux's
 (geometric mean, above it in all fifteen cases) and a request ~30 % cheaper; on arm64 the
