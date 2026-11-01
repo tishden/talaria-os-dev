@@ -1269,7 +1269,10 @@ fn rust_syscall_inner(raw: &mut Frame) -> u64 {
     }
     // Pointer arguments must point into memory the process owns (uaccess.rs):
     // otherwise the handler would read or write kernel memory on its behalf.
-    if let Some(e) = crate::uaccess::gate(nr, args) {
+    // read/recvfrom: the buffer is checked only as far as the descriptor can deliver
+    // (`uaccess::read_cap`, ONE evaluation for the gate and the clamp below).
+    let rd_cap = if matches!(nr, 0 | 45) { crate::uaccess::read_cap(args[0]) } else { None };
+    if let Some(e) = crate::uaccess::gate(nr, args, rd_cap) {
         return e;
     }
     // The structures and flag words whose layout is the process's architecture's (`struct
@@ -1284,6 +1287,10 @@ fn rust_syscall_inner(raw: &mut Frame) -> u64 {
     if a1_is_fd(nr) { g.a1 = crate::proc::tr(args[0]) as u64; }
     if nr == 233 { g.a3 = crate::proc::tr(args[2]) as u64; }
     if nr == 9 && args[3] & 0x20 == 0 { g.a5 = crate::proc::tr(args[4]) as u64; }
+    // ...and the handler writes no more than the gate checked: a descriptor swapped by a sibling
+    // in between (a socket at the gate, a file now) gives a short read, not a write past the
+    // checked extent. A pipe or a socket cannot deliver more than the cap anyway.
+    if let Some(c) = rd_cap { g.a3 = g.a3.min(c); }
     let r = dispatch(&g, raw);
     // SAFETY: S1 — as `enter`: the same validated pointers, the same buffer.
     let r = unsafe { crate::arch::abi::leave(nr, &user_args, &mut bounce, r) };

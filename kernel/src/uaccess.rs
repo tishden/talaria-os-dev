@@ -369,9 +369,11 @@ pub fn check<M: Mem>(m: &M, nr: u64, a: &Args) -> bool {
     sig(nr).iter().all(|p| ptr_ok(m, p, a)) && nested(m, nr, a)
 }
 
-/// The kernel's view of process memory for `check`.
+/// The kernel's view of process memory for `check`. The field is THIS call's read cap
+/// (`read_cap`, computed once by the syscall path): the gate checks `ArgCap` against it and the
+/// handler is then held to the same length, so the two cannot disagree (see `read_cap`).
 #[cfg(not(talaria_host))]
-pub struct Live;
+pub struct Live(pub Option<u64>);
 
 #[cfg(not(talaria_host))]
 impl Mem for Live {
@@ -398,22 +400,33 @@ impl Mem for Live {
         // loads.
         unsafe { core::ptr::read_volatile(uptr::<u8>(addr)) }
     }
-    /// The gate runs before the fd translation, so `fd` is the process's number. The caps
-    /// are the owners' own constants (`netsys::read_cap`, `proc::pipe_capacity`): the handler
-    /// copies into the buffer through those same bounded rings, never past them.
-    fn read_cap(&self, fd: u64) -> Option<u64> {
-        let h = crate::proc::tr(fd);
-        if crate::proc::pipe_is(h) { return Some(crate::proc::pipe_capacity() as u64); }
-        crate::netsys::read_cap(h).map(|c| c as u64)
-    }
+    fn read_cap(&self, _fd: u64) -> Option<u64> { self.0 }
+}
+
+/// The most one `read`/`recvfrom` through the process's descriptor `fd` can deliver: a pipe's
+/// ring, a socket's receive buffer (the owners' own constants, `netsys::read_cap`,
+/// `proc::pipe_capacity`), None for a file — the whole asked length.
+///
+/// It runs before the fd translation, so `fd` is the process's number. The syscall path computes
+/// it ONCE per call, the gate validates the buffer that far, and the handler's length is then
+/// CLAMPED to it (`syscall::rust_syscall_inner`). Deciding by the descriptor's type twice — once
+/// here, once in the handler — let a sibling thread swap the descriptor in between
+/// (`close(5)` + `open(file)` → 5): the gate had checked 128 KiB of a socket's buffer and the ext2
+/// read then wrote up to the whole asked length past it. With the clamp a swapped descriptor
+/// gives a short read, which POSIX allows.
+#[cfg(not(talaria_host))]
+pub fn read_cap(fd: u64) -> Option<u64> {
+    let h = crate::proc::tr(fd);
+    if crate::proc::pipe_is(h) { return Some(crate::proc::pipe_capacity() as u64); }
+    crate::netsys::read_cap(h).map(|c| c as u64)
 }
 
 /// Entry point from the syscall path: `Some(-EFAULT)` refuses the call.
 #[cfg(not(talaria_host))]
 #[inline]
-pub fn gate(nr: u64, args: [u64; 6]) -> Option<u64> {
+pub fn gate(nr: u64, args: [u64; 6], rd_cap: Option<u64>) -> Option<u64> {
     if !ENABLED.load(core::sync::atomic::Ordering::Relaxed) { return None; }
-    if check(&Live, nr, &Args(args)) { None } else { Some(EFAULT) }
+    if check(&Live(rd_cap), nr, &Args(args)) { None } else { Some(EFAULT) }
 }
 
 #[cfg(test)]
