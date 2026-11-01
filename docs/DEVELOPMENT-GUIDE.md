@@ -120,7 +120,7 @@ a warning: a degraded kernel, not a broken build.
      (`int 15h E820`), assemble a multiboot2 and go into the same `mb2_start`. There is no GRUB
      in that chain at all. The RSDP tags (14/15) tboot does NOT assemble — the kernel looks for the
      RSDP itself (see below), and that turned out to be decisive on bare metal.
-   - **arm64** (the `arm64-port` branch, `docs/ARM64-PLAN.md` §4.2) has two of its own, and
+   - **arm64** (since v1.14, `docs/ARM64-PLAN.md` §4.2) has two of its own, and
      below `arch/aarch64/kmain.rs` they are the same `hvm_start_info` again: the **Linux
      `Image` header** (`qemu-system-aarch64 -kernel`: `x0` = the device tree, read by
      `dtb.rs`), and **UEFI** (`edk2`, EC2 Graviton): the arm64 half of `kernel/uefi-stub`

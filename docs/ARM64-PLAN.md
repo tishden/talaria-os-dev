@@ -8,7 +8,7 @@ the kernel leans on, what replaces it, in which order it is built, and by which
 gate each step is judged. The numbers here are estimates and are marked as such;
 the measurements come later and go to `docs/MEASUREMENTS.md`.
 
-Status (2026-10-31, branch `arm64-port`): **the port is complete and merge-ready.** All nine
+Status (2026-11-01): **the port is complete and merged into `main` (tag `v1.14`).** All nine
 phases and the direct map's seven stages are done (`docs/ROADMAP.md` §4.7; §10–§12 below): the
 kernel boots on QEMU `virt`, on `c7g.metal` under KVM and on EC2 Graviton AMIs, runs ring 3 with
 one source per test for both machines, the process model, virtio-net and the ENA with LLQ,
@@ -16,12 +16,13 @@ NVMe, the GICv3 ITS, ext2/jbd2, SNTP, the PMU and the profiler, and the six work
 memory model was audited, the kernel lives in the higher half with W^X, and the kernel's memory
 comes from any RAM via the direct map. The first arm64 scoreboard put Talaria's tails under
 Linux's on a Graviton3 and named the gaps that were ours; §11 lists what was closed after it and
-§12 the scoreboard board; §12.12 the pre-merge review and its six fixes. The local gate is
-green: x86 `test.sh` 573/0 + host 22/0, arm64
-`test-aarch64.sh` (+net+pwr) 419/0 and `-db` 14/0, `kernel-unit` 303/303, clippy `-D warnings`
-clean in both configurations, `validate.sh` 14/0, `export-public.sh` clean. What remains is
-hardware-bound (five scoreboard tails + c7gn) and the merge into `main` — the owner's call
-(§11 item 6). The statuses below are the days leading up to this, kept for what they list.
+§12 the scoreboard board; §12.12 the pre-merge review and its six fixes. The local gate on the
+merged tree: x86 `test.sh` 573/0 + host 22/0, arm64 `test-aarch64.sh` (+net+pwr) 419/0,
+`kernel-unit` 303/303, clippy `-D warnings` clean in all four configurations, `export-public.sh`
+clean; the databases (`test-aarch64-db.sh` 14/0, `validate.sh` 14/0) passed on 2026-10-31,
+before the review's fixes. What remains is hardware-bound (five scoreboard tails + c7gn); the
+merge was done on 2026-11-01 after the pre-merge review (§11 item 6, §12.12). The statuses
+below are the days leading up to this, kept for what they list.
 
 Status (2026-10-04, branch `arm64-port`): **the first pass of phase 5 (the ordering audit)
 is done by reading, and phase 4's tails are closed under TCG** (§10.10). The audit found more
@@ -2775,7 +2776,8 @@ order of work:
    Gates on both machines: `wakedef` in `talaria.test=` mode (KVM p99 96-97 us, lost 0 — 1000 of
    1000 lost before; TCG judges lost 0) and `pinmove` (a thread walks 0 → 1 → 2 → 1 → 0 → 2 → 0
    by `sched_setaffinity` and runs on every core it asked for, on both).
-6. **The merge of `arm64-port` into `main`** — the owner's call; before it, both regressions and
+6. **The merge of `arm64-port` into `main`** — DONE 2026-11-01 (tag `v1.14`, after the
+   pre-merge review §12.12). It was the owner's call; before it, both regressions and
    `validate.sh` on the HEAD to be merged. **The pre-merge run, 2026-10-22, on the HEAD that closes
    items 2a, 2b(2) and 5:** `kernel/test.sh` 570/0 plus the host's 22/0, `kernel-unit` 303/0,
    clippy `-D warnings` clean in both configurations, `kernel/test-aarch64.sh` (with `-net` and
@@ -3054,7 +3056,8 @@ What stays open, by the board: arm64 nginx (ceiling 0.81-0.85x, file's top-rung 
 against 102), arm64 MongoDB insert's top-rung p99 (397 against 256 us), PostgreSQL's top-rung
 p99 on x86 (77 against 47 us select1), MySQL's low-rate p50 on x86 (+4-9 %), and the arm64
 PostgreSQL top rung's lock wait (§12.10: `NET_WAITBY` is in the tree, not yet taken on a
-stand). Item 1 (c7gn) was not taken. The merge of `arm64-port` into `main` is a separate step.
+stand). Item 1 (c7gn) was not taken. The merge of `arm64-port` into `main` was a separate step (done
+2026-11-01, §12.12).
 
 What is NOT in this plan, on purpose: the lazy FP save (§11 item 2e, 17 ns of a 130 ns svc —
 last, and only if a point needs exactly that), a new slice or threshold value without an

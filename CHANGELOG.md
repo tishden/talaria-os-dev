@@ -10,7 +10,9 @@ the libtsync API may change without migration.
 
 ---
 
-## Unreleased — the arm64 port (branch `arm64-port`, 2026-09-29 … 2026-11-01)
+## v1.14 (2026-11-01) — the arm64 port
+
+Developed on a branch from 2026-09-29 and merged into `main` on 2026-11-01.
 
 Talaria runs on AArch64: QEMU `virt`, a `c7g.metal` under KVM, and EC2 Graviton AMIs
 (`c7g.large`/`xlarge`, UEFI via edk2, ENA with LLQ, NVMe, the GICv3 ITS). The plan,

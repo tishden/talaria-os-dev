@@ -278,7 +278,8 @@ reasoning does not have to be repeated.
    `docs/ARM64-PLAN.md`: the inventory of every x86 mechanism the kernel leans
    on and its replacement, nine phases with named gates, the risks ranked.
    **All nine phases and the direct map's seven stages are done on the
-   `arm64-port` branch** (§10 of the plan, 2026-09-29 → 2026-10-22): the kernel
+   `arm64-port` branch** (§10 of the plan, 2026-09-29 → 2026-10-22), **merged
+   into `main` as v1.14 on 2026-11-01**: the kernel
    boots on QEMU `virt`, on a `c7g.metal` under KVM and on EC2 Graviton AMIs
    (`c7g.large`/`xlarge`), runs ring 3 with one source per test for both
    machines (the C++ set included), the process model, signals, core dumps, the
@@ -297,15 +298,16 @@ reasoning does not have to be repeated.
    the test modes' tickless cores) and the few tails left on purpose. The
    regression is `kernel/test-aarch64.sh` (+ `-net`, `-db`, `-pwr`), ~400
    checks under TCG, the timing gates and the memory-ordering soak on the KVM
-   stand (`infra/aws/kvm-stand-aarch64.sh`). The merge into `main` is the
-   owner's call (§11 item 6).
+   stand (`infra/aws/kvm-stand-aarch64.sh`). Merged into `main` on 2026-11-01
+   (tag `v1.14`, §11 item 6) after the pre-merge review (ARM64-PLAN §12.12).
 
-   Pre-merge state (2026-11-01, after the pre-merge review's six fixes,
-   ARM64-PLAN §12.12): the whole local gate is green on `arm64-port`
-   — x86 `test.sh` 573/0 + host 22/0, arm64 `test-aarch64.sh` (+net+pwr) 419/0
-   and `-db` 14/0, `kernel-unit` 303/303, clippy `-D warnings` clean in both
-   configurations, `validate.sh` 14/0, the power-cut probe PASSED, and
-   `tools/export-public.sh` clean (0 problems, no leaks). The remainder is
+   The merged state (2026-11-01, after the pre-merge review's six fixes,
+   ARM64-PLAN §12.12): x86 `test.sh` 573/0 + host 22/0, arm64
+   `test-aarch64.sh` (+net+pwr) 419/0, `kernel-unit` 303/303, clippy
+   `-D warnings` clean in all four configurations, `tools/export-public.sh`
+   clean (0 problems, no leaks); the databases' gates (`test-aarch64-db.sh`
+   14/0, `validate.sh` 14/0) and the power-cut probe passed on 2026-10-31,
+   before the review's fixes, and were not repeated after them. The remainder is
    hardware-bound: the five scoreboard tails (arm64 nginx, arm64 MongoDB
    insert, x86 PostgreSQL p99, x86 MySQL p50, and the arm64 PostgreSQL lock
    wait — `NET_WAITBY` is now complete "by site and by task", `6137d73`) and

@@ -25,7 +25,7 @@ open, and the rate ladder starts from the ceiling both systems share.
 
 Every lost point is analysed by name (`docs/MEASUREMENTS.md` §2.3).
 
-> **Status: v1.13.** Provided as is, without warranty. Interfaces are not
+> **Status: v1.14** — x86-64 and arm64 (EC2 Graviton, QEMU `virt`). Provided as is, without warranty. Interfaces are not
 > stable before 1.0: the `cell.manifest` format, the `talaria.*` boot
 > parameters, the Talaria-specific syscalls (1000+, 4600+) and the libtsync API
 > may change without backward compatibility.
