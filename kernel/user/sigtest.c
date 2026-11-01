@@ -198,6 +198,18 @@ int main(int argc, char **argv) {
     CHECK(dfd >= 0 && fstatat(dfd, "x.txt", &st, 0) == 0 && st.st_size == 10, "openat/fstatat relative to dirfd");
     xf = openat(dfd, "x.txt", O_RDONLY); char *m = mmap(0, 4096, PROT_READ, MAP_PRIVATE, xf, 0);
     CHECK(m != MAP_FAILED && !memcmp(m, "0123456789", 10), "file mmap MAP_PRIVATE content"); munmap(m, 4096); close(xf); unlinkat(dfd, "x.txt", 0); close(dfd); }
+  /* 17. mprotect over a HOLE maps nothing: the kernel used to turn the empty entry into a present
+     one with frame 0, so after munmap + mprotect(RW) the process read and wrote physical page 0.
+     Judged without a fault (the gates refuse [fault] lines): the syscall gate walks the page
+     tables, so a write() FROM the hole must be EFAULT — with the defect it found a present page. */
+  { char *pg = mmap(0, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    pg[0] = 1; pg[4096] = 1;                         /* both present, one page table */
+    munmap(pg + 4096, 4096);
+    mprotect(pg + 4096, 4096, PROT_READ | PROT_WRITE); /* Linux: ENOMEM; either way no mapping */
+    int hp[2]; pipe(hp); errno = 0;
+    long w = write(hp[1], pg + 4096, 1);
+    CHECK(w == -1 && errno == EFAULT && pg[0] == 1, "mprotect over a hole maps nothing (a write from it is EFAULT)");
+    close(hp[0]); close(hp[1]); munmap(pg, 4096); }
   printf(fails ? "sigtest: FAILED (%d)\n" : "sigtest: ALL OK\n", fails);
   return 0;
 }

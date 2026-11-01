@@ -1521,6 +1521,12 @@ pub fn protect(vaddr: u64, len: u64, writable: bool, exec: bool) {
                 }
                 // the page was PROT_NONE — return present and remove the mark
                 if pte_r(pte) & PTE_PNONE != 0 { pte_w(pte, (pte_r(pte) | PTE_P) & !PTE_PNONE); }
+                // A HOLE (neither present, nor a reservation, nor PROT_NONE): nothing to change.
+                // It used to fall through to the rewrite below, which made `0 | P | US [| RW]` of
+                // the empty entry — `munmap(p); mprotect(p, RW)` gave ring 3 physical page 0
+                // (and before strict, the frame of the identity at that address). Gate: sigtest's
+                // "mprotect over a hole maps nothing".
+                if pte_r(pte) & PTE_P == 0 { a += 0x1000; continue; }
                 // A COW page + a request to make it writable: first untie the COW (a copy/the ownership),
                 // otherwise a write without a fault would go into the frame shared with the child.
                 // cow_fault CHANGES the table (it may split a 2M leaf), so the write
