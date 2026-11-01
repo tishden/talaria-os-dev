@@ -305,9 +305,9 @@ reasoning does not have to be repeated.
    ARM64-PLAN §12.12): x86 `test.sh` 573/0 + host 22/0, arm64
    `test-aarch64.sh` (+net+pwr) 419/0, `kernel-unit` 303/303, clippy
    `-D warnings` clean in all four configurations, `tools/export-public.sh`
-   clean (0 problems, no leaks); the databases' gates (`test-aarch64-db.sh`
-   14/0, `validate.sh` 14/0) and the power-cut probe passed on 2026-10-31,
-   before the review's fixes, and were not repeated after them. The remainder is
+   clean (0 problems, no leaks), the databases' gates `test-aarch64-db.sh`
+   14/0 and `validate.sh` 14/0 (repeated on `v1.14`); the power-cut probe
+   passed on 2026-10-31, before the review's fixes. The remainder is
    hardware-bound: the five scoreboard tails (arm64 nginx, arm64 MongoDB
    insert, x86 PostgreSQL p99, x86 MySQL p50, and the arm64 PostgreSQL lock
    wait — `NET_WAITBY` is now complete "by site and by task", `9ccbdb1`) and

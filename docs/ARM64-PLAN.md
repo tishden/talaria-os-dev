@@ -19,8 +19,8 @@ Linux's on a Graviton3 and named the gaps that were ours; §11 lists what was cl
 §12 the scoreboard board; §12.12 the pre-merge review and its six fixes. The local gate on the
 merged tree: x86 `test.sh` 573/0 + host 22/0, arm64 `test-aarch64.sh` (+net+pwr) 419/0,
 `kernel-unit` 303/303, clippy `-D warnings` clean in all four configurations, `export-public.sh`
-clean; the databases (`test-aarch64-db.sh` 14/0, `validate.sh` 14/0) passed on 2026-10-31,
-before the review's fixes. What remains is hardware-bound (five scoreboard tails + c7gn); the
+clean, the databases `test-aarch64-db.sh` 14/0 and `validate.sh` 14/0 (PostgreSQL, MariaDB,
+MongoDB, OpenJDK 21, ClickHouse on both machines; repeated on `v1.14` after the review's fixes). What remains is hardware-bound (five scoreboard tails + c7gn); the
 merge was done on 2026-11-01 after the pre-merge review (§11 item 6, §12.12). The statuses
 below are the days leading up to this, kept for what they list.
 
