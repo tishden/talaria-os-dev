@@ -235,8 +235,10 @@ fn note_released() {
     if t0 == 0 { return; }
     let d = tsc::rdtsc().wrapping_sub(t0);
     NET_HELD_TSC.fetch_add(d, Relaxed);
-    let r = NET_SITE_CUR.swap(NET_SITE_N as u32, Relaxed) as usize;
-    if r < NET_SITE_N { NET_SITE[r].2.fetch_add(d, Relaxed); }
+    if NETDR.load(Relaxed) {
+        let r = NET_SITE_CUR.swap(NET_SITE_N as u32, Relaxed) as usize;
+        if r < NET_SITE_N { NET_SITE[r].2.fetch_add(d, Relaxed); }
+    }
     // THE HISTOGRAM OF THE HOLDING. One "worst" does not judge: the maximum is ONE
     // event, and it may turn out to be both the host's departure of the vCPU and a real long
     // section. They are told apart by the frequency: how many holdings are longer than 100 us and WHO
@@ -304,7 +306,9 @@ pub static NET_HELD_HIST: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 /// the work and which are the overhead; this table does — by the context (a tick, the card's
 /// line) or the syscall the task is in, and whether the take was a pass of the stack
 /// (`NET_SITE_PASS`): (key, takes, held cycles, waited cycles). Printed cumulative; the parser
-/// takes the difference between blocks.
+/// takes the difference between blocks. An instrument: kept only under `talaria.netdr=1` — on
+/// by default it cost every take of the lock a scan of this table and three stores into lines
+/// every core shares.
 pub const NET_SITE_N: usize = 16;
 pub static NET_SITE: [(AtomicU32, AtomicU64, AtomicU64, AtomicU64); NET_SITE_N] =
     [const { (AtomicU32::new(u32::MAX), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; NET_SITE_N];
@@ -595,12 +599,13 @@ fn net_enter(wait: bool) -> Option<NetGuard> {
             if spun && (h_task as usize) < crate::sched::NTASKS {
                 NET_WAITBY_TASK[h_task as usize].fetch_add(now.wrapping_sub(h_tt), Relaxed);
             }
-            {   let r = site_row(site_key());
+            if by {   // the by-site and by-task tables (an instrument, talaria.netdr=1)
+                let r = site_row(site_key());
                 let w = if spun { now.wrapping_sub(t0) } else { 0 };
                 if (r as usize) < NET_SITE_N { NET_SITE[r as usize].1.fetch_add(1, Relaxed); NET_SITE[r as usize].3.fetch_add(w, Relaxed); }
                 SITE_LAST_WAIT.store(w, Relaxed);
                 NET_SITE_CUR.store(r, Relaxed);
-                if by { NET_TASK_CUR.store(crate::sched::current_id() as u32, Relaxed); }
+                NET_TASK_CUR.store(crate::sched::current_id() as u32, Relaxed);
             }
             NET_SINCE.store(now, Relaxed);
             return Some(NetGuard(cpu as i32));

@@ -618,22 +618,24 @@ pub fn dump() {
                 t, c, c * 100 / t, ms(crate::netsys::NET_WAIT_TSC.load(R)),
                 ms(crate::netsys::NET_HELD_TSC.load(R)), us(crate::netsys::NET_HELD_MAX.load(R)),
                 h[0].load(R), h[1].load(R), h[2].load(R), h[3].load(R));
-            // by site (netsys::NET_SITE), cumulative: takes / held us / waited us
-            crate::print!("stat: the stack's lock by site (takes/held us/waited us):");
-            for e in crate::netsys::NET_SITE.iter() {
-                let k = e.0.load(R);
-                if k == u32::MAX { continue; }
-                let base = k & !crate::netsys::NET_SITE_PASS;
-                let pass = if k & crate::netsys::NET_SITE_PASS != 0 { "+pass" } else { "" };
-                match base {
-                    0x1_0000 => crate::print!(" tick{}", pass),
-                    0x2_0000 => crate::print!(" line{}", pass),
-                    0xffff => crate::print!(" notask{}", pass),
-                    n => crate::print!(" sys{}{}", n, pass),
+            // by site (netsys::NET_SITE, talaria.netdr=1), cumulative: takes / held us / waited us
+            if crate::netsys::NET_SITE.iter().any(|e| e.0.load(R) != u32::MAX) {
+                crate::print!("stat: the stack's lock by site (takes/held us/waited us):");
+                for e in crate::netsys::NET_SITE.iter() {
+                    let k = e.0.load(R);
+                    if k == u32::MAX { continue; }
+                    let base = k & !crate::netsys::NET_SITE_PASS;
+                    let pass = if k & crate::netsys::NET_SITE_PASS != 0 { "+pass" } else { "" };
+                    match base {
+                        0x1_0000 => crate::print!(" tick{}", pass),
+                        0x2_0000 => crate::print!(" line{}", pass),
+                        0xffff => crate::print!(" notask{}", pass),
+                        n => crate::print!(" sys{}{}", n, pass),
+                    }
+                    crate::print!("={}/{}/{}", e.1.load(R), us(e.2.load(R)), us(e.3.load(R)));
                 }
-                crate::print!("={}/{}/{}", e.1.load(R), us(e.2.load(R)), us(e.3.load(R)));
+                crate::println!();
             }
-            crate::println!();
             // who held the lock while a site waited (netsys::NET_WAITBY, talaria.netdr=1), us since the previous block
             {
                 use crate::netsys::{NET_SITE, NET_SITE_N, NET_SITE_PASS, NET_WAITBY};
