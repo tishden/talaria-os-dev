@@ -2517,7 +2517,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
                 Some(f) => {
                     // Above 4 GB too: the high area's gigabytes are identity leaves in every
                     // AS, and one a process has overlaid is not (`ident_leaf_overlap`).
-                    if virt_to_phys(f) == f { fr = f; break; }
+                    if frame_fits(f) { fr = f; break; }
                     rejected[nrej] = f; nrej += 1;
                 }
                 None => break,
@@ -2560,7 +2560,7 @@ pub fn lazy_fault(vaddr: u64) -> bool {
             if e2 & PTE_P != 0 || e2 & PTE_LAZY == 0 || e2 & PTE_PNONE != 0 { break; }
             if e2 & (LAZY_W | LAZY_X) != e & (LAZY_W | LAZY_X) { break; } // different rights — a different mmap
             let f2 = match crate::mem::alloc_contig_node(1, node) { Some(f) => f, None => break };
-            if virt_to_phys(f2) != f2 { crate::mem::free_contig(f2, 1); break; }
+            if !frame_fits(f2) { crate::mem::free_contig(f2, 1); break; }
             core::ptr::write_bytes(kptr::<u8>(f2), 0, 4096);
             let mut n2 = f2 | PTE_P | PTE_US | PTE_PRIV;
             if e2 & LAZY_W != 0 { n2 |= PTE_RW; }
@@ -2575,6 +2575,34 @@ pub fn lazy_fault(vaddr: u64) -> bool {
     true
 }
 
+/// Can a fresh frame `f` serve a process mapping. Without strict the kernel may still reach a
+/// frame by its identity address, so a frame whose identity this AS has overlaid with a mapping
+/// of its own (`ident_leaf_overlap`, a MAP_FIXED over the former identity) would be written
+/// through the process's page instead. Under strict a process space has no RAM identity at all
+/// and every kernel access goes through `kptr` — the check guards nothing there, and refusing
+/// such frames only starved a process whose own mapping covers the frames' addresses (a
+/// zero-based compressed-oops heap at 28..32 GiB on a large machine: eight consecutive bump
+/// frames rejected, a SIGSEGV on its own heap).
+#[inline]
+fn frame_fits(f: u64) -> bool { strict() || virt_to_phys(f) == f }
+/// One frame for a process mapping from `node`, up to eight tries; a frame that does not fit is
+/// RETURNED to the allocator (it used to be dropped here — up to eight pages lost per call).
+fn alloc_fitting_frame(node: u8) -> Option<u64> {
+    let mut rejected: [u64; 8] = [0; 8];
+    let mut nrej = 0usize;
+    let mut fr = None;
+    for _ in 0..8 {
+        match crate::mem::alloc_contig_node(1, node) {
+            Some(f) if frame_fits(f) => { fr = Some(f); break; }
+            Some(f) => { rejected[nrej] = f; nrej += 1; }
+            None => break,
+        }
+    }
+    for &f in &rejected[..nrej] { crate::mem::free_contig(f, 1); }
+    LAZY_REJECT.fetch_add(nrej as u64, core::sync::atomic::Ordering::Relaxed);
+    fr
+}
+
 /// Map the pages [vaddr, vaddr+pages*4K) in the active AS onto fresh zeroed frames (PRIV, RW, NX),
 /// replacing the former mapping (MAP_FIXED). It returns false when there is not enough memory.
 pub fn map_fresh_pages(vaddr: u64, pages: u64) -> bool {
@@ -2587,10 +2615,7 @@ pub fn map_fresh_pages(vaddr: u64, pages: u64) -> bool {
     let mut a = vaddr;
     for _ in 0..pages {
         // the frame must not coincide with a privately mapped identity vaddr of this AS (a write through identity)
-        let mut fr = 0u64;
-        for _ in 0..8 { match crate::mem::alloc_contig_node(1, node) { Some(f) => { if virt_to_phys(f) == f { fr = f; break; } }
-            None => return false } }
-        if fr == 0 { return false; }
+        let fr = match alloc_fitting_frame(node) { Some(f) => f, None => return false };
         // SAFETY: P1 — a frame straight from the allocator, zeroed through the identity map before
         // anybody can see it.
         unsafe { core::ptr::write_bytes(kptr::<u8>(fr), 0, 4096); }
@@ -2613,15 +2638,11 @@ pub fn map_fresh_pages_cont(vaddr: u64, pages: u64) -> bool {
     while a < end {
         let n = if a & 0xFFFF == 0 && a + 0x1_0000 <= end { 16 } else { 1 };
         let fr = if n == 16 { crate::mem::alloc_workload_aligned(16, 0x1_0000) } else { None }
-            .filter(|&f| virt_to_phys(f) == f);
+            .filter(|&f| frame_fits(f));
         let (fr, n) = match fr {
             Some(f) => (f, 16),
             None => {
-                let mut fr = 0u64;
-                for _ in 0..8 { match crate::mem::alloc_contig_node(1, node) { Some(f) => { if virt_to_phys(f) == f { fr = f; break; } }
-                    None => return false } }
-                if fr == 0 { return false; }
-                (fr, 1)
+                match alloc_fitting_frame(node) { Some(f) => (f, 1), None => return false }
             }
         };
         // SAFETY: P1 — frames straight from the allocator, zeroed before anybody can see them.
